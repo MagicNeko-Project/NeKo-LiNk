@@ -133,29 +133,6 @@ func NewVPNInstance(cfg Config) *VPNInstance {
 	return v
 }
 
-func (v *VPNInstance) Start() {
-	log.Printf("[%s] Starting %s mode on %s...", v.Cfg.InterfaceName, v.Cfg.Mode, v.Cfg.LocalAddr)
-	v.InitTUN()
-	v.InitNetwork()
-
-	// Handle signals
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-	<-c
-	log.Println("Shutting down...")
-}
-
-func (v *VPNInstance) StartClient() {
-	v.InitTUN()
-	v.InitNetwork()
-	
-	go v.TUNReaderLoop()
-}
-
-// --- TAP ---
-
-// --- TUN ---
-
 func (v *VPNInstance) InitTUN() {
 	// Create TUN device
 	dev, err := tun.CreateTUN(v.Cfg.InterfaceName, v.Cfg.MTU)
@@ -173,6 +150,9 @@ func (v *VPNInstance) InitTUN() {
 		log.Printf("[%s] Interface Up (TUN L3)", v.Cfg.InterfaceName)
 	}()
 }
+
+
+
 
 func (v *VPNInstance) IfaceWrite(data []byte) {
 	// TUN Write works with batch ([][]byte).
@@ -503,10 +483,19 @@ func (v *VPNInstance) XDPListenerLoop() {
 		if err != nil { continue }
 		if pkt == nil { continue }
 		
-		// Parse UDP Payload
-		// Eth(14) + IP(20) + UDP(8) = 42 bytes header
-		if len(pkt) < 42 { continue }
-		data := pkt[42:]
+		// Parse IP Payload (XDP returns Eth+IP+Payload)
+		// UDP Header = 42 bytes (14 Eth + 20 IP + 8 UDP)
+		// Raw Header = 38 bytes (14 Eth + 20 IP + 4 IDX)
+		// But RawListenerLoop strips IDX (4). XDPListenerLoop receives full frame.
+		// If we use Raw, sender sends [IDX][Nonce][Ciphertext].
+		// So Raw Header on wire is 14+20+4 = 38.
+		// Payload starts at 38.
+		
+		headerLen := 42
+		if v.Cfg.Protocol == "raw" { headerLen = 38 }
+		
+		if len(pkt) < headerLen { continue }
+		data := pkt[headerLen:]
 		
 		// Sender Addr? 
 		// We can extract SrcIP/Port from packet headers.
@@ -940,6 +929,29 @@ func main() {
 	
 	<-c
 	log.Println("Shutting down...")
+}
+func (v *VPNInstance) Start() {
+	v.InitTUN()
+	v.InitNetwork()
+	
+	// Start TUN Reader (L3 -> Network)
+	go v.TUNReaderLoop()
+	
+	if v.Cfg.Mode == "client" {
+		go v.KeepaliveLoop()
+		if v.Cfg.SocksBind != "" {
+			go v.StartSocks5()
+		}
+	} else {
+		// Server Mode Log
+		log.Printf("[%s] Server Ready (UDP/Raw)", v.Cfg.InterfaceName)
+	}
+
+	// Handle signals (Per instance blocking - acceptable for 1 instance)
+	// If multiple instances, main() loop will block here and 2nd instance won't start.
+	// FIX: Don't block here. Let main() handle signal.
+	// Remove signal handling from Start().
+	// main.go main() handles signal and waits.
 }
 
 func runCmd(name string, args ...string) {
