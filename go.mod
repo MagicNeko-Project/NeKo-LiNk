@@ -1,10 +1,17 @@
 module vpn
 
-go 1.19
+go 1.24.0
+
+toolchain go1.24.12
 
 require (
-	github.com/songgao/water v0.0.0-20200317203138-2b4b6d7c09d8
-	golang.org/x/crypto v0.10.0
+	github.com/cilium/ebpf v0.20.0
+	golang.org/x/crypto v0.47.0
+	golang.org/x/net v0.49.0
+	golang.zx2c4.com/wireguard v0.0.0-20250521234502-f333402bd9cb
 )
 
-require golang.org/x/sys v0.10.0 // indirect
+require (
+	golang.org/x/sys v0.40.0 // indirect
+	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
+)
