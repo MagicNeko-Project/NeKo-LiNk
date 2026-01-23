@@ -23,75 +23,451 @@ import (
 	"golang.org/x/crypto/chacha20poly1305"
 )
 
-// Config 结构定义
+// --- Configuration ---
+
 type Config struct {
-	ServerAddr    string `json:"server_addr"`
-	Protocol      string `json:"protocol"`
-	IPProtocolNum int    `json:"ip_protocol_num"`
-	BasePort      int    `json:"base_port"`
-	PortCount     int    `json:"port_count"`
-	Key           string `json:"key"`
-	LocalAddr     string `json:"local_addr"`
-	Mode          string `json:"mode"`
 	InterfaceName string `json:"interface_name"`
+	Mode          string `json:"mode"`
+	LocalAddr     string `json:"local_addr"`
+	Key           string `json:"key"`
+	Protocol      string `json:"protocol"`
 	MTU           int    `json:"mtu"`
+
+	ServerBindAddr string `json:"server_addr"`
+	BasePort       int    `json:"base_port"`
+
+	RemoteIP   string `json:"server_ip"`
+	RemotePort int    `json:"server_port"`
+
+	IPProtocolNum int `json:"ip_protocol_num"`
+	PortCount     int `json:"port_count"`
+
+	SocksBind string `json:"socks_bind"`
+}
+
+func (c *Config) ParseLegacy() {
+	if c.Mode == "client" && c.RemoteIP == "" && c.ServerBindAddr != "" {
+		c.RemoteIP = c.ServerBindAddr
+	}
+	if c.Mode == "client" && c.RemotePort == 0 && c.BasePort != 0 {
+		c.RemotePort = c.BasePort
+	}
+	if c.Protocol == "" { c.Protocol = "udp" }
+	if c.IPProtocolNum == 0 { c.IPProtocolNum = 233 }
+	if c.PortCount == 0 { c.PortCount = 1 }
+	if c.MTU == 0 { c.MTU = 1400 }
+	if c.InterfaceName == "" { c.InterfaceName = "neko0" }
 }
 
 const (
 	NonceSize = chacha20poly1305.NonceSizeX
 	Overhead  = chacha20poly1305.Overhead
-	SeqSize   = 4                         
-	SessSize  = 4
-	MaxReorderBuffer = 256                
+	SeqSize   = 4
+	MaxReorderBuffer = 256
 )
 
-var (
-	config        Config
-	aead          cipher.AEAD
-	iface         *water.Interface
-	remoteAddrUDP []*net.UDPAddr
-	remoteAddrIP  *net.IPAddr
-	
-	connUDP       []*net.UDPConn
-	connIP        *net.IPConn
-	connTCP       net.Conn 
-	tcpWriteMu sync.Mutex
-
-	peerPathsUDP  []atomic.Value
-	peerPathIP    atomic.Value
-
-	globalSessionID uint32
-	globalTxSeq uint32
-
-	bufPool = sync.Pool{
-		New: func() interface{} {
-			b := make([]byte, 2048)
-			return &b
-		},
-	}
-	
-	reorderer *PacketReorderer
-)
-
-// --- Min-Heap for Reordering ---
-type SeqPacket struct {
-	Seq  uint32
-	Data []byte 
-	T    time.Time 
+var bufPool = sync.Pool{
+	New: func() interface{} {
+		b := make([]byte, 2048)
+		return &b
+	},
 }
 
-type PacketHeap []SeqPacket
+// --- VPN Instance ---
 
+type VPNInstance struct {
+	Cfg Config
+	
+	Iface *water.Interface
+	AEAD  cipher.AEAD
+	
+	ConnUDP   []*net.UDPConn
+	ConnTCP   net.Conn
+	ConnRaw   *net.IPConn
+	TCPMutex  sync.Mutex
+	
+	PeerMap sync.Map 
+	
+	ClientRemoteUDP []*net.UDPAddr
+	ClientRemoteIP  *net.IPAddr
+	
+	SessionID uint32
+	TxSeq     uint32
+	
+	Reorderer *PacketReorderer
+}
+
+func NewVPNInstance(cfg Config) *VPNInstance {
+	cfg.ParseLegacy()
+	v := &VPNInstance{ Cfg: cfg }
+	
+	keyHash := sha256.Sum256([]byte(cfg.Key))
+	var err error
+	v.AEAD, err = chacha20poly1305.NewX(keyHash[:])
+	if err != nil { log.Fatalf("Crypto Fail: %v", err) }
+
+	b := make([]byte, 4)
+	rand.Read(b)
+	v.SessionID = binary.BigEndian.Uint32(b)
+
+	v.Reorderer = NewReorderer()
+	
+	return v
+}
+
+func (v *VPNInstance) Start() {
+	log.Printf("[%s] Starting %s mode on %s...", v.Cfg.InterfaceName, v.Cfg.Mode, v.Cfg.LocalAddr)
+	v.InitTAP()
+	// Reorderer callback needs Instance method, but struct function pointer is easy
+	v.Reorderer.WriteFunc = v.IfaceWrite
+	
+	v.InitNetwork()
+
+	if v.Cfg.Mode == "client" && v.Cfg.SocksBind != "" {
+		go v.StartSocks5()
+	}
+	if v.Cfg.Mode == "client" {
+		go v.KeepaliveLoop()
+	}
+	go v.TAPReaderLoop()
+}
+
+// --- TAP ---
+
+func (v *VPNInstance) InitTAP() {
+	configIface := water.Config{ DeviceType: water.TAP }
+	configIface.Name = v.Cfg.InterfaceName
+	var err error
+	v.Iface, err = water.New(configIface)
+	if err != nil { log.Fatalf("TAP Init Fail: %v", err) }
+	
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		runCmd("ip", "addr", "add", v.Cfg.LocalAddr, "dev", v.Iface.Name())
+		runCmd("ip", "link", "set", v.Iface.Name(), "mtu", fmt.Sprintf("%d", v.Cfg.MTU))
+		runCmd("ip", "link", "set", v.Iface.Name(), "up")
+		log.Printf("[%s] Interface Up", v.Cfg.InterfaceName)
+	}()
+}
+
+func (v *VPNInstance) IfaceWrite(data []byte) {
+	v.Iface.Write(data)
+}
+
+// --- Network ---
+
+func (v *VPNInstance) InitNetwork() {
+	if v.Cfg.Protocol == "tcp" {
+		addr := fmt.Sprintf("%s:%d", v.Cfg.ServerBindAddr, v.Cfg.BasePort)
+		if v.Cfg.Mode == "client" { addr = fmt.Sprintf("%s:%d", v.Cfg.RemoteIP, v.Cfg.RemotePort) }
+		
+		if v.Cfg.Mode == "server" {
+			ln, err := net.Listen("tcp", addr)
+			if err != nil { log.Fatal(err) }
+			log.Printf("[%s] TCP Listen %s", v.Cfg.InterfaceName, addr)
+			go v.TCPAcceptLoop(ln)
+		} else {
+			go v.TCPClientDial(addr)
+		}
+		return
+	}
+
+	if v.Cfg.Protocol == "udp" {
+		v.ConnUDP = make([]*net.UDPConn, v.Cfg.PortCount)
+		v.ClientRemoteUDP = make([]*net.UDPAddr, v.Cfg.PortCount)
+		for i := 0; i < v.Cfg.PortCount; i++ {
+			var bindAddrStr string
+			if v.Cfg.Mode == "server" { bindAddrStr = fmt.Sprintf("%s:%d", v.Cfg.ServerBindAddr, v.Cfg.BasePort+i) } else { bindAddrStr = ":0" }
+			lAddr, _ := net.ResolveUDPAddr("udp", bindAddrStr)
+			c, err := net.ListenUDP("udp", lAddr)
+			if err != nil { log.Fatal(err) }
+			c.SetReadBuffer(4<<20); c.SetWriteBuffer(4<<20)
+			v.ConnUDP[i] = c
+			
+			if v.Cfg.Mode == "client" {
+				rAddrStr := fmt.Sprintf("%s:%d", v.Cfg.RemoteIP, v.Cfg.RemotePort+i)
+				rAddr, _ := net.ResolveUDPAddr("udp", rAddrStr)
+				v.ClientRemoteUDP[i] = rAddr
+			}
+			go v.UDPListenerLoop(i, c)
+		}
+		return
+	}
+	
+	if v.Cfg.Protocol == "raw" {
+		protoStr := fmt.Sprintf("ip4:%d", v.Cfg.IPProtocolNum)
+		var lAddr *net.IPAddr
+		if v.Cfg.Mode == "server" && v.Cfg.ServerBindAddr != "0.0.0.0" { lAddr, _ = net.ResolveIPAddr("ip", v.Cfg.ServerBindAddr) }
+		c, err := net.ListenIP(protoStr, lAddr)
+		if err != nil { log.Fatal(err) }
+		c.SetReadBuffer(4<<20); c.SetWriteBuffer(4<<20)
+		v.ConnRaw = c
+		if v.Cfg.Mode == "client" {
+			v.ClientRemoteIP, _ = net.ResolveIPAddr("ip", v.Cfg.RemoteIP)
+		}
+		go v.RawListenerLoop(c)
+	}
+}
+
+func (v *VPNInstance) UDPListenerLoop(idx int, c *net.UDPConn) {
+	for {
+		bufPtr := bufPool.Get().(*[]byte)
+		buf := *bufPtr
+		n, src, err := c.ReadFromUDP(buf)
+		if err != nil { bufPool.Put(bufPtr); return }
+		packet := make([]byte, n); copy(packet, buf[:n]); bufPool.Put(bufPtr)
+		v.ProcessPacket(packet, src, idx)
+	}
+}
+
+func (v *VPNInstance) RawListenerLoop(c *net.IPConn) {
+	for {
+		bufPtr := bufPool.Get().(*[]byte)
+		buf := *bufPtr
+		n, src, err := c.ReadFromIP(buf)
+		if err != nil { bufPool.Put(bufPtr); return }
+		if n < 4 { bufPool.Put(bufPtr); continue }
+		data := make([]byte, n-4); copy(data, buf[4:n]); bufPool.Put(bufPtr)
+		v.ProcessPacket(data, src, 0)
+	}
+}
+
+func (v *VPNInstance) TCPAcceptLoop(ln net.Listener) {
+	for {
+		c, err := ln.Accept()
+		if err != nil { continue }
+		go v.TCPHandler(c)
+	}
+}
+func (v *VPNInstance) TCPClientDial(addr string) {
+	for {
+		c, err := net.Dial("tcp", addr)
+		if err != nil { time.Sleep(2 * time.Second); continue }
+		v.TCPMutex.Lock(); v.ConnTCP = c; v.TCPMutex.Unlock()
+		v.TCPHandler(c)
+		v.TCPMutex.Lock(); v.ConnTCP = nil; v.TCPMutex.Unlock()
+		time.Sleep(1 * time.Second)
+	}
+}
+func (v *VPNInstance) TCPHandler(c net.Conn) {
+	defer c.Close()
+	header := make([]byte, 2)
+	for {
+		if _, err := io.ReadFull(c, header); err != nil { return }
+		l := binary.BigEndian.Uint16(header)
+		bufPtr := bufPool.Get().(*[]byte)
+		buf := *bufPtr
+		if cap(buf) < int(l) { newB := make([]byte, l); buf = newB }
+		body := buf[:l]
+		if _, err := io.ReadFull(c, body); err != nil { bufPool.Put(bufPtr); return }
+		data := make([]byte, l); copy(data, body); bufPool.Put(bufPtr)
+		v.ProcessPacket(data, c.RemoteAddr(), 0)
+	}
+}
+
+func (v *VPNInstance) ProcessPacket(encrypted []byte, srcAddr net.Addr, idx int) {
+	if len(encrypted) < NonceSize+Overhead { return }
+	nonce := encrypted[:NonceSize]
+	ciphertext := encrypted[NonceSize:]
+	
+	plaintext, err := v.AEAD.Open(nil, nonce, ciphertext, nil)
+	if err != nil { return }
+	
+	if len(plaintext) < 24 { return } // Sess4 + Seq4 + IP(20)
+	
+	srcIP := binary.BigEndian.Uint32(plaintext[28:32]) // IP Packet starts at 8. SrcIP at 8+12+IPHeaderOffset? 
+	// Ethernet Frame...
+	// Plaintext = [Sess 4][Seq 4][Ethernet Frame]
+	// Ethernet Header = 14 bytes.
+	// IPv4 Header starts at 8+14 = 22.
+	// Source IP in IPv4 is bytes 12-15.
+	// So SrcIP is at 22 + 12 = 34.
+	if len(plaintext) < 38 { return }
+	
+	// Wait, is it 0x0800 IPv4?
+	ethType := binary.BigEndian.Uint16(plaintext[8+12 : 8+14])
+	if ethType == 0x0800 {
+		srcIP = binary.BigEndian.Uint32(plaintext[8+14+12 : 8+14+16])
+		if v.Cfg.Mode == "server" {
+			v.PeerMap.Store(srcIP, srcAddr)
+		}
+	}
+
+	sessionID := binary.BigEndian.Uint32(plaintext[0:4])
+	seq := binary.BigEndian.Uint32(plaintext[4:8])
+	ethPayload := plaintext[8:]
+	
+	v.Reorderer.Push(sessionID, seq, ethPayload)
+}
+
+func (v *VPNInstance) TAPReaderLoop() {
+	for {
+		bufPtr := bufPool.Get().(*[]byte)
+		buf := *bufPtr
+		n, err := v.Iface.Read(buf[8:])
+		if err != nil { break }
+		
+		var destAddr net.Addr
+		seq := atomic.AddUint32(&v.TxSeq, 1) - 1
+		idx := int(uint64(seq) % uint64(v.Cfg.PortCount))
+
+		if v.Cfg.Mode == "client" {
+			// Client sends to Server (handled in SendPacket logic)
+		} else {
+			// Server Routing
+			ethType := binary.BigEndian.Uint16(buf[8+12 : 8+14])
+			if ethType == 0x0800 {
+				dstIP := binary.BigEndian.Uint32(buf[8+14+16 : 8+14+20])
+				if val, ok := v.PeerMap.Load(dstIP); ok {
+					destAddr = val.(net.Addr)
+				} else {
+					// Broadcast ARP?
+					// Simple implementation: Drop unknown unicast.
+					bufPool.Put(bufPtr)
+					continue
+				}
+			}
+		}
+
+		binary.BigEndian.PutUint32(buf[0:4], v.SessionID)
+		binary.BigEndian.PutUint32(buf[4:8], seq)
+		packet := buf[:n+8]
+		
+		dstPtr := bufPool.Get().(*[]byte)
+		dst := *dstPtr; dst = dst[:0]
+		nonce := make([]byte, NonceSize)
+		io.ReadFull(rand.Reader, nonce)
+		dst = append(dst, nonce...)
+		dst = v.AEAD.Seal(dst, nonce, packet, nil)
+		bufPool.Put(bufPtr)
+
+		v.SendPacket(dst, idx, destAddr)
+		bufPool.Put(dstPtr)
+	}
+}
+
+func (v *VPNInstance) SendPacket(data []byte, idx int, destAddr net.Addr) {
+	if v.Cfg.Protocol == "tcp" {
+		v.TCPMutex.Lock(); c := v.ConnTCP; v.TCPMutex.Unlock()
+		if c == nil { return }
+		l := len(data); h := make([]byte, 2); binary.BigEndian.PutUint16(h, uint16(l))
+		c.Write(h); c.Write(data)
+		return
+	}
+	if v.Cfg.Protocol == "udp" {
+		c := v.ConnUDP[idx]
+		var addr *net.UDPAddr
+		if v.Cfg.Mode == "client" { addr = v.ClientRemoteUDP[idx] } else {
+			if destAddr == nil { return }
+			addr = destAddr.(*net.UDPAddr)
+		}
+		c.WriteToUDP(data, addr)
+		return
+	}
+	if v.Cfg.Protocol == "raw" {
+		payload := make([]byte, 4 + len(data))
+		binary.BigEndian.PutUint32(payload[0:4], uint32(idx))
+		copy(payload[4:], data)
+		var addr *net.IPAddr
+		if v.Cfg.Mode == "client" { addr = v.ClientRemoteIP } else {
+			if destAddr == nil { return }
+			addr = destAddr.(*net.IPAddr)
+		}
+		v.ConnRaw.WriteToIP(payload, addr)
+	}
+}
+
+// --- SOCKS5 ---
+
+func (v *VPNInstance) StartSocks5() {
+	l, err := net.Listen("tcp", v.Cfg.SocksBind)
+	if err != nil { log.Printf("SOCKS5 Fail: %v", err); return }
+	log.Printf("[%s] SOCKS5 Listening %s", v.Cfg.InterfaceName, v.Cfg.SocksBind)
+	for {
+		c, err := l.Accept(); if err == nil { go v.HandleSocks5(c) }
+	}
+}
+
+func (v *VPNInstance) HandleSocks5(c net.Conn) {
+	defer c.Close()
+	buf := make([]byte, 260)
+	if _, err := io.ReadFull(c, buf[:2]); err != nil || buf[0] != 0x05 { return }
+	n := int(buf[1]); io.ReadFull(c, buf[:n]); c.Write([]byte{0x05, 0x00})
+	
+	if _, err := io.ReadFull(c, buf[:4]); err != nil || buf[1] != 0x01 { return }
+	
+	var addr string
+	switch buf[3] {
+	case 1: // IPv4
+		io.ReadFull(c, buf[:4])
+		addr = fmt.Sprintf("%d.%d.%d.%d", buf[0], buf[1], buf[2], buf[3])
+	case 3: // Domain
+		io.ReadFull(c, buf[:1])
+		l := int(buf[0]); io.ReadFull(c, buf[:l])
+		addr = string(buf[:l])
+	default: return
+	}
+	io.ReadFull(c, buf[:2])
+	port := binary.BigEndian.Uint16(buf[:2])
+	target := fmt.Sprintf("%s:%d", addr, port)
+	
+	c.Write([]byte{0x05, 0x00, 0x00, 0x01, 0,0,0,0, 0,0}) 
+	
+	d := net.Dialer{
+		Control: func(network, address string, rc syscall.RawConn) error {
+			return rc.Control(func(fd uintptr) {
+				syscall.SetsockoptString(int(fd), syscall.SOL_SOCKET, syscall.SO_BINDTODEVICE, v.Cfg.InterfaceName)
+			})
+		},
+		Timeout: 10 * time.Second,
+	}
+	rc, err := d.Dial("tcp", target)
+	if err != nil { return }
+	defer rc.Close()
+	
+	go io.Copy(c, rc)
+	io.Copy(rc, c)
+}
+
+func (v *VPNInstance) KeepaliveLoop() {
+	tick := time.NewTicker(15 * time.Second)
+	dummy := make([]byte, 14)
+	copy(dummy[0:6], []byte{0xFF,0xFF,0xFF,0xFF,0xFF,0xFF})
+	copy(dummy[12:14], []byte{0x99, 0x99})
+	
+	for range tick.C {
+		bufPtr := bufPool.Get().(*[]byte); buf := *bufPtr
+		binary.BigEndian.PutUint32(buf[0:4], v.SessionID)
+		seq := atomic.AddUint32(&v.TxSeq, 1) - 1
+		binary.BigEndian.PutUint32(buf[4:8], seq)
+		copy(buf[8:], dummy)
+		pkt := buf[:22]
+		
+		dstPtr := bufPool.Get().(*[]byte); dst := *dstPtr; dst = dst[:0]
+		nonce := make([]byte, NonceSize); rand.Read(nonce)
+		dst = append(dst, nonce...)
+		dst = v.AEAD.Seal(dst, nonce, pkt, nil)
+		bufPool.Put(bufPtr)
+		
+		v.SendPacket(dst, 0, nil)
+		bufPool.Put(dstPtr)
+	}
+}
+
+// --- Reorderer ---
+
+type SeqPacket struct {
+	Seq  uint32
+	Data []byte
+	T    time.Time 
+}
+type PacketHeap []SeqPacket
 func (h PacketHeap) Len() int           { return len(h) }
 func (h PacketHeap) Less(i, j int) bool { return h[i].Seq < h[j].Seq }
 func (h PacketHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
 func (h *PacketHeap) Push(x interface{}) { *h = append(*h, x.(SeqPacket)) }
 func (h *PacketHeap) Pop() interface{} {
-	old := *h
-	n := len(old)
-	x := old[n-1]
-	*h = old[0 : n-1]
-	return x
+	old := *h; n := len(old); x := old[n-1]; *h = old[0 : n-1]; return x
 }
 
 type PacketReorderer struct {
@@ -99,31 +475,59 @@ type PacketReorderer struct {
 	nextSeq     uint32
 	buffer      PacketHeap
 	lastSession uint32
-	lastActivity time.Time
+	WriteFunc   func([]byte)
 }
 
 func NewReorderer() *PacketReorderer {
-	r := &PacketReorderer{
-		buffer: make(PacketHeap, 0),
-		nextSeq: 0, 
-		lastSession: 0,
-		lastActivity: time.Now(),
-	}
+	r := &PacketReorderer{ buffer: make(PacketHeap, 0) }
 	heap.Init(&r.buffer)
 	go r.watchdog()
 	return r
 }
 
+func (pr *PacketReorderer) Push(sess uint32, seq uint32, data []byte) {
+	pr.mu.Lock(); defer pr.mu.Unlock()
+	if sess != pr.lastSession {
+		pr.lastSession = sess; pr.nextSeq = seq; pr.buffer = make(PacketHeap, 0)
+	}
+	if int32(seq - pr.nextSeq) < 0 { return }
+	if seq == pr.nextSeq {
+		if pr.WriteFunc != nil { pr.WriteFunc(data) }
+		pr.nextSeq++
+		pr.drain()
+		return
+	}
+	if pr.buffer.Len() > MaxReorderBuffer {
+		min := heap.Pop(&pr.buffer).(SeqPacket)
+		pr.nextSeq = min.Seq
+		if pr.WriteFunc != nil { pr.WriteFunc(min.Data) }
+		pr.nextSeq++
+		pr.drain()
+	}
+	heap.Push(&pr.buffer, SeqPacket{Seq: seq, Data: data, T: time.Now()})
+}
+
+func (pr *PacketReorderer) drain() {
+	for pr.buffer.Len() > 0 {
+		min := pr.buffer[0]
+		if min.Seq == pr.nextSeq {
+			heap.Pop(&pr.buffer)
+			if pr.WriteFunc != nil { pr.WriteFunc(min.Data) }
+			pr.nextSeq++
+		} else { break }
+	}
+}
+
 func (pr *PacketReorderer) watchdog() {
-	ticker := time.NewTicker(50 * time.Millisecond)
-	for range ticker.C {
+	tick := time.NewTicker(50 * time.Millisecond)
+	for range tick.C {
 		pr.mu.Lock()
 		if pr.buffer.Len() > 0 {
 			head := pr.buffer[0]
 			if time.Since(head.T) > 100*time.Millisecond {
 				pr.nextSeq = head.Seq
 				heap.Pop(&pr.buffer)
-				writeToTun(head.Data)
+				if pr.WriteFunc != nil { pr.WriteFunc(head.Data) }
 				pr.nextSeq++
 				pr.drain()
 			}
@@ -132,456 +536,31 @@ func (pr *PacketReorderer) watchdog() {
 	}
 }
 
-func (pr *PacketReorderer) Push(sess uint32, seq uint32, data []byte) {
-	pr.mu.Lock()
-	defer pr.mu.Unlock()
-	
-	if sess != pr.lastSession {
-		log.Printf("Session Changed: %x -> %x. Resetting Sequence.", pr.lastSession, sess)
-		pr.lastSession = sess
-		pr.nextSeq = seq 
-		pr.buffer = make(PacketHeap, 0)
-	}
-
-	if int32(seq - pr.nextSeq) < 0 { return } 
-
-	if seq == pr.nextSeq {
-		writeToTun(data)
-		pr.nextSeq++
-		pr.drain()
-		return
-	}
-
-	if pr.buffer.Len() > MaxReorderBuffer {
-		minItem := heap.Pop(&pr.buffer).(SeqPacket)
-		pr.nextSeq = minItem.Seq
-		writeToTun(minItem.Data)
-		pr.nextSeq++
-		pr.drain()
-	}
-	
-	heap.Push(&pr.buffer, SeqPacket{Seq: seq, Data: data, T: time.Now()})
-}
-
-func (pr *PacketReorderer) drain() {
-	for pr.buffer.Len() > 0 {
-		minItem := pr.buffer[0] 
-		if minItem.Seq == pr.nextSeq {
-			heap.Pop(&pr.buffer)
-			writeToTun(minItem.Data)
-			pr.nextSeq++
-		} else if minItem.Seq < pr.nextSeq {
-			heap.Pop(&pr.buffer)
-		} else {
-			break
-		}
-	}
-}
-
-func writeToTun(data []byte) {
-	if _, err := iface.Write(data); err != nil {
-		log.Println("TAP Write Error:", err)
-	}
-}
-
-// ---------------------------
-
 func main() {
-	configFile := flag.String("c", "config.json", "Path to config file")
+	cfgPath := flag.String("c", "config.json", "")
 	flag.Parse()
-
-	loadConfig(*configFile)
-	initCrypto()
-	initTAP()
-	initNetwork()
-
-	b := make([]byte, 4)
-	rand.Read(b)
-	globalSessionID = binary.BigEndian.Uint32(b)
-	log.Printf("Session ID: %x", globalSessionID)
-
-	if config.Protocol != "tcp" {
-		reorderer = NewReorderer()
+	data, _ := os.ReadFile(*cfgPath)
+	
+	var configs []Config
+	if err := json.Unmarshal(data, &configs); err != nil {
+		var single Config
+		json.Unmarshal(data, &single)
+		configs = append(configs, single)
 	}
 
-	go startTAPReader()
-	startNetworkListeners()
-
-	if config.Mode == "client" {
-		go startKeepalive()
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
+	
+	for _, cfg := range configs {
+		instance := NewVPNInstance(cfg)
+		instance.Start()
 	}
-
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	<-sig
+	
+	<-c
 	log.Println("Shutting down...")
 }
 
-func loadConfig(path string) {
-	if path == "config.json" {
-		if _, err := os.Stat(path); os.IsNotExist(err) {
-			if _, err := os.Stat("/etc/neko-link/config.json"); err == nil {
-				path = "/etc/neko-link/config.json"
-				log.Println("Using system config: /etc/neko-link/config.json")
-			}
-		}
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		log.Fatalf("Error reading config: %v", err)
-	}
-	if err := json.Unmarshal(data, &config); err != nil {
-		log.Fatalf("Error parsing config: %v", err)
-	}
-	if config.PortCount <= 0 { config.PortCount = 1 }
-	if config.MTU <= 0 { config.MTU = 1400 }
-	if config.IPProtocolNum <= 0 { config.IPProtocolNum = 233 }
-	if config.Protocol == "" { config.Protocol = "udp" }
-
-	log.Printf("Loaded config: Mode=%s, Proto=%s, Local=%s", config.Mode, config.Protocol, config.LocalAddr)
-}
-
-func initCrypto() {
-	keyHash := sha256.Sum256([]byte(config.Key))
-	var err error
-	aead, err = chacha20poly1305.NewX(keyHash[:])
-	if err != nil {
-		log.Fatalf("Failed to create AEAD: %v", err)
-	}
-}
-
-func initTAP() {
-	configIface := water.Config{ DeviceType: water.TAP }
-	if config.InterfaceName == "" { config.InterfaceName = "tap0" }
-	configIface.Name = config.InterfaceName
-	var err error
-	iface, err = water.New(configIface)
-	if err != nil {
-		log.Fatalf("Failed to create TAP interface: %v", err)
-	}
-	go func() {
-		time.Sleep(1 * time.Second)
-		runCmd("ip", "addr", "add", config.LocalAddr, "dev", iface.Name())
-		runCmd("ip", "link", "set", iface.Name(), "mtu", fmt.Sprintf("%d", config.MTU))
-		runCmd("ip", "link", "set", iface.Name(), "up")
-		log.Printf("Interface configured: %s", config.LocalAddr)
-	}()
-}
-
 func runCmd(name string, args ...string) {
-	proc, err := os.StartProcess("/usr/bin/env", append([]string{"env", name}, args...), &os.ProcAttr{
-		Files: []*os.File{os.Stdin, os.Stdout, os.Stderr},
-	})
-	if err != nil {
-		log.Printf("Cmd failed %s: %v", name, err)
-		return
-	}
-	proc.Wait()
-}
-
-func initNetwork() {
-	if config.Protocol == "udp" {
-		initUDP()
-	} else if config.Protocol == "raw" {
-		initRawIP()
-	} else if config.Protocol == "tcp" {
-		initTCP()
-	}
-}
-func initTCP() {
-	addrStr := fmt.Sprintf("%s:%d", config.ServerAddr, config.BasePort)
-	if config.Mode == "server" {
-		ln, err := net.Listen("tcp", fmt.Sprintf("%s:%d", config.ServerAddr, config.BasePort))
-		if err != nil { log.Fatalf("TCP Listen failed: %v", err) }
-		log.Printf("TCP Listening on %s", ln.Addr())
-		connTCP = nil 
-		go tcpServerAcceptLoop(ln)
-	} else {
-		d := net.Dialer{
-			Control: func(network, address string, c syscall.RawConn) error {
-				return c.Control(func(fd uintptr) {
-				})
-			},
-		}
-		c, err := d.Dial("tcp", addrStr)
-		if err != nil { log.Fatalf("TCP Dial failed: %v", err) }
-		connTCP = c
-		log.Printf("TCP Connected to %s", addrStr)
-	}
-}
-func tcpServerAcceptLoop(ln net.Listener) {
-	for {
-		c, err := ln.Accept()
-		if err != nil { log.Println("Accept error:", err); continue }
-		log.Println("TCP Client connected:", c.RemoteAddr())
-		if connTCP != nil { connTCP.Close() }
-		connTCP = c
-	}
-}
-func initUDP() {
-	connUDP = make([]*net.UDPConn, config.PortCount)
-	peerPathsUDP = make([]atomic.Value, config.PortCount)
-	if config.Mode == "server" {
-		for i := 0; i < config.PortCount; i++ {
-			addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", config.ServerAddr, config.BasePort+i))
-			if err != nil { log.Fatalf("ResolveUDP failed: %v", err) }
-			conn, err := net.ListenUDP("udp", addr)
-			if err != nil { log.Fatalf("ListenUDP failed: %v", err) }
-			conn.SetReadBuffer(4 * 1024 * 1024); conn.SetWriteBuffer(4 * 1024 * 1024)
-			connUDP[i] = conn
-			log.Printf("UDP Listening on %s", addr.String())
-		}
-	} else {
-		remoteAddrUDP = make([]*net.UDPAddr, config.PortCount)
-		for i := 0; i < config.PortCount; i++ {
-			rAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", config.ServerAddr, config.BasePort+i))
-			if err != nil { log.Fatalf("Resolve Remote failed: %v", err) }
-			remoteAddrUDP[i] = rAddr
-			conn, err := net.ListenUDP("udp", nil) 
-			if err != nil { log.Fatalf("Client Dial failed: %v", err) }
-			conn.SetReadBuffer(4 * 1024 * 1024); conn.SetWriteBuffer(4 * 1024 * 1024)
-			connUDP[i] = conn
-			peerPathsUDP[i].Store(rAddr) 
-			log.Printf("UDP Client channel %d ready", i)
-		}
-	}
-}
-func initRawIP() {
-	protoStr := fmt.Sprintf("ip4:%d", config.IPProtocolNum)
-	if isIPv6(config.ServerAddr) { protoStr = fmt.Sprintf("ip6:%d", config.IPProtocolNum) }
-	var lAddr *net.IPAddr
-	if config.Mode == "server" {
-		if config.ServerAddr != "" && config.ServerAddr != "[::]" && config.ServerAddr != "0.0.0.0" {
-			var err error
-			lAddr, err = net.ResolveIPAddr("ip", config.ServerAddr)
-			if err != nil { log.Fatalf("Resolve Server Bind IP failed: %v", err) }
-		} else { lAddr = nil }
-	} else { lAddr = nil }
-	conn, err := net.ListenIP(protoStr, lAddr)
-	if err != nil { log.Fatalf("ListenIP failed (Need Root?): %v", err) }
-	conn.SetReadBuffer(4 * 1024 * 1024); conn.SetWriteBuffer(4 * 1024 * 1024)
-	connIP = conn
-	log.Printf("Raw IP Listening on proto %d (%s)", config.IPProtocolNum, protoStr)
-	if config.Mode == "client" {
-		rAddr, err := net.ResolveIPAddr("ip", config.ServerAddr)
-		if err != nil { log.Fatalf("Resolve Remote IP failed: %v", err) }
-		remoteAddrIP = rAddr
-		peerPathIP.Store(rAddr)
-	}
-}
-func isIPv6(addr string) bool {
-	for i := 0; i < len(addr); i++ {
-		if addr[i] == ':' { return true }
-	}
-	return false
-}
-
-func startKeepalive() {
-	ticker := time.NewTicker(15 * time.Second)
-	dummyEth := make([]byte, 14)
-	copy(dummyEth[0:6], []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}) 
-	copy(dummyEth[12:14], []byte{0x99, 0x99})
-
-	for range ticker.C {
-		bufPtr := bufPool.Get().(*[]byte)
-		buf := *bufPtr
-		
-		binary.BigEndian.PutUint32(buf[0:4], globalSessionID)
-		seq := atomic.AddUint32(&globalTxSeq, 1) - 1
-		binary.BigEndian.PutUint32(buf[4:8], seq)
-		
-		copy(buf[8:], dummyEth)
-		packetWithHeader := buf[:8+14]
-		
-		dstPtr := bufPool.Get().(*[]byte)
-		dst := *dstPtr
-		dst = dst[:0]
-		nonce := make([]byte, NonceSize)
-		io.ReadFull(rand.Reader, nonce)
-		dst = append(dst, nonce...)
-		dst = aead.Seal(dst, nonce, packetWithHeader, nil)
-		bufPool.Put(bufPtr)
-
-		if config.Protocol == "udp" { sendUDP(0, dst) 
-		} else if config.Protocol == "raw" { sendRawIP(0, dst)
-		} else if config.Protocol == "tcp" { sendTCP(dst) }
-		bufPool.Put(dstPtr)
-	}
-}
-
-// TAP -> Network
-func startTAPReader() {
-	for {
-		bufPtr := bufPool.Get().(*[]byte)
-		buf := *bufPtr
-		
-		n, err := iface.Read(buf[8:]) 
-		if err != nil {
-			log.Printf("TAP Read Error: %v", err)
-			break
-		}
-		
-		binary.BigEndian.PutUint32(buf[0:4], globalSessionID)
-		seq := atomic.AddUint32(&globalTxSeq, 1) - 1
-		binary.BigEndian.PutUint32(buf[4:8], seq)
-		
-		packetWithHeader := buf[:n+8] 
-
-		dstPtr := bufPool.Get().(*[]byte)
-		dst := *dstPtr
-		dst = dst[:0]
-		nonce := make([]byte, NonceSize)
-		if _, err := io.ReadFull(rand.Reader, nonce); err != nil { 
-			bufPool.Put(bufPtr); bufPool.Put(dstPtr); continue 
-		}
-		dst = append(dst, nonce...)
-		dst = aead.Seal(dst, nonce, packetWithHeader, nil) 
-		bufPool.Put(bufPtr)
-
-		if config.Protocol == "udp" {
-			idx := uint64(seq) % uint64(config.PortCount)
-			sendUDP(idx, dst)
-		} else if config.Protocol == "raw" {
-			idx := uint64(seq) % uint64(config.PortCount)
-			sendRawIP(uint32(idx), dst)
-		} else if config.Protocol == "tcp" {
-			sendTCP(dst)
-		}
-		bufPool.Put(dstPtr)
-	}
-}
-
-func sendTCP(ciphertext []byte) {
-	if connTCP == nil { return }
-	l := len(ciphertext)
-	header := make([]byte, 2)
-	binary.BigEndian.PutUint16(header, uint16(l))
-	tcpWriteMu.Lock()
-	defer tcpWriteMu.Unlock()
-	connTCP.Write(header)
-	connTCP.Write(ciphertext)
-}
-
-func sendUDP(idx uint64, ciphertext []byte) {
-	conn := connUDP[idx]
-	var dest *net.UDPAddr
-	if config.Mode == "client" { dest = remoteAddrUDP[idx] } else {
-		val := peerPathsUDP[idx].Load()
-		if val == nil { return }
-		dest = val.(*net.UDPAddr)
-	}
-	conn.WriteToUDP(ciphertext, dest)
-}
-
-func sendRawIP(channelID uint32, ciphertext []byte) {
-	payload := make([]byte, 4 + len(ciphertext))
-	binary.BigEndian.PutUint32(payload[0:4], channelID)
-	copy(payload[4:], ciphertext)
-	var dest *net.IPAddr
-	if config.Mode == "client" { dest = remoteAddrIP } else {
-		val := peerPathIP.Load()
-		if val == nil { return }
-		dest = val.(*net.IPAddr)
-	}
-	connIP.WriteToIP(payload, dest)
-}
-
-func startNetworkListeners() {
-	if config.Protocol == "udp" { startUDPListeners()
-	} else if config.Protocol == "raw" { startRawIPListener()
-	} else if config.Protocol == "tcp" { startTCPListener() }
-}
-func startTCPListener() {
-	go func() {
-		for {
-			if connTCP == nil { time.Sleep(1 * time.Second); continue }
-			handleTCPConn(connTCP)
-			connTCP = nil; time.Sleep(1 * time.Second)
-		}
-	}()
-}
-func handleTCPConn(c net.Conn) {
-	header := make([]byte, 2)
-	for {
-		if _, err := io.ReadFull(c, header); err != nil { return }
-		length := binary.BigEndian.Uint16(header)
-		bufPtr := bufPool.Get().(*[]byte)
-		buf := *bufPtr
-		if cap(buf) < int(length) { newBuf := make([]byte, length); buf = newBuf }
-		body := buf[:length]
-		if _, err := io.ReadFull(c, body); err != nil { bufPool.Put(bufPtr); return }
-		data := make([]byte, length); copy(data, body); bufPool.Put(bufPtr)
-		processIncoming(data, nil)
-	}
-}
-func startUDPListeners() {
-	for i, conn := range connUDP {
-		go func(idx int, c *net.UDPConn) {
-			for {
-				bufPtr := bufPool.Get().(*[]byte)
-				buf := *bufPtr
-				n, src, err := c.ReadFromUDP(buf)
-				if err != nil { bufPool.Put(bufPtr); return }
-				
-				// REMOVED INSECURE UPDATE:
-				// if config.Mode == "server" { peerPathsUDP[idx].Store(src) }
-				
-				packet := make([]byte, n); copy(packet, buf[:n]); bufPool.Put(bufPtr)
-				processIncoming(packet, func() {
-					// Update Route Callback (After Auth)
-					if config.Mode == "server" { peerPathsUDP[idx].Store(src) }
-				})
-			}
-		}(i, conn)
-	}
-}
-func startRawIPListener() {
-	go func() {
-		for {
-			bufPtr := bufPool.Get().(*[]byte)
-			buf := *bufPtr
-			n, src, err := connIP.ReadFromIP(buf)
-			if err != nil { log.Println("IP Read Error:", err); return }
-			
-			// REMOVED INSECURE UPDATE:
-			// if config.Mode == "server" { peerPathIP.Store(src) }
-			
-			if n < 4 { bufPool.Put(bufPtr); continue }
-			data := make([]byte, n-4); copy(data, buf[4:n]); bufPool.Put(bufPtr)
-			processIncoming(data, func() {
-				// Update Route Callback (After Auth)
-				if config.Mode == "server" { peerPathIP.Store(src) }
-			})
-		}
-	}()
-}
-
-// processIncoming now takes a callback to update route if auth success
-func processIncoming(encrypted []byte, onAuthSuccess func()) {
-	if len(encrypted) < NonceSize+Overhead { return }
-	nonce := encrypted[:NonceSize]
-	ciphertext := encrypted[NonceSize:]
-	plaintext, err := aead.Open(nil, nonce, ciphertext, nil)
-	if err != nil { 
-		// Auth Failed! Ignore packet.
-		return 
-	}
-	
-	// Auth Success!
-	if onAuthSuccess != nil {
-		onAuthSuccess()
-	}
-	
-	if len(plaintext) < 8 { return }
-	
-	sessionID := binary.BigEndian.Uint32(plaintext[0:4])
-	seq := binary.BigEndian.Uint32(plaintext[4:8])
-	ethPayload := plaintext[8:]
-	
-	if config.Protocol == "tcp" {
-		writeToTun(ethPayload)
-	} else {
-		reorderer.Push(sessionID, seq, ethPayload)
-	}
+	p, _ := os.StartProcess("/usr/bin/env", append([]string{"env", name}, args...), &os.ProcAttr{Files: []*os.File{nil, nil, nil}})
+	p.Wait()
 }
