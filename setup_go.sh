@@ -16,7 +16,7 @@ if command -v go &> /dev/null; then
     else
         echo "Go 版本太旧 ($GO_VERSION)，需要 1.21+。正在升级..."
         rm -rf /usr/local/go
-        wget -q https://go.dev/dl/go1.22.5.linux-amd64.tar.gz -O /tmp/go.tar.gz
+        wget -q https://golang.google.cn/dl/go1.22.5.linux-amd64.tar.gz -O /tmp/go.tar.gz
         tar -C /usr/local -xzf /tmp/go.tar.gz
         export PATH=$PATH:/usr/local/go/bin
         echo 'export PATH=$PATH:/usr/local/go/bin' >> /etc/profile
@@ -24,12 +24,15 @@ if command -v go &> /dev/null; then
     fi
 else
     echo "Go 未找到，正在安装 Go 1.22..."
-    wget -q https://go.dev/dl/go1.22.5.linux-amd64.tar.gz -O /tmp/go.tar.gz
+    wget -q https://golang.google.cn/dl/go1.22.5.linux-amd64.tar.gz -O /tmp/go.tar.gz
     tar -C /usr/local -xzf /tmp/go.tar.gz
     export PATH=$PATH:/usr/local/go/bin
     echo 'export PATH=$PATH:/usr/local/go/bin' >> /etc/profile
     echo -e "${GREEN}>>> Go 已安装: $(go version)${NC}"
 fi
+
+# 配置国内代理
+go env -w GOPROXY=https://goproxy.cn,direct
 
 # 安装 eBPF 编译依赖
 echo -e "${GREEN}>>> 安装 eBPF 编译工具链...${NC}"
@@ -50,6 +53,8 @@ if [ ! -f "go.mod" ]; then
 fi
 
 echo -e "${GREEN}>>> 下载依赖库 (water, crypto)...${NC}"
+# 使用 tidy 自动管理，更加稳健
+go mod tidy
 go get github.com/songgao/water
 go get golang.org/x/crypto/chacha20poly1305
 go get golang.org/x/net/ipv6
