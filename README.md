@@ -190,9 +190,10 @@ NekoLink 的服务端采用 **智能动态学习** 机制。
 ```json
 {
   "mode": "server",
-  "protocol": "udp",        // 或 "raw"
+  "protocol": "udp",
   "use_xdp": true,          // 开启核动力加速！
-  "interface_name": "eth0"  // 物理网卡名
+  "xdp_device": "eth0",     // 【重点】这里填您的物理网卡名 (用来上网的那个)
+  "interface_name": "neko0" // VPN 虚拟网卡名
 }
 ```
 
