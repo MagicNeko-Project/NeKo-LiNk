@@ -13,6 +13,7 @@ import (
 "log"
 "net"
 "os"
+"os/exec"
 "os/signal"
 "sync"
 "sync/atomic"
@@ -85,7 +86,6 @@ const (
 NonceSize = chacha20poly1305.NonceSizeX
 Overhead  = chacha20poly1305.Overhead
 SeqSize   = 4
-// MaxReorderBuffer 降低一点以减少延迟抖动
 MaxReorderBuffer = 1024
 TunOffset = 0
 )
@@ -147,7 +147,7 @@ func (v *VPNInstance) Start() {
 if v.Cfg.Debug {
 debugMode = true
 }
-log.Printf("[%s] Starting L3 Engine v4.1 in %s mode on %s...", v.Cfg.InterfaceName, v.Cfg.Mode, v.Cfg.LocalAddr)
+log.Printf("[%s] Starting L3 Engine v4.2 in %s mode on %s...", v.Cfg.InterfaceName, v.Cfg.Mode, v.Cfg.LocalAddr)
 v.InitTUN()
 v.Reorderer.WriteFunc = v.IfaceWrite
 
@@ -177,9 +177,11 @@ realName, _ := dev.Name()
 runCmd("ip", "addr", "add", v.Cfg.LocalAddr, "dev", realName)
 runCmd("ip", "link", "set", realName, "mtu", fmt.Sprintf("%d", v.Cfg.MTU))
 runCmd("ip", "link", "set", realName, "up")
-// 基础系统参数优化
+// 彻底放开路由限制
+runCmd("sysctl", "-w", "net.ipv4.conf.all.rp_filter=0")
+runCmd("sysctl", "-w", "net.ipv4.conf.default.rp_filter=0")
 runCmd("sysctl", "-w", fmt.Sprintf("net.ipv4.conf.%s.rp_filter=0", realName))
-log.Printf("[%s] Interface Up (v4.1 Pure IP Mode)", realName)
+log.Printf("[%s] Interface Up & L3 Optimized (Nya~)", realName)
 }()
 }
 
@@ -187,7 +189,10 @@ func (v *VPNInstance) IfaceWrite(data []byte) {
 if debugMode {
 v.tracePacket("TUN-WRITE", data)
 }
-v.TunDev.Write([][]byte{data}, TunOffset)
+_, err := v.TunDev.Write([][]byte{data}, TunOffset)
+if err != nil {
+logDebug("TUN-WRITE Error: %v", err)
+}
 }
 
 func (v *VPNInstance) tracePacket(prefix string, data []byte) {
@@ -199,7 +204,14 @@ if version == 4 {
 src := net.IPv4(data[12], data[13], data[14], data[15])
 dst := net.IPv4(data[16], data[17], data[18], data[19])
 proto := data[9]
-logDebug("[%s] IPv4: %s -> %s (Proto:%d, Len:%d)", prefix, src, dst, proto, len(data))
+summary := fmt.Sprintf("[%s] IPv4: %s -> %s (Proto:%d, Len:%d)", prefix, src, dst, proto, len(data))
+if proto == 1 && len(data) >= 28 {
+icmpType := data[20]
+icmpCode := data[21]
+icmpID := binary.BigEndian.Uint16(data[24:26])
+summary += fmt.Sprintf(" [ICMP Type:%d, Code:%d, ID:%d]", icmpType, icmpCode, icmpID)
+}
+logDebug(summary)
 } else if version == 6 && len(data) >= 40 {
 src := net.IP(data[8:24])
 dst := net.IP(data[24:40])
@@ -218,9 +230,7 @@ addr = fmt.Sprintf("%s:%d", v.Cfg.RemoteIP, v.Cfg.RemotePort)
 
 if v.Cfg.Mode == "server" {
 ln, err := net.Listen("tcp", addr)
-if err != nil {
-log.Fatal(err)
-}
+if err != nil { log.Fatal(err) }
 log.Printf("[%s] TCP Listen %s", v.Cfg.InterfaceName, addr)
 go v.TCPAcceptLoop(ln)
 } else {
@@ -242,9 +252,7 @@ bindAddrStr = ":0"
 }
 lAddr, _ := net.ResolveUDPAddr("udp", bindAddrStr)
 c, err := net.ListenUDP("udp", lAddr)
-if err != nil {
-log.Fatal(err)
-}
+if err != nil { log.Fatal(err) }
 c.SetReadBuffer(16 << 20)
 c.SetWriteBuffer(16 << 20)
 v.ConnUDP[i] = c
@@ -267,9 +275,7 @@ if v.Cfg.Mode == "server" && v.Cfg.ServerBindAddr != "0.0.0.0" {
 lAddr, _ = net.ResolveIPAddr("ip", v.Cfg.ServerBindAddr)
 }
 c, err := net.ListenIP(protoStr, lAddr)
-if err != nil {
-log.Fatal(err)
-}
+if err != nil { log.Fatal(err) }
 c.SetReadBuffer(16 << 20)
 c.SetWriteBuffer(16 << 20)
 v.ConnRaw = c
@@ -300,7 +306,7 @@ continue
 
 for i := 0; i < nMsgs; i++ {
 msg := &msgs[i]
-// 修复：必须拷贝地址，防止被后续包覆盖
+// 修正：必须要深度拷贝地址，防止并发覆盖
 srcAddr := v.copyAddr(msg.Addr)
 v.ProcessPacket((*bufPtrs[i])[:msg.N], srcAddr, idx)
 }
@@ -340,9 +346,7 @@ bufPool.Put(bufPtr)
 func (v *VPNInstance) TCPAcceptLoop(ln net.Listener) {
 for {
 c, err := ln.Accept()
-if err != nil {
-continue
-}
+if err != nil { continue }
 go v.TCPHandler(c)
 }
 }
@@ -367,9 +371,7 @@ func (v *VPNInstance) TCPHandler(c net.Conn) {
 defer c.Close()
 header := make([]byte, 2)
 for {
-if _, err := io.ReadFull(c, header); err != nil {
-return
-}
+if _, err := io.ReadFull(c, header); err != nil { return }
 l := binary.BigEndian.Uint16(header)
 bufPtr := bufPool.Get().(*[]byte)
 buf := *bufPtr
@@ -388,9 +390,7 @@ bufPool.Put(bufPtr)
 }
 
 func (v *VPNInstance) ProcessPacket(encrypted []byte, srcAddr net.Addr, idx int) {
-if len(encrypted) < NonceSize+Overhead {
-return
-}
+if len(encrypted) < NonceSize+Overhead { return }
 nonce := encrypted[:NonceSize]
 ciphertext := encrypted[NonceSize:]
 
@@ -400,9 +400,7 @@ logDebug("Crypto: Decrypt failed from %v", srcAddr)
 return
 }
 
-if len(plaintext) < 8 {
-return
-}
+if len(plaintext) < 8 { return }
 
 sessionID := binary.BigEndian.Uint32(plaintext[0:4])
 seq := binary.BigEndian.Uint32(plaintext[4:8])
@@ -465,13 +463,11 @@ dstIP := binary.BigEndian.Uint32(ipPacket[16:20])
 if val, ok := v.PeerMap.Load(dstIP); ok {
 destAddr = val.(net.Addr)
 } else if debugMode {
-logDebug("ROUTING: No peer for %s, skipping...", net.IPv4(ipPacket[16], ipPacket[17], ipPacket[18], ipPacket[19]))
+logDebug("ROUTING: No peer for %d.%d.%d.%d, dropping...", ipPacket[16], ipPacket[17], ipPacket[18], ipPacket[19])
 }
 }
 }
-if destAddr == nil {
-return
-}
+if destAddr == nil { return }
 }
 
 ptLen := 8 + len(ipPacket)
@@ -488,7 +484,10 @@ rand.Read(nonce)
 dst = append(dst, nonce...)
 dst = v.AEAD.Seal(dst, nonce, pt, nil)
 
-if debugMode {
+if debugMode && v.Cfg.Mode == "client" {
+// 客户端固定发往 Server
+logDebug("NET-TX: Out %d bytes (Seq:%d) to Server", len(dst), seq)
+} else if debugMode {
 logDebug("NET-TX: Out %d bytes (Seq:%d) to %v", len(dst), seq, destAddr)
 }
 
@@ -549,26 +548,18 @@ return
 log.Printf("[%s] SOCKS5 Listening %s", v.Cfg.InterfaceName, v.Cfg.SocksBind)
 for {
 c, err := l.Accept()
-if err == nil {
-go v.HandleSocks5(c)
-}
+if err == nil { go v.HandleSocks5(c) }
 }
 }
 
 func (v *VPNInstance) HandleSocks5(c net.Conn) {
 defer c.Close()
 buf := make([]byte, 260)
-if _, err := io.ReadFull(c, buf[:2]); err != nil || buf[0] != 0x05 {
-return
-}
+if _, err := io.ReadFull(c, buf[:2]); err != nil || buf[0] != 0x05 { return }
 n := int(buf[1])
 io.ReadFull(c, buf[:n])
 c.Write([]byte{0x05, 0x00})
-
-if _, err := io.ReadFull(c, buf[:4]); err != nil || buf[1] != 0x01 {
-return
-}
-
+if _, err := io.ReadFull(c, buf[:4]); err != nil || buf[1] != 0x01 { return }
 var addr string
 switch buf[3] {
 case 1: // IPv4
@@ -579,15 +570,12 @@ io.ReadFull(c, buf[:1])
 l := int(buf[0])
 io.ReadFull(c, buf[:l])
 addr = string(buf[:l])
-default:
-return
+default: return
 }
 io.ReadFull(c, buf[:2])
 port := binary.BigEndian.Uint16(buf[:2])
 target := fmt.Sprintf("%s:%d", addr, port)
-
 c.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
-
 d := net.Dialer{
 Control: func(network, address string, rc syscall.RawConn) error {
 return rc.Control(func(fd uintptr) {
@@ -597,18 +585,14 @@ syscall.SetsockoptString(int(fd), syscall.SOL_SOCKET, syscall.SO_BINDTODEVICE, v
 Timeout: 10 * time.Second,
 }
 rc, err := d.Dial("tcp", target)
-if err != nil {
-return
-}
+if err != nil { return }
 defer rc.Close()
-
 go io.Copy(c, rc)
 io.Copy(rc, c)
 }
 
 func (v *VPNInstance) KeepaliveLoop() {
 tick := time.NewTicker(10 * time.Second)
-
 ip, _, err := net.ParseCIDR(v.Cfg.LocalAddr)
 if err != nil { return }
 ip4 := ip.To4()
@@ -616,12 +600,13 @@ if ip4 == nil { return }
 
 pkt := make([]byte, 20)
 pkt[0] = 0x45      
+binary.BigEndian.PutUint16(pkt[2:4], 20) // 设置正确的 IP 总长度
 pkt[9] = 253       
 copy(pkt[12:16], ip4)
 copy(pkt[16:20], []byte{255, 255, 255, 255})
 
 for range tick.C {
-logDebug("KEEPALIVE: Sending probe to 255.255.255.255")
+logDebug("KEEPALIVE: Sending probe...")
 v.handleOutgoingPacket(pkt)
 }
 }
@@ -634,7 +619,6 @@ Data []byte
 T    time.Time
 }
 type PacketHeap []SeqPacket
-
 func (h PacketHeap) Len() int           { return len(h) }
 func (h PacketHeap) Less(i, j int) bool { return h[i].Seq < h[j].Seq }
 func (h PacketHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
@@ -666,7 +650,7 @@ func (pr *PacketReorderer) Push(sess uint32, seq uint32, data []byte) {
 pr.mu.Lock()
 defer pr.mu.Unlock()
 if sess != pr.lastSession {
-logDebug("Reorderer: Session changed %v -> %v, Resetting Seq to %v", pr.lastSession, sess, seq)
+logDebug("Reorderer: Session reset %v -> %v", pr.lastSession, sess)
 pr.lastSession = sess
 pr.nextSeq = seq
 pr.buffer = pr.buffer[:0]
@@ -681,7 +665,6 @@ return
 }
 if pr.buffer.Len() > MaxReorderBuffer {
 min := heap.Pop(&pr.buffer).(SeqPacket)
-logDebug("Reorderer: Skip to %v", min.Seq)
 pr.nextSeq = min.Seq
 if pr.WriteFunc != nil { pr.WriteFunc(min.Data) }
 pr.nextSeq++
@@ -708,7 +691,7 @@ pr.mu.Lock()
 if pr.buffer.Len() > 0 {
 head := pr.buffer[0]
 if time.Since(head.T) > 150*time.Millisecond {
-logDebug("Reorderer: Kick Seq %v", head.Seq)
+logDebug("Reorderer: Force jump Seq %v", head.Seq)
 pr.nextSeq = head.Seq
 heap.Pop(&pr.buffer)
 if pr.WriteFunc != nil { pr.WriteFunc(head.Data) }
@@ -722,43 +705,35 @@ pr.mu.Unlock()
 
 func main() {
 cfgPath := flag.String("c", "config.json", "")
-flag.BoolVar(&debugMode, "debug", false, "Enable verbose debug logs")
+flag.BoolVar(&debugMode, "debug", false, "debug logs")
 flag.Parse()
-
 data, err := os.ReadFile(*cfgPath)
-if err != nil { log.Fatalf("Fail to read config: %v", err) }
-
+if err != nil { log.Fatalf("Fail config: %v", err) }
 var configs []Config
 if err := json.Unmarshal(data, &configs); err != nil {
 var single Config
 if err2 := json.Unmarshal(data, &single); err2 == nil {
 configs = append(configs, single)
-} else {
-log.Fatalf("Config syntax error: %v", err)
+} else { log.Fatalf("Config: %v", err) }
 }
-}
-
 seen := make(map[string]bool)
 for _, c := range configs {
-if seen[c.InterfaceName] {
-log.Fatalf("Duplicate Interface Name detected: %s", c.InterfaceName)
-}
+if seen[c.InterfaceName] { log.Fatalf("Dup: %s", c.InterfaceName) }
 seen[c.InterfaceName] = true
 }
-
 c := make(chan os.Signal, 1)
 signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
-
 for _, cfg := range configs {
 instance := NewVPNInstance(cfg)
 instance.Start()
 }
-
 <-c
-log.Println("Shutting down...")
+log.Println("Exit...")
 }
 
 func runCmd(name string, args ...string) {
-p, _ := os.StartProcess("/usr/bin/env", append([]string{"env", name}, args...), &os.ProcAttr{Files: []*os.File{nil, nil, nil}})
-p.Wait()
+cmd := exec.Command(name, args...)
+cmd.Stdout = os.Stdout
+cmd.Stderr = os.Stderr
+cmd.Run()
 }
