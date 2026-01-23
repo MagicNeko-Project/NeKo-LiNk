@@ -194,14 +194,22 @@ func initRawIP() {
 		protoStr = fmt.Sprintf("ip6:%d", config.IPProtocolNum)
 	}
 
-	lAddr, err := net.ResolveIPAddr("ip", config.ServerAddr) 
-	if err != nil {
-		// handle empty -> listen all
-		if config.Mode == "server" && (config.ServerAddr == "" || config.ServerAddr == "[::]" || config.ServerAddr == "0.0.0.0") {
-			lAddr = nil // Listen all
+	var lAddr *net.IPAddr
+	if config.Mode == "server" {
+		// Server: Listen on specific address or all
+		if config.ServerAddr != "" && config.ServerAddr != "[::]" && config.ServerAddr != "0.0.0.0" {
+			var err error
+			lAddr, err = net.ResolveIPAddr("ip", config.ServerAddr)
+			if err != nil {
+				log.Fatalf("Resolve Server Bind IP failed: %v", err)
+			}
 		} else {
-			log.Fatalf("ResolveIPAddr failed: %v", err)
+			lAddr = nil // Listen all
 		}
+	} else {
+		// Client: Bind to local (nil means all/any)
+		// We don't bind to ServerAddr! ServerAddr IS Remote!
+		lAddr = nil 
 	}
 
 	conn, err := net.ListenIP(protoStr, lAddr)
