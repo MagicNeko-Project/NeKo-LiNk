@@ -68,6 +68,7 @@ const (
 	Overhead  = chacha20poly1305.Overhead
 	SeqSize   = 4
 	MaxReorderBuffer = 8192 // Increased to 8192 (16MB) to safely buffer high-speed jitter
+	TunOffset = 16 // Headroom for TUN (VirtioNet/PI) headers
 )
 
 // --- Helper Functions ---
@@ -158,9 +159,9 @@ func (v *VPNInstance) InitTUN() {
 func (v *VPNInstance) IfaceWrite(data []byte) {
 	// TUN Write works with batch ([][]byte).
 	// We wrap single packet for compatibility with current Reorderer
-	// Note: offset 0.
-	log.Printf("TUN Write %d bytes", len(data))
-	_, err := v.TunDev.Write([][]byte{data}, 0)
+	// Note: offset must match the headroom we reserved (TunOffset)
+	// log.Printf("TUN Write %d bytes (Offset %d)", len(data)-TunOffset, TunOffset)
+	_, err := v.TunDev.Write([][]byte{data}, TunOffset)
 	if err != nil {
 		log.Printf("TUN Write Error: %v", err)
 	}
@@ -414,9 +415,10 @@ func (v *VPNInstance) ProcessPacket(bufPtr *[]byte, n int, srcAddr net.Addr, idx
 	// CRITICAL: We MUST perform a deep copy because bufPtr is about to be recycled!
 	// Reorderer.Push will store 'ethPayload'. 
 	// If 'ethPayload' is a slice of 'bufPtr', we must copy it.
+	// FIX: Add Headroom for TUN Write (TunOffset)
 	
-	payloadCopy := make([]byte, len(ethPayload))
-	copy(payloadCopy, ethPayload)
+	payloadCopy := make([]byte, TunOffset + len(ethPayload))
+	copy(payloadCopy[TunOffset:], ethPayload)
 	
 	v.Reorderer.Push(sessionID, seq, payloadCopy)
 	
@@ -431,14 +433,14 @@ func (v *VPNInstance) TUNReaderLoop() {
 	sizes := make([]int, batchSize)
 
 	for {
-		n, err := v.TunDev.Read(buffs, sizes, 0)
+		n, err := v.TunDev.Read(buffs, sizes, TunOffset)
 		if err != nil { 
 			break 
 		}
-		log.Printf("TUN Read %d packets", n) // Verbose
+		// log.Printf("TUN Read %d packets", n) // Verbose
 		
 		for i := 0; i < n; i++ {
-			data := buffs[i][:sizes[i]]
+			data := buffs[i][TunOffset : TunOffset+sizes[i]]
 			var dstIP uint32
 			version := data[0] >> 4
 			
