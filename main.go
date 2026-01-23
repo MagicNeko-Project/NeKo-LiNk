@@ -19,7 +19,7 @@ import (
 	"syscall"
 	"time"
 
-	"golang.zx2c4.com/wireguard/tun"
+	"github.com/songgao/water"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/net/ipv4"
 	"vpn/xdp"
@@ -95,7 +95,9 @@ var bufPool = sync.Pool{
 type VPNInstance struct {
 	Cfg Config
 	
-	TunDev tun.Device
+	Cfg Config
+	
+	TunDev *water.Interface
 	AEAD  cipher.AEAD
 	
 	ConnUDP   []*net.UDPConn
@@ -136,12 +138,22 @@ func NewVPNInstance(cfg Config) *VPNInstance {
 }
 
 func (v *VPNInstance) InitTUN() {
-	// Create TUN device
-	dev, err := tun.CreateTUN(v.Cfg.InterfaceName, v.Cfg.MTU)
-	if err != nil { j, _ := tun.CreateTUN("utun", v.Cfg.MTU); if j!=nil{dev=j; err=nil} else {log.Fatalf("TUN Init Fail: %v", err)} }
-    if err != nil { log.Fatal(err) }
+	// Create TUN device using water (Standard L3)
+	config := water.Config{
+		DeviceType: water.TUN,
+	}
+	config.Name = v.Cfg.InterfaceName // Try to set name
+	
+	dev, err := water.New(config)
+	if err != nil { 
+		// Fallback if name fails?
+		config.Name = ""
+		dev, err = water.New(config)
+		if err != nil { log.Fatalf("TUN Init Fail: %v", err) }
+	}
 	
 	v.TunDev = dev
+	v.Cfg.InterfaceName = dev.Name() // Update name if dynamic
 	
 	// Native TUN implementation doesn't execute 'ip' commands. We do it manually.
 	go func() {
@@ -149,7 +161,7 @@ func (v *VPNInstance) InitTUN() {
 		runCmd("ip", "addr", "add", v.Cfg.LocalAddr, "dev", v.Cfg.InterfaceName)
 		runCmd("ip", "link", "set", v.Cfg.InterfaceName, "up")
 		runCmd("ip", "link", "set", v.Cfg.InterfaceName, "mtu", fmt.Sprintf("%d", v.Cfg.MTU))
-		log.Printf("[%s] Interface Up (TUN L3)", v.Cfg.InterfaceName)
+		log.Printf("[%s] Interface Up (TUN L3 - Water)", v.Cfg.InterfaceName)
 	}()
 }
 
@@ -157,11 +169,25 @@ func (v *VPNInstance) InitTUN() {
 
 
 func (v *VPNInstance) IfaceWrite(data []byte) {
-	// TUN Write works with batch ([][]byte).
-	// We wrap single packet for compatibility with current Reorderer
-	// Note: offset must match the headroom we reserved (TunOffset)
-	// log.Printf("TUN Write %d bytes (Offset %d)", len(data)-TunOffset, TunOffset)
-	_, err := v.TunDev.Write([][]byte{data}, TunOffset)
+	// TUN Write (Water - Single Packet)
+	// Offset logic removed (water handles raw IP)
+	// data contains [TunOffset...Packet] ? 
+	// ProcessPacket allocated with TunOffset. We need just the packet.
+	// Wait, if I switch to water, TunOffset should be 0!
+	// But ProcessPacket uses TunOffset constant.
+	// I should verify data content. 
+	// Reorderer stores what was Pushed. ProcessPacket prepended TunOffset.
+	// So data has [Garbage TunOffset][Packet].
+	// water.Write expects [Packet].
+	// So we slice!
+	
+	packet := data
+	if len(data) > TunOffset {
+		packet = data[TunOffset:]
+	}
+	
+	// log.Printf("TUN Write %d bytes", len(packet))
+	_, err := v.TunDev.Write(packet)
 	if err != nil {
 		log.Printf("TUN Write Error: %v", err)
 	}
@@ -427,57 +453,55 @@ func (v *VPNInstance) ProcessPacket(bufPtr *[]byte, n int, srcAddr net.Addr, idx
 }
 
 func (v *VPNInstance) TUNReaderLoop() {
-	const batchSize = 64
-	buffs := make([][]byte, batchSize)
-	for i := range buffs { buffs[i] = make([]byte, 2048) }
-	sizes := make([]int, batchSize)
-
+	buf := make([]byte, 2048)
 	for {
-		n, err := v.TunDev.Read(buffs, sizes, TunOffset)
+		n, err := v.TunDev.Read(buf)
 		if err != nil { 
+			log.Printf("TUN Read Error: %v", err)
 			break 
 		}
-		// log.Printf("TUN Read %d packets", n) // Verbose
+		// log.Printf("TUN Read %d bytes", n)
 		
-		for i := 0; i < n; i++ {
-			data := buffs[i][TunOffset : TunOffset+sizes[i]]
-			var dstIP uint32
-			version := data[0] >> 4
-			
-			if version == 4 && len(data) >= 20 {
-				dstIP = binary.BigEndian.Uint32(data[16:20])
-			}
-			
-			var destAddr net.Addr
-			if v.Cfg.Mode == "server" && version == 4 && dstIP != 0 {
-				// Routing: Look for ANY channel connected to this IP
-				for k := 0; k < v.Cfg.PortCount; k++ {
-					key := (uint64(dstIP) << 32) | uint64(k)
-					if val, ok := v.PeerMap.Load(key); ok {
-						destAddr = val.(net.Addr)
-						break
-					}
-				}
-				
-				// OSPF / Multicast
-				if destAddr == nil {
-					if (dstIP & 0xF0000000) == 0xE0000000 { // 224.0.0.0/4
-						// Broadcast on current tx channel index
-						seq := atomic.AddUint32(&v.TxSeq, 1) - 1
-						idx := int(uint64(seq) % uint64(v.Cfg.PortCount))
-						v.BroadcastToAllPeers(data, idx, seq)
-						continue
-					}
-					// Only Unicast with no route is dropped
-					continue 
-				}
-			}
-			
-			// Send
-			seq := atomic.AddUint32(&v.TxSeq, 1) - 1
-			idx := int(uint64(seq) % uint64(v.Cfg.PortCount))
-			v.SendPacket(data, idx, seq, destAddr)
+		// Logic same as before (Single packet)
+		data := buf[:n]
+		// Water returns Packet directly (No offset needed if using TUN)
+		// Check invalid read
+		if n < 20 { continue }
+
+		var dstIP uint32
+		version := data[0] >> 4
+		
+		if version == 4 && len(data) >= 20 {
+			dstIP = binary.BigEndian.Uint32(data[16:20])
 		}
+			
+		var destAddr net.Addr
+		if v.Cfg.Mode == "server" && version == 4 && dstIP != 0 {
+			// Routing
+			for k := 0; k < v.Cfg.PortCount; k++ {
+				key := (uint64(dstIP) << 32) | uint64(k)
+				if val, ok := v.PeerMap.Load(key); ok {
+					destAddr = val.(net.Addr)
+					break
+				}
+			}
+			
+			// OSPF / Multicast
+			if destAddr == nil {
+				if (dstIP & 0xF0000000) == 0xE0000000 { 
+					seq := atomic.AddUint32(&v.TxSeq, 1) - 1
+					idx := int(uint64(seq) % uint64(v.Cfg.PortCount))
+					v.BroadcastToAllPeers(data, idx, seq) // Copy handled in SendPacket
+					continue
+				}
+				continue 
+			}
+		}
+		
+		// Send
+		seq := atomic.AddUint32(&v.TxSeq, 1) - 1
+		idx := int(uint64(seq) % uint64(v.Cfg.PortCount))
+		v.SendPacket(data, idx, seq, destAddr) // SendPacket copies data
 	}
 }
 
