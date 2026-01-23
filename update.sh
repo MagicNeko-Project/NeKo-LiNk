@@ -28,22 +28,27 @@ migrate_config() {
         echo ">>> 检测到老版本配置格式，正在迁移..."
         
         # 备份老配置
-        cp "$cfg_file" "$cfg_file.bak.$(date +%Y%m%d%H%M%S)"
-        echo "    ✓ 已备份老配置"
+        local bak_file="$cfg_file.bak.$(date +%Y%m%d%H%M%S)"
+        cp "$cfg_file" "$bak_file"
+        echo "    ✓ 已备份老配置: $bak_file"
         
         # 转换为数组格式，添加 XDP 默认字段，移除废弃字段
+        # 注意: 移除 head -1，并准确指定输入文件
         jq '[
             . + {
                 "use_xdp": (.use_xdp // false),
                 "xdp_device": (.xdp_device // ""),
                 "interface_name": (.interface_name // "neko0")
             }
-        ]' "$cfg_file.bak."* 2>/dev/null | head -1 > "$cfg_file.tmp" && mv "$cfg_file.tmp" "$cfg_file"
+        ]' "$bak_file" > "$cfg_file.tmp"
         
-        if [ $? -eq 0 ]; then
+        # 安全检查：确保生成的 JSON 看起来是合法的（以 [ 开头）
+        if [ $? -eq 0 ] && [ -s "$cfg_file.tmp" ] && grep -q "^\s*\[" "$cfg_file.tmp"; then
+            mv "$cfg_file.tmp" "$cfg_file"
             echo "    ✓ 配置已升级为新格式 (Nya~)"
         else
-            echo "    ✗ 迁移失败，已保留原配置"
+            echo "    ✗ 迁移失败，已恢复原配置"
+            rm -f "$cfg_file.tmp"
         fi
     else
         echo ">>> 配置格式已是最新版本"
