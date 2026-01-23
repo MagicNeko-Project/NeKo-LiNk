@@ -78,6 +78,16 @@ func main() {
 }
 
 func loadConfig(path string) {
+	// Fallback logic
+	if path == "config.json" {
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			if _, err := os.Stat("/etc/neko-link/config.json"); err == nil {
+				path = "/etc/neko-link/config.json"
+				log.Println("Using system config: /etc/neko-link/config.json")
+			}
+		}
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		log.Fatalf("Error reading config: %v", err)
