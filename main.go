@@ -66,8 +66,20 @@ const (
 	NonceSize = chacha20poly1305.NonceSizeX
 	Overhead  = chacha20poly1305.Overhead
 	SeqSize   = 4
-	MaxReorderBuffer = 4096 // Increased from 256 to 4096 to handle high jitter
+	MaxReorderBuffer = 1024 // Optimized for better latency vs reordering trade-off
 )
+
+// --- Helper Functions ---
+
+// 检测是否为组播或广播包
+func isMulticastOrBroadcast(ethFrame []byte) bool {
+	if len(ethFrame) < 14 { return false }
+	
+	// 组播/广播判断：目标 MAC 最低位为 1
+	// 组播: 01:xx:xx:xx:xx:xx
+	// 广播: ff:ff:ff:ff:ff:ff
+	return ethFrame[0]&0x01 != 0
+}
 
 var bufPool = sync.Pool{
 	New: func() interface{} {
@@ -286,11 +298,25 @@ func (v *VPNInstance) ProcessPacket(encrypted []byte, srcAddr net.Addr, idx int)
 	if len(plaintext) < 38 { return }
 	
 	ethType := binary.BigEndian.Uint16(plaintext[8+12 : 8+14])
+	
+	// Learn IPv4 unicast source addresses
 	if ethType == 0x0800 {
 		srcIP := binary.BigEndian.Uint32(plaintext[8+14+12 : 8+14+16])
 		if v.Cfg.Mode == "server" {
 			// NAT-Aware: Store per-channel address using composite key
 			key := (uint64(srcIP) << 32) | uint64(idx)
+			v.PeerMap.Store(key, srcAddr)
+		}
+	}
+	
+	// Learn IPv6 unicast source addresses
+	if ethType == 0x86dd && len(plaintext) >= 8+14+40 {
+		// IPv6 源地址在偏移 8+14+8 (16 字节)
+		// 使用前 8 字节作为简化实现
+		srcIPv6High := binary.BigEndian.Uint64(plaintext[8+14+8 : 8+14+16])
+		if v.Cfg.Mode == "server" && srcIPv6High != 0 {
+			// XOR with channel index to create unique key
+			key := srcIPv6High ^ (uint64(idx) << 56)
 			v.PeerMap.Store(key, srcAddr)
 		}
 	}
@@ -316,7 +342,7 @@ func (v *VPNInstance) TAPReaderLoop() {
 		if v.Cfg.Mode == "client" {
 			// Client sends to Server (handled in SendPacket logic)
 		} else {
-	// Server Routing
+			// Server Routing
 			// Offset 12: EthType
 			ethType := binary.BigEndian.Uint16(buf[8+12 : 8+14])
 			var dstIP uint32
@@ -336,14 +362,14 @@ func (v *VPNInstance) TAPReaderLoop() {
 				}
 			}
 			
-			// If not found, we drop (Unicast logic). 
-			// If it's a new client, Server wouldn't be sending to it anyway unless it spoke first.
+			// 🆕 Check for multicast/broadcast if no unicast route found
 			if destAddr == nil && v.Cfg.Mode == "server" {
-				// Special Case: If destAddr is nil, we can't send.
-				// For BroadCast ARP? We don't support L2 broadcasting yet.
-				// So if we don't know the IP, we can't switch.
-				bufPool.Put(bufPtr)
-				continue
+				if !isMulticastOrBroadcast(buf[8:8+14]) {
+					// Unicast but no route found, drop
+					bufPool.Put(bufPtr)
+					continue
+				}
+				// Will broadcast after encryption
 			}
 		}
 
@@ -427,6 +453,26 @@ func (v *VPNInstance) SendPacket(data []byte, idx int, destAddr net.Addr) {
 			addr = destAddr.(*net.IPAddr)
 		}
 		v.ConnRaw.WriteToIP(payload, addr)
+	}
+}
+
+// BroadcastToAllPeers 广播数据包给所有已知的 peer
+func (v *VPNInstance) BroadcastToAllPeers(data []byte, channelIdx int) {
+	var peers []net.Addr
+	
+	// 收集同一通道的所有 peer
+	v.PeerMap.Range(func(key, value interface{}) bool {
+		k := key.(uint64)
+		// 检查通道索引匹配 (低 32 位存储通道索引)
+		if uint32(k&0xFFFFFFFF) == uint32(channelIdx) {
+			peers = append(peers, value.(net.Addr))
+		}
+		return true
+	})
+	
+	// 向所有 peer 发送
+	for _, addr := range peers {
+		v.SendPacket(data, channelIdx, addr)
 	}
 }
 
@@ -625,7 +671,8 @@ func (pr *PacketReorderer) watchdog() {
 		if pr.buffer.Len() > 0 {
 			head := pr.buffer[0]
 			// Strict timeout for head of line blocking
-			if time.Since(head.T) > 300*time.Millisecond {
+			// Reduced from 300ms to 50ms for better TCP performance
+			if time.Since(head.T) > 50*time.Millisecond {
 				pr.nextSeq = head.Seq
 				heap.Pop(&pr.buffer)
 				toSend = append(toSend, head.Data)
