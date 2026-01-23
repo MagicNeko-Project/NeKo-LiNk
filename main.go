@@ -289,7 +289,9 @@ func (v *VPNInstance) ProcessPacket(encrypted []byte, srcAddr net.Addr, idx int)
 	if ethType == 0x0800 {
 		srcIP := binary.BigEndian.Uint32(plaintext[8+14+12 : 8+14+16])
 		if v.Cfg.Mode == "server" {
-			v.PeerMap.Store(srcIP, srcAddr)
+			// NAT-Aware: Store per-channel address using composite key
+			key := (uint64(srcIP) << 32) | uint64(idx)
+			v.PeerMap.Store(key, srcAddr)
 		}
 	}
 
@@ -328,7 +330,8 @@ func (v *VPNInstance) TAPReaderLoop() {
 			}
 
 			if dstIP != 0 {
-				if val, ok := v.PeerMap.Load(dstIP); ok {
+				key := (uint64(dstIP) << 32) | uint64(idx)
+				if val, ok := v.PeerMap.Load(key); ok {
 					destAddr = val.(net.Addr)
 				}
 			}
@@ -525,7 +528,10 @@ func (v *VPNInstance) KeepaliveLoop() {
 		dst = v.AEAD.Seal(dst, nonce, packetWithHeader, nil)
 		bufPool.Put(bufPtr)
 		
-		v.SendPacket(dst, 0, nil)
+		// Send to ALL ports to maintain NAT mappings for multi-channel mode
+		for i := 0; i < v.Cfg.PortCount; i++ {
+			v.SendPacket(dst, i, nil)
+		}
 		bufPool.Put(dstPtr)
 	}
 }
