@@ -24,6 +24,15 @@ import (
 	"golang.org/x/net/ipv4"
 )
 
+// --- Global Flags ---
+var debugMode bool
+
+func logDebug(format string, v ...interface{}) {
+	if debugMode {
+		log.Printf("[DEBUG] "+format, v...)
+	}
+}
+
 // --- Configuration ---
 
 type Config struct {
@@ -43,6 +52,7 @@ type Config struct {
 	IPProtocolNum int  `json:"ip_protocol_num"`
 	PortCount     int  `json:"port_count"`
 	UseXDP        bool `json:"use_xdp"`
+	Debug         bool `json:"debug"`
 
 	SocksBind string `json:"socks_bind"`
 }
@@ -76,16 +86,15 @@ const (
 	Overhead  = chacha20poly1305.Overhead
 	SeqSize   = 4
 	// MaxReorderBuffer 增加缓冲区以适应高速链接下的抖动
-	MaxReorderBuffer = 1024
+	MaxReorderBuffer = 4096
 	// TunOffset 保持 0，WireGuard 库会处理必要的头部
 	TunOffset = 0
 )
 
 // --- Memory Pool ---
-// 使用足够承载 GSO 大包（65535+）的缓冲区
 var bufPool = sync.Pool{
 	New: func() interface{} {
-		b := make([]byte, 65536+256) // 预留包头和加密开销
+		b := make([]byte, 65536+256)
 		return &b
 	},
 }
@@ -136,7 +145,10 @@ func NewVPNInstance(cfg Config) *VPNInstance {
 }
 
 func (v *VPNInstance) Start() {
-	log.Printf("[%s] Starting %s mode on %s...", v.Cfg.InterfaceName, v.Cfg.Mode, v.Cfg.LocalAddr)
+	if v.Cfg.Debug {
+		debugMode = true
+	}
+	log.Printf("[%s] Starting L3 Engine in %s mode on %s...", v.Cfg.InterfaceName, v.Cfg.Mode, v.Cfg.LocalAddr)
 	v.InitTUN()
 	v.Reorderer.WriteFunc = v.IfaceWrite
 
@@ -154,7 +166,6 @@ func (v *VPNInstance) Start() {
 // --- TUN ---
 
 func (v *VPNInstance) InitTUN() {
-	// 使用 WireGuard 的 tun 库
 	dev, err := tun.CreateTUN(v.Cfg.InterfaceName, v.Cfg.MTU)
 	if err != nil {
 		log.Fatalf("TUN Init Fail: %v", err)
@@ -167,14 +178,35 @@ func (v *VPNInstance) InitTUN() {
 		runCmd("ip", "addr", "add", v.Cfg.LocalAddr, "dev", realName)
 		runCmd("ip", "link", "set", realName, "mtu", fmt.Sprintf("%d", v.Cfg.MTU))
 		runCmd("ip", "link", "set", realName, "up")
-		log.Printf("[%s] Interface Up (WireGuard-TUN)", realName)
+		log.Printf("[%s] Interface Up (L3 WireGuard-TUN)", realName)
 	}()
 }
 
 func (v *VPNInstance) IfaceWrite(data []byte) {
-	// tun.Device 的 Write 接口接受 [][]byte，我们包装一下
-	// 这里以后可以优化成批量写入
+	if debugMode {
+		v.tracePacket("TUN-WRITE", data)
+	}
 	v.TunDev.Write([][]byte{data}, TunOffset)
+}
+
+// --- Debug Tracing ---
+
+func (v *VPNInstance) tracePacket(prefix string, data []byte) {
+	if len(data) < 20 {
+		logDebug("[%s] Small packet: %d bytes", prefix, len(data))
+		return
+	}
+	version := data[0] >> 4
+	if version == 4 {
+		src := net.IP(data[12:16])
+		dst := net.IP(data[16:20])
+		proto := data[9]
+		logDebug("[%s] IPv4: %s -> %s (Proto:%d, Len:%d)", prefix, src, dst, proto, len(data))
+	} else if version == 6 && len(data) >= 40 {
+		src := net.IP(data[8:24])
+		dst := net.IP(data[24:40])
+		logDebug("[%s] IPv6: %s -> %s (Len:%d)", prefix, src, dst, len(data))
+	}
 }
 
 // --- Network ---
@@ -215,11 +247,9 @@ func (v *VPNInstance) InitNetwork() {
 			if err != nil {
 				log.Fatal(err)
 			}
-			// 增加系统级缓冲区
 			c.SetReadBuffer(16 << 20)
 			c.SetWriteBuffer(16 << 20)
 			v.ConnUDP[i] = c
-			// 包装成高性能批处理连接
 			v.ConnBatch[i] = ipv4.NewPacketConn(c)
 
 			if v.Cfg.Mode == "client" {
@@ -253,12 +283,10 @@ func (v *VPNInstance) InitNetwork() {
 }
 
 func (v *VPNInstance) UDPListenerLoop(idx int, pc *ipv4.PacketConn) {
-	// 关键优化：一次读取多个包 (recvmmsg)
 	const batchSize = 16
 	msgs := make([]ipv4.Message, batchSize)
 	bufPtrs := make([]*[]byte, batchSize)
 
-	// 初始化缓冲区
 	for i := range msgs {
 		bufPtrs[i] = bufPool.Get().(*[]byte)
 		msgs[i].Buffers = [][]byte{*bufPtrs[i]}
@@ -267,7 +295,6 @@ func (v *VPNInstance) UDPListenerLoop(idx int, pc *ipv4.PacketConn) {
 	for {
 		nMsgs, err := pc.ReadBatch(msgs, 0)
 		if err != nil {
-			// 如果出错，稍等片刻尝试重新准备缓冲区
 			log.Printf("ReadBatch error: %v", err)
 			time.Sleep(10 * time.Millisecond)
 			continue
@@ -275,13 +302,7 @@ func (v *VPNInstance) UDPListenerLoop(idx int, pc *ipv4.PacketConn) {
 
 		for i := 0; i < nMsgs; i++ {
 			msg := &msgs[i]
-			// 处理接收到的包
-			// 注意：ProcessPacket 会负责回收或复制数据，因此我们可以直接重用这个槽位
 			v.ProcessPacket((*bufPtrs[i])[:msg.N], msg.Addr, idx)
-
-			// 这里我们选择直接重用当前的缓冲区进行下一次 ReadBatch
-			// 因为 ProcessPacket 内部发生了解密，结果通常会被传给重排序器（Deep Copy 或 Immutable Slice）
-			// 如果 ProcessPacket 以后改为全零拷贝，这里需要更复杂的管理逻辑
 		}
 	}
 }
@@ -299,13 +320,11 @@ func (v *VPNInstance) RawListenerLoop(c *net.IPConn) {
 			bufPool.Put(bufPtr)
 			continue
 		}
-		// Raw 模式下的处理：跳过 4 字节 IDX
 		v.ProcessPacket(buf[4:n], src, 0)
 		bufPool.Put(bufPtr)
 	}
 }
 
-// TCP 暂时保持简单实现，因为本优化指南侧重于 UDP/TUN
 func (v *VPNInstance) TCPAcceptLoop(ln net.Listener) {
 	for {
 		c, err := ln.Accept()
@@ -363,45 +382,44 @@ func (v *VPNInstance) ProcessPacket(encrypted []byte, srcAddr net.Addr, idx int)
 	nonce := encrypted[:NonceSize]
 	ciphertext := encrypted[NonceSize:]
 
-	// 内存优化：直接作为 dst 传入以重用缓冲区（假设不重合）
-	// AEAD.Open 可以在底层缓冲区上就地解密
 	plaintext, err := v.AEAD.Open(ciphertext[:0], nonce, ciphertext, nil)
 	if err != nil {
+		logDebug("Crypto: Decrypt failed from %v", srcAddr)
 		return
 	}
 
-	// [Sess 4][Seq 4][Ethernet[IP...]]
-	if len(plaintext) < 38 {
+	// [Session 4][Seq 4][IP Payload...]
+	if len(plaintext) < 8 {
 		return
 	}
 
-	// 提取 Session 和 Seq
 	sessionID := binary.BigEndian.Uint32(plaintext[0:4])
 	seq := binary.BigEndian.Uint32(plaintext[4:8])
-	payload := plaintext[8:]
+	ipPacket := plaintext[8:]
 
-	// 简单的服务端路由学习 (IPv4)
-	if v.Cfg.Mode == "server" && len(payload) >= 34 {
-		ethType := binary.BigEndian.Uint16(payload[12:14])
-		if ethType == 0x0800 {
-			srcIP := binary.BigEndian.Uint32(payload[14+12 : 14+16])
+	if debugMode {
+		v.tracePacket("NET-RX", ipPacket)
+	}
+
+	// L3 Routing Logic
+	if v.Cfg.Mode == "server" && len(ipPacket) >= 20 {
+		version := ipPacket[0] >> 4
+		if version == 4 {
+			srcIP := binary.BigEndian.Uint32(ipPacket[12:16])
 			v.PeerMap.Store(srcIP, srcAddr)
 		}
 	}
 
-	// 传递给重排序器。注意：由于我们要重用缓冲区，这里必须进行深度拷贝。
-	// 但如果是在高速链路上，可以在重排序器中管理内存池。
-	dataCopy := make([]byte, len(payload))
-	copy(dataCopy, payload)
+	dataCopy := make([]byte, len(ipPacket))
+	copy(dataCopy, ipPacket)
 	v.Reorderer.Push(sessionID, seq, dataCopy)
 }
 
 func (v *VPNInstance) TUNReaderLoop() {
-	// WireGuard TUN 设备支持批量读取
 	const batchSize = 16
 	buffs := make([][]byte, batchSize)
 	for i := range buffs {
-		buffs[i] = make([]byte, 65536) // 准备接收 GSO 大包
+		buffs[i] = make([]byte, 65536)
 	}
 	sizes := make([]int, batchSize)
 
@@ -414,53 +432,51 @@ func (v *VPNInstance) TUNReaderLoop() {
 
 		for i := 0; i < n; i++ {
 			data := buffs[i][:sizes[i]]
+			if debugMode {
+				v.tracePacket("TUN-READ", data)
+			}
 			v.handleOutgoingPacket(data)
 		}
 	}
 }
 
-func (v *VPNInstance) handleOutgoingPacket(data []byte) {
+func (v *VPNInstance) handleOutgoingPacket(ipPacket []byte) {
 	var destAddr net.Addr
 	seq := atomic.AddUint32(&v.TxSeq, 1) - 1
 	idx := int(uint64(seq) % uint64(v.Cfg.PortCount))
 
 	if v.Cfg.Mode == "server" {
-		// Server 路由逻辑
-		if len(data) >= 34 {
-			ethType := binary.BigEndian.Uint16(data[12:14])
-			var dstIP uint32
-			if ethType == 0x0800 { // IPv4
-				dstIP = binary.BigEndian.Uint32(data[14+16 : 14+20])
-			} else if ethType == 0x0806 { // ARP
-				dstIP = binary.BigEndian.Uint32(data[14+24 : 14+28])
-			}
-			if dstIP != 0 {
+		if len(ipPacket) >= 20 {
+			version := ipPacket[0] >> 4
+			if version == 4 {
+				dstIP := binary.BigEndian.Uint32(ipPacket[16:20])
 				if val, ok := v.PeerMap.Load(dstIP); ok {
 					destAddr = val.(net.Addr)
 				}
 			}
 		}
 		if destAddr == nil {
-			return // 丢弃未知目标
+			return
 		}
 	}
 
-	// 构造加密包
-	// [Nonce][Encrypted[Session 4][Seq 4][Payload]]
-	ptLen := 8 + len(data)
+	ptLen := 8 + len(ipPacket)
 	ptPtr := bufPool.Get().(*[]byte)
 	pt := (*ptPtr)[:ptLen]
 	binary.BigEndian.PutUint32(pt[0:4], v.SessionID)
 	binary.BigEndian.PutUint32(pt[4:8], seq)
-	copy(pt[8:], data)
+	copy(pt[8:], ipPacket)
 
-	// 获取加密结果容器
 	dstPtr := bufPool.Get().(*[]byte)
 	dst := (*dstPtr)[:0]
 	nonce := make([]byte, NonceSize)
 	rand.Read(nonce)
 	dst = append(dst, nonce...)
 	dst = v.AEAD.Seal(dst, nonce, pt, nil)
+
+	if debugMode {
+		logDebug("NET-TX: Sending %d encrypted bytes to %v", len(dst), destAddr)
+	}
 
 	v.SendPacket(dst, idx, destAddr)
 
@@ -495,7 +511,6 @@ func (v *VPNInstance) SendPacket(data []byte, idx int, destAddr net.Addr) {
 			}
 			addr = destAddr
 		}
-		// 这里可以使用 WriteBatch 进行进一步优化，目前先保持 WriteTo
 		pc.WriteTo(data, nil, addr)
 		return
 	}
@@ -597,13 +612,13 @@ func (v *VPNInstance) KeepaliveLoop() {
 		return
 	}
 
-	// 伪造一个 ARP 请求或类似的 L2 包作为 Keepalive
-	pkt := make([]byte, 42)
-	copy(pkt[0:6], []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}) // Broadcast
-	rand.Read(pkt[6:12])                                     // Random Src MAC
-	pkt[12] = 0x08; pkt[13] = 0x06                             // ARP
-	pkt[20] = 0x00; pkt[21] = 0x01                             // Request
-	copy(pkt[28:32], ip4)                                    // Sender IP
+	// L3 Keepalive: 发送一个空的 UDP 包或简单的探测包（无需以太网头）
+	// 我们直接发送一个包含当前 IP 的 UDP 伪包
+	pkt := make([]byte, 20)
+	pkt[0] = 0x45      // Ver 4, IHL 5
+	pkt[9] = 253       // Experimental Proto
+	copy(pkt[12:16], ip4)
+	copy(pkt[16:20], net.IPv4(255, 255, 255, 255))
 
 	for range tick.C {
 		v.handleOutgoingPacket(pkt)
@@ -650,11 +665,13 @@ func (pr *PacketReorderer) Push(sess uint32, seq uint32, data []byte) {
 	pr.mu.Lock()
 	defer pr.mu.Unlock()
 	if sess != pr.lastSession {
+		logDebug("Reorderer: Session changed %v -> %v", pr.lastSession, sess)
 		pr.lastSession = sess
 		pr.nextSeq = seq
 		pr.buffer = make(PacketHeap, 0)
 	}
-	if int32(seq-pr.nextSeq) < 0 {
+	diff := int32(seq - pr.nextSeq)
+	if diff < 0 {
 		return
 	}
 	if seq == pr.nextSeq {
@@ -667,6 +684,7 @@ func (pr *PacketReorderer) Push(sess uint32, seq uint32, data []byte) {
 	}
 	if pr.buffer.Len() > MaxReorderBuffer {
 		min := heap.Pop(&pr.buffer).(SeqPacket)
+		logDebug("Reorderer: Buffer Full, Force Pop Seq %v", min.Seq)
 		pr.nextSeq = min.Seq
 		if pr.WriteFunc != nil {
 			pr.WriteFunc(min.Data)
@@ -675,9 +693,11 @@ func (pr *PacketReorderer) Push(sess uint32, seq uint32, data []byte) {
 		pr.drain()
 	}
 	heap.Push(&pr.buffer, SeqPacket{Seq: seq, Data: data, T: time.Now()})
+	logDebug("Reorderer: Buffered Seq %v (Next expected %v, Buffer size %v)", seq, pr.nextSeq, pr.buffer.Len())
 }
 
 func (pr *PacketReorderer) drain() {
+	count := 0
 	for pr.buffer.Len() > 0 {
 		min := pr.buffer[0]
 		if min.Seq == pr.nextSeq {
@@ -686,19 +706,24 @@ func (pr *PacketReorderer) drain() {
 				pr.WriteFunc(min.Data)
 			}
 			pr.nextSeq++
+			count++
 		} else {
 			break
 		}
 	}
+	if count > 0 {
+		logDebug("Reorderer: Drained %d consecutive packets", count)
+	}
 }
 
 func (pr *PacketReorderer) watchdog() {
-	tick := time.NewTicker(20 * time.Millisecond) // 更快的触发响应
+	tick := time.NewTicker(20 * time.Millisecond)
 	for range tick.C {
 		pr.mu.Lock()
 		if pr.buffer.Len() > 0 {
 			head := pr.buffer[0]
 			if time.Since(head.T) > 100*time.Millisecond {
+				logDebug("Reorderer: Timeout on Seq %v, skipping...", head.Seq)
 				pr.nextSeq = head.Seq
 				heap.Pop(&pr.buffer)
 				if pr.WriteFunc != nil {
@@ -713,16 +738,23 @@ func (pr *PacketReorderer) watchdog() {
 }
 
 func main() {
-	fmt.Println("NekoLink High-Performance Edition starting...")
-	cfgPath := flag.String("c", "config.json", "")
+	cfgPath := flag.String("c", "config.json", "Config file path")
+	flag.BoolVar(&debugMode, "debug", false, "Enable verbose debug logs")
 	flag.Parse()
-	data, _ := os.ReadFile(*cfgPath)
+
+	data, err := os.ReadFile(*cfgPath)
+	if err != nil {
+		log.Fatalf("Fail to read config: %v", err)
+	}
 
 	var configs []Config
 	if err := json.Unmarshal(data, &configs); err != nil {
 		var single Config
-		json.Unmarshal(data, &single)
-		configs = append(configs, single)
+		if err2 := json.Unmarshal(data, &single); err2 == nil {
+			configs = append(configs, single)
+		} else {
+			log.Fatalf("Config syntax error: %v", err)
+		}
 	}
 
 	seen := make(map[string]bool)
