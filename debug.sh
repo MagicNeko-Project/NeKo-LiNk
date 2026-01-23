@@ -17,9 +17,9 @@ if [ $? -ne 0 ]; then echo "❌ Build Failed!"; exit 1; fi
 
 # Detect Config
 CONF="/etc/neko-link/config.json" 
-# Priority: Local config > System config
-if [ -f "config.json" ]; then CONF="config.json"; fi
-if [ -f "client_config.json" ]; then CONF="client_config.json"; fi
+# Priority: System config (User Request)
+# if [ -f "config.json" ]; then CONF="config.json"; fi
+# if [ -f "client_config.json" ]; then CONF="client_config.json"; fi
 
 if [ ! -f "$CONF" ]; then
     echo "❌ No config file found (looked for config.json, client_config.json, /etc/neko-link/config.json)"
