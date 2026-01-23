@@ -1,4 +1,4 @@
-# Go-EtherTunnel 🚀
+# NekoLink 🐱 (Go-EtherTunnel)
 
 一个极简、高性能的二层 (Layer 2) VPN，使用 Golang 编写。
 它旨在提供一个安全、抗干扰且能够最大化利用带宽的虚拟以太网隧道。
@@ -74,13 +74,19 @@ interface tap0
 
 如果需要开机自启或后台长期运行，可以使用一键安装脚本：
 
+### 4. 安装为系统服务 (Systemd Service)
+
+使用 `install_service.sh` 脚本将 **NekoLink** 安装到系统：
+
 ```bash
-# 先确保配置好 config.json 或 client_config.json
 sudo ./install_service.sh
 ```
 
-脚本会引导您选择安装为 Server 或 Client 模式，并自动设置开机自启。安装后可以使用 `systemctl` 管理：
+- **二进制位置**: `/usr/local/bin/neko-link`
+- **配置文件**: `/etc/neko-link/config.json`
+- **服务名称**: `neko-link.service`
+
 ```bash
-sudo systemctl start vpn
-sudo systemctl status vpn
+sudo systemctl start neko-link
+sudo systemctl status neko-link
 ```
