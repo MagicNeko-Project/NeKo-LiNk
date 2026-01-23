@@ -90,3 +90,11 @@ sudo ./install_service.sh
 sudo systemctl start neko-link
 sudo systemctl status neko-link
 ```
+
+### 5. 升级 (Upgrade)
+
+在代码目录下执行升级脚本，它会自动拉取最新代码并重新编译重启服务：
+
+```bash
+sudo ./update.sh
+```
