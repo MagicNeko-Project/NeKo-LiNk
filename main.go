@@ -163,6 +163,14 @@ func (v *VPNInstance) InitTUN() {
 		runCmd("ip", "addr", "add", v.Cfg.LocalAddr, "dev", v.Cfg.InterfaceName)
 		runCmd("ip", "link", "set", v.Cfg.InterfaceName, "up") // Ensure UP
 		
+		// Log MAC Address
+		ifif, err := net.InterfaceByName(v.Cfg.InterfaceName)
+		if err == nil {
+			log.Printf("TAP MAC: %s", ifif.HardwareAddr.String())
+		} else {
+			log.Printf("TAP MAC Query Fail: %v", err)
+		}
+		
 		for event := range dev.Events() {
 			log.Printf("TAP Event: %v", event)
 		}
