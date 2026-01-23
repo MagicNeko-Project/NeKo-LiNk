@@ -328,8 +328,9 @@ func (v *VPNInstance) ProcessPacket(bufPtr *[]byte, n int, srcAddr net.Addr, idx
 	// We can reuse the start of 'encrypted' (which holds nonce) to store plaintext.
 	
 	// Careful: AEAD.Open clears/overwrites.
-	// dst = encrypted[:0] -> Reuses same backing array
-	plaintext, err := v.AEAD.Open(encrypted[:0], nonce, ciphertext, nil)
+	// dst = ciphertext[:0] -> Strict in-place decryption (dst start == src start).
+	// using encrypted[:0] caused partial overlap (dst=0, src=24) which Panics.
+	plaintext, err := v.AEAD.Open(ciphertext[:0], nonce, ciphertext, nil)
 	if err != nil { 
 		bufPool.Put(bufPtr)
 		return 
