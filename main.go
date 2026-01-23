@@ -391,8 +391,8 @@ func (v *VPNInstance) XDPListenerLoop() {
 }
 
 func (v *VPNInstance) SendPacket(data []byte, idx int, destAddr net.Addr) {
-	// ... (Existing TCP/UDP/Raw) ...
-	if v.Cfg.Protocol == "af_xdp" {
+	// XDP Acceleration
+	if v.Cfg.UseXDP {
 		// Construct full Eth/IP/UDP packet
 		// Then v.XDP.WritePacket(frame)
 		return

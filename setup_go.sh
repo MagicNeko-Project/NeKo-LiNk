@@ -6,26 +6,42 @@ NC='\033[0m'
 
 echo -e "${GREEN}>>> 开始安装 Go 语言环境...${NC}"
 
-# Check if Go is already installed
+# Check if Go is already installed and new enough
 if command -v go &> /dev/null; then
-    echo -e "${GREEN}>>> Go 已经安装: $(go version)${NC}"
-else
-    echo "Go 未找到，正在尝试自动安装..."
-    
-    # Try apt first (Debian/Ubuntu)
-    if command -v apt-get &> /dev/null; then
-        sudo apt-get update
-        sudo apt-get install -y golang clang llvm libelf-dev libbpf-dev gcc-multilib make linux-headers-$(uname -r)
-    elif command -v yum &> /dev/null; then
-        sudo yum install -y golang clang llvm libelf-devel libbpf-devel make kernel-headers
-    elif command -v dnf &> /dev/null; then
-        sudo dnf install -y golang clang llvm libelf-devel libbpf-devel make kernel-headers
-    elif command -v apk &> /dev/null; then
-        sudo apk add go clang llvm libelf-dev libbpf-dev make linux-headers
+    GO_VERSION=$(go version | awk '{print $3}' | sed 's/go//')
+    GO_MAJOR=$(echo $GO_VERSION | cut -d. -f1)
+    GO_MINOR=$(echo $GO_VERSION | cut -d. -f2)
+    if [ "$GO_MAJOR" -ge 1 ] && [ "$GO_MINOR" -ge 21 ]; then
+        echo -e "${GREEN}>>> Go 版本足够新: $(go version)${NC}"
     else
-        echo "无法自动安装 Go，请手动安装后重试。"
-        exit 1
+        echo "Go 版本太旧 ($GO_VERSION)，需要 1.21+。正在升级..."
+        rm -rf /usr/local/go
+        wget -q https://go.dev/dl/go1.22.5.linux-amd64.tar.gz -O /tmp/go.tar.gz
+        tar -C /usr/local -xzf /tmp/go.tar.gz
+        export PATH=$PATH:/usr/local/go/bin
+        echo 'export PATH=$PATH:/usr/local/go/bin' >> /etc/profile
+        echo -e "${GREEN}>>> Go 已升级到 $(go version)${NC}"
     fi
+else
+    echo "Go 未找到，正在安装 Go 1.22..."
+    wget -q https://go.dev/dl/go1.22.5.linux-amd64.tar.gz -O /tmp/go.tar.gz
+    tar -C /usr/local -xzf /tmp/go.tar.gz
+    export PATH=$PATH:/usr/local/go/bin
+    echo 'export PATH=$PATH:/usr/local/go/bin' >> /etc/profile
+    echo -e "${GREEN}>>> Go 已安装: $(go version)${NC}"
+fi
+
+# 安装 eBPF 编译依赖
+echo -e "${GREEN}>>> 安装 eBPF 编译工具链...${NC}"
+if command -v apt-get &> /dev/null; then
+    sudo apt-get update
+    sudo apt-get install -y clang llvm libelf-dev libbpf-dev gcc-multilib make linux-headers-$(uname -r)
+elif command -v yum &> /dev/null; then
+    sudo yum install -y clang llvm libelf-devel libbpf-devel make kernel-headers
+elif command -v dnf &> /dev/null; then
+    sudo dnf install -y clang llvm libelf-devel libbpf-devel make kernel-headers
+elif command -v apk &> /dev/null; then
+    sudo apk add clang llvm libelf-dev libbpf-dev make linux-headers
 fi
 
 echo -e "${GREEN}>>> 初始化项目依赖...${NC}"
