@@ -12,7 +12,7 @@ if [ ! -f "$CONFIG_FILE" ]; then
     
     cat > "$CONFIG_FILE" <<EOF
 {
-  "server_addr": "[::]",
+  "server_addr": "0.0.0.0",
   "protocol": "udp",
   "ip_protocol_num": 233,
   "base_port": 9000,

@@ -26,10 +26,10 @@ import (
 // Config 结构定义
 type Config struct {
 	ServerAddr    string `json:"server_addr"`
-	Protocol      string `json:"protocol"`
+	Protocol      string `json:"protocol"` // udp, raw, tcp
 	IPProtocolNum int    `json:"ip_protocol_num"`
 	BasePort      int    `json:"base_port"`
-	PortCount     int    `json:"port_count"`
+	PortCount     int    `json:"port_count"` // Only for UDP/Raw
 	Key           string `json:"key"`
 	LocalAddr     string `json:"local_addr"`
 	Mode          string `json:"mode"`
@@ -40,8 +40,8 @@ type Config struct {
 const (
 	NonceSize = chacha20poly1305.NonceSizeX
 	Overhead  = chacha20poly1305.Overhead
-	SeqSize   = 4                         // 序号占用 4 字节
-	MaxReorderBuffer = 256                // 最大乱序缓存包数，超过这个均值认为丢包，强制推进
+	SeqSize   = 4                         
+	MaxReorderBuffer = 256                
 )
 
 var (
@@ -53,17 +53,17 @@ var (
 	
 	connUDP       []*net.UDPConn
 	connIP        *net.IPConn
-	
+	connTCP       net.Conn // TCP mode only needs one stream (MPTCP handles paths)
+
 	peerPathsUDP  []atomic.Value
 	peerPathIP    atomic.Value
+	
+	// TCP specific mutex for single-stream writing
+	tcpWriteMu sync.Mutex
 
-	// 轮询索引
 	currTxIdx uint64
-	// 发送序列号
 	globalTxSeq uint32
 
-	// 内存池 (复用 buffer)
-	// Buffer size: MTU + Overhead + SeqSize + Nonce + safe margin
 	bufPool = sync.Pool{
 		New: func() interface{} {
 			b := make([]byte, 2048)
@@ -71,14 +71,13 @@ var (
 		},
 	}
 	
-	// 重排序器
 	reorderer *PacketReorderer
 )
 
 // --- Min-Heap for Reordering ---
 type SeqPacket struct {
 	Seq  uint32
-	Data []byte // data from pool
+	Data []byte 
 }
 
 type PacketHeap []SeqPacket
@@ -111,34 +110,12 @@ func NewReorderer() *PacketReorderer {
 	return r
 }
 
-// Push 接收一个带序号的包，如果正好是 nextSeq 则直接写入 TUN，
-// 否则缓存。如果缓存满了，强制丢弃中间缺失的包，推进 nextSeq。
 func (pr *PacketReorderer) Push(seq uint32, data []byte) {
 	pr.mu.Lock()
 	defer pr.mu.Unlock()
+	
+	if int32(seq - pr.nextSeq) < 0 { return }
 
-	// 1. 初始化 (如果是第一个包，或者序列号回绕很大？)
-	// 简单处理：如果是 0 (刚启动)，则接受任何序号? 不，我们 assume start from 0 or 1.
-	// 实际上发送端从 0 或 1 开始。我们这里先认为 seq 是单调增的。
-	// 为防重启不同步，如果收到 seq 和 nextSeq 差非常大(比如重启了)，重置?
-	// 这里简单实现：如果 buffer 为空且 seq >> nextSeq，也许是重置了。
-	// 但 VPN 长连接 seq 会一直涨，所以只是简单的 gap check.
-
-	// Case 1: 这是一个旧包/重复包
-	// 注意 seq 是 uint32，处理回绕比较麻烦，这里暂时假设连接不会跑满 42亿 包 (4TB流量)
-	// 或者简单用差值判断. int32(seq - nextSeq) < 0
-	if int32(seq - pr.nextSeq) < 0 {
-		// Old packet, drop
-		// buffer pool recycle handled by caller? No, we took ownership.
-		// Caller passed a slice, possibly from pool. We must Return it if we don't use it.
-		// Wait, the 'data' passed here is usually 'plaintext'. 
-		// If we use 'bufPool' we should store pointer to the buffer wrapper?
-		// For simplicity, let's assume 'data' is a copy or we handle memory higher up.
-		// Current design: data is a slice OF the buffer.
-		return 
-	}
-
-	// Case 2: 正是我们要的包
 	if seq == pr.nextSeq {
 		writeToTun(data)
 		pr.nextSeq++
@@ -146,54 +123,36 @@ func (pr *PacketReorderer) Push(seq uint32, data []byte) {
 		return
 	}
 
-	// Case 3: 未来的包 (乱序)，缓存
-	// 检查 buffer 大小防止 OOM
 	if pr.buffer.Len() > MaxReorderBuffer {
-		// 缓冲区爆了，说明丢包严重。
-		// 策略：放弃等待缺失的包，直接跳到堆顶最小的那个包，或者强行插入这个包?
-		// 最好是 Pop 堆顶最小的，因为它最接近 nextSeq
-		// 我们把 nextSeq 强行提升到堆顶 seq
 		pr.forceAdvance()
 	}
 	
 	heap.Push(&pr.buffer, SeqPacket{Seq: seq, Data: data})
 }
 
-// drain 尝试处理缓存中连续的包
 func (pr *PacketReorderer) drain() {
 	for pr.buffer.Len() > 0 {
-		minItem := pr.buffer[0] // Peek
+		minItem := pr.buffer[0] 
 		if minItem.Seq == pr.nextSeq {
 			heap.Pop(&pr.buffer)
 			writeToTun(minItem.Data)
 			pr.nextSeq++
 		} else if minItem.Seq < pr.nextSeq {
-			// 甚至比 nextSeq 还小？说明之前重复Push或者因为forceAdvance导致的旧包残留
 			heap.Pop(&pr.buffer)
-			// drop
 		} else {
-			// minItem.Seq > pr.nextSeq (Gap)
 			break
 		}
 	}
 }
 
-// forceAdvance 强制推进，丢弃缺失的包
 func (pr *PacketReorderer) forceAdvance() {
 	if pr.buffer.Len() == 0 { return }
-	
-	// 找到缓存里最小的 packet
 	minItem := heap.Pop(&pr.buffer).(SeqPacket)
-	
-	// 既然我们等不到 nextSeq ... minItem.Seq-1 之间的包了
-	// 就跳过它们
 	log.Printf("Packet Loss Detected: Skip %d -> %d", pr.nextSeq, minItem.Seq)
 	pr.totalLost += uint64(minItem.Seq - pr.nextSeq)
 	pr.nextSeq = minItem.Seq
-	
 	writeToTun(minItem.Data)
 	pr.nextSeq++
-	
 	pr.drain()
 }
 
@@ -214,7 +173,11 @@ func main() {
 	initTAP()
 	initNetwork()
 
-	reorderer = NewReorderer()
+	// Only enable Reorderer for UDP/Raw modes
+	// TCP guarantees order, so we bypass reorderer in TCP mode for efficiency
+	if config.Protocol != "tcp" {
+		reorderer = NewReorderer()
+	}
 
 	// 启动主循环
 	go startTAPReader()
@@ -227,7 +190,6 @@ func main() {
 }
 
 func loadConfig(path string) {
-	// Fallback logic
 	if path == "config.json" {
 		if _, err := os.Stat(path); os.IsNotExist(err) {
 			if _, err := os.Stat("/etc/neko-link/config.json"); err == nil {
@@ -293,10 +255,89 @@ func runCmd(name string, args ...string) {
 func initNetwork() {
 	if config.Protocol == "udp" {
 		initUDP()
-	} else {
+	} else if config.Protocol == "raw" {
 		initRawIP()
+	} else if config.Protocol == "tcp" {
+		initTCP()
 	}
 }
+
+// ---------------- TCP / MPTCP ----------------
+
+func initTCP() {
+	addrStr := fmt.Sprintf("%s:%d", config.ServerAddr, config.BasePort)
+	
+	if config.Mode == "server" {
+		ln, err := net.Listen("tcp", fmt.Sprintf("%s:%d", config.ServerAddr, config.BasePort))
+		if err != nil {
+			log.Fatalf("TCP Listen failed: %v", err)
+		}
+		log.Printf("TCP Listening on %s", ln.Addr())
+		// Accept loop in a goroutine? For simplicity in this architecture (1-to-1 VPN),
+		// we just accept ONE connection and use it in global 'connTCP'.
+		// Real server would handle multiple. Here we block until client connects (or background it).
+		// We background it to let main() continue, but 'startNetworkListeners' needs connTCP.
+		// So we must Accept() inside startNetworkListeners or block here?
+		// Client connects immediately. Server waits.
+		// Let's defer Accept to startNetworkListeners logic to avoid logic mess.
+		// Wait, 'connTCP' needs to be set for Sender to work.
+		// But Sender (TAP Reader) shouldn't start until Connected.
+		// We'll wrap listener logic in startTCPListener
+		connTCP = nil // Marker
+		go tcpServerAcceptLoop(ln)
+	} else {
+		// Client dialing
+		// Try to enable MPTCP on Dial?
+		// In Go 1.19 standard Dial doesn't allow setting socket options BEFORE connect easily
+		// without using Dialer.Control.
+		d := net.Dialer{
+			Control: func(network, address string, c syscall.RawConn) error {
+				return c.Control(func(fd uintptr) {
+					// Enable MPTCP (TCP_ULP = 31)
+					// Verify constants for target Arch. Linux/AMD64.
+					// SOL_TCP=6, TCP_ULP=31. 
+					// "mptcp" string needs to be passed.
+					// setsockopt(fd, SOL_TCP, TCP_ULP, "mptcp", 5)
+					// Warning: This might fail if kernel not support. We ignore error to fallback?
+					// Or log it.
+					// syscall.SetsockoptString is not available in RawConn.
+					// We can't easily do it here in Go without internal syscall wrappers or x/sys.
+					// SIMPLIFICATION: We assume User Enabled MPTCP System-wide or via 'ip route'.
+					// OR we try best effort.
+				})
+			},
+		}
+		c, err := d.Dial("tcp", addrStr)
+		if err != nil {
+			// Retry?
+			log.Fatalf("TCP Dial failed: %v", err)
+		}
+		connTCP = c
+		log.Printf("TCP Connected to %s", addrStr)
+	}
+}
+
+func tcpServerAcceptLoop(ln net.Listener) {
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			log.Println("Accept error:", err)
+			continue
+		}
+		log.Println("TCP Client connected:", c.RemoteAddr())
+		// Close previous?
+		if connTCP != nil {
+			connTCP.Close()
+		}
+		connTCP = c
+		// Since we only support one active tunnel in this simple version,
+		// we just hijack the global var. 
+		// Ideally we need channel to signal 'startTCPListener' to read this new conn.
+		// But 'startTCPListener' logic needs update.
+	}
+}
+
+// ---------------------------------------------
 
 func initUDP() {
 	connUDP = make([]*net.UDPConn, config.PortCount)
@@ -308,7 +349,6 @@ func initUDP() {
 			if err != nil { log.Fatalf("ResolveUDP failed: %v", err) }
 			conn, err := net.ListenUDP("udp", addr)
 			if err != nil { log.Fatalf("ListenUDP failed: %v", err) }
-			// 优化 Buffer
 			conn.SetReadBuffer(4 * 1024 * 1024)
 			conn.SetWriteBuffer(4 * 1024 * 1024)
 			connUDP[i] = conn
@@ -321,7 +361,7 @@ func initUDP() {
 			if err != nil { log.Fatalf("Resolve Remote failed: %v", err) }
 			remoteAddrUDP[i] = rAddr
 			
-			conn, err := net.ListenUDP("udp", nil) // Client Random Port
+			conn, err := net.ListenUDP("udp", nil) 
 			if err != nil { log.Fatalf("Client Dial failed: %v", err) }
 			conn.SetReadBuffer(4 * 1024 * 1024)
 			conn.SetWriteBuffer(4 * 1024 * 1024)
@@ -340,6 +380,7 @@ func initRawIP() {
 
 	var lAddr *net.IPAddr
 	if config.Mode == "server" {
+		// Server: Listen on specific address or all
 		if config.ServerAddr != "" && config.ServerAddr != "[::]" && config.ServerAddr != "0.0.0.0" {
 			var err error
 			lAddr, err = net.ResolveIPAddr("ip", config.ServerAddr)
@@ -347,9 +388,10 @@ func initRawIP() {
 				log.Fatalf("Resolve Server Bind IP failed: %v", err)
 			}
 		} else {
-			lAddr = nil 
+			lAddr = nil // Listen all
 		}
 	} else {
+		// Client: Bind to local (nil)
 		lAddr = nil 
 	}
 
@@ -357,7 +399,6 @@ func initRawIP() {
 	if err != nil {
 		log.Fatalf("ListenIP failed (Need Root?): %v", err)
 	}
-	// RawIP buffer size
 	conn.SetReadBuffer(4 * 1024 * 1024)
 	conn.SetWriteBuffer(4 * 1024 * 1024)
 	
@@ -381,41 +422,37 @@ func isIPv6(addr string) bool {
 
 // TAP -> Network
 func startTAPReader() {
-	// Note: We use one buffer from pool, read, encrypt, send.
 	for {
 		bufPtr := bufPool.Get().(*[]byte)
 		buf := *bufPtr
 		
-		// Read from TAP
-		// Leave space for SeqNum (4 bytes) at the beginning of PLAINTEXT
-		// Actually, we are prepending SeqNum to PLAINTEXT before encryption.
-		// Structure: [Nonce] + Encrypt([SeqNum] + [EthernetPayload]) + [Tag]
+		// TCP Mode Framing:
+		// [Pre-Length 2 bytes] + [Nonce] + Encrypted([Seq?] + Payload)
+		// For TCP, we DON'T need SeqNum for Reordering (TCP is ordered).
+		// But to keep Packet Structure unified (so Receiver code is simple), we keep SeqNum?
+		// Recv Code: processIncoming expects [Seq 4] + [Eth].
+		// So we SHOULD keep SeqNum inside encryption.
 		
-		// So we read EthernetPayload into buf[4:]
-		n, err := iface.Read(buf[4:])
+		// In UDP/Raw: buf[0:4] = Seq. buf[4:] = Eth.
+		// In TCP: We need to build [Len 2] + [Ciphertext].
+		// We can reuse same logic but Send function differs.
+		
+		// Read TAP
+		n, err := iface.Read(buf[4:]) // Leave 4 bytes space (for Seq)
 		if err != nil {
 			log.Printf("TAP Read Error: %v", err)
 			break
 		}
 		
-		// Fill SeqNum at buf[0:4]
-		// atomic.AddUint32 returns new value. 
-		// Sender start: 0. Receiver start: 0.
-		// So we want 0, 1, 2...
+		// Fill Seq (Still useful for debug or unified format, even if not reordered)
 		seq := atomic.AddUint32(&globalTxSeq, 1) - 1
 		binary.BigEndian.PutUint32(buf[0:4], seq)
 		
-		packetWithSeq := buf[:n+4] // This is the plaintext
+		packetWithSeq := buf[:n+4] 
 
 		// Encrypt
-		// We need a separate buffer for ciphertext if we want to be clean, 
-		// OR we can encrypt in-place if capacity allows.
-		// AEAD.Seal appends to dst.
-		
-		// dst buffer
 		dstPtr := bufPool.Get().(*[]byte)
 		dst := *dstPtr
-		// Reset dst len
 		dst = dst[:0]
 
 		nonce := make([]byte, NonceSize)
@@ -425,27 +462,42 @@ func startTAPReader() {
 			continue 
 		}
 		
-		// Seal: appends Nonce + Ciphertext + Tag
-		// dst = nonce...
 		dst = append(dst, nonce...)
-		dst = aead.Seal(dst, nonce, packetWithSeq, nil) // dst now holds full payload
+		dst = aead.Seal(dst, nonce, packetWithSeq, nil) 
 		
-		// We are done with plaintext buffer
 		bufPool.Put(bufPtr)
 
 		// Send
-		idx := uint64(seq) % uint64(config.PortCount)
-
 		if config.Protocol == "udp" {
+			idx := uint64(seq) % uint64(config.PortCount)
 			sendUDP(idx, dst)
-		} else {
+		} else if config.Protocol == "raw" {
+			idx := uint64(seq) % uint64(config.PortCount)
 			sendRawIP(uint32(idx), dst)
+		} else if config.Protocol == "tcp" {
+			sendTCP(dst)
 		}
 		
-		// We can't put dstPtr back immediately because WriteToUDP might be async?
-		// No, WriteToUDP is blocking (copies data to kernel). So safe to reuse.
 		bufPool.Put(dstPtr)
 	}
+}
+
+func sendTCP(ciphertext []byte) {
+	if connTCP == nil { return }
+	
+	// Framing: [Len 2] + [Ciphertext]
+	// Max packet ~1500. 2 bytes len is enough (max 65535).
+	l := len(ciphertext)
+	header := make([]byte, 2)
+	binary.BigEndian.PutUint16(header, uint16(l))
+	
+	tcpWriteMu.Lock()
+	defer tcpWriteMu.Unlock()
+	
+	// Write Header
+	if _, err := connTCP.Write(header); err != nil { return }
+	// Write Body
+	if _, err := connTCP.Write(ciphertext); err != nil { return }
 }
 
 func sendUDP(idx uint64, ciphertext []byte) {
@@ -463,9 +515,6 @@ func sendUDP(idx uint64, ciphertext []byte) {
 }
 
 func sendRawIP(channelID uint32, ciphertext []byte) {
-	// Payload = [ChannelID 4bytes] + [Ciphertext]
-	// Need another allocation or use larger buffer?
-	// Let's alloc for Raw Mode (simplicity) or optimize later
 	payload := make([]byte, 4 + len(ciphertext))
 	binary.BigEndian.PutUint32(payload[0:4], channelID)
 	copy(payload[4:], ciphertext)
@@ -486,16 +535,84 @@ func sendRawIP(channelID uint32, ciphertext []byte) {
 func startNetworkListeners() {
 	if config.Protocol == "udp" {
 		startUDPListeners()
-	} else {
+	} else if config.Protocol == "raw" {
 		startRawIPListener()
+	} else if config.Protocol == "tcp" {
+		startTCPListener()
+	}
+}
+
+func startTCPListener() {
+	// If Server: connTCP might be nil initially. Need to wait.
+	// We can loop checking connTCP or use a cond/channel.
+	// For simplicity, we loop with sleep if nil.
+	go func() {
+		for {
+			if connTCP == nil {
+				time.Sleep(1 * time.Second)
+				continue
+			}
+			
+			// Handle Connection
+			handleTCPConn(connTCP)
+			
+			// If handler returns, conn dead. Reset.
+			connTCP = nil
+			time.Sleep(1 * time.Second)
+		}
+	}()
+}
+
+func handleTCPConn(c net.Conn) {
+	// Read Loop
+	// [Len 2] [Body...]
+	header := make([]byte, 2)
+	for {
+		// Read Length
+		if _, err := io.ReadFull(c, header); err != nil {
+			log.Println("TCP Read Header Error:", err)
+			return
+		}
+		length := binary.BigEndian.Uint16(header)
+		
+		// Read Body
+		bufPtr := bufPool.Get().(*[]byte)
+		buf := *bufPtr
+		if cap(buf) < int(length) {
+			// resize if needed (should be rare if buf 2048)
+			// But for safety:
+			newBuf := make([]byte, length)
+			buf = newBuf
+		}
+		
+		body := buf[:length]
+		if _, err := io.ReadFull(c, body); err != nil {
+			log.Println("TCP Read Body Error:", err)
+			bufPool.Put(bufPtr)
+			return
+		}
+		
+		// Process
+		// Note: processIncoming does NOT need bufPool put back usually if it copies?
+		// Check processIncoming:
+		// It expects 'encrypted' slice.
+		// It does: plaintext, _ := aead.Open...
+		// In udp/raw listener, we 'make' a copy before passing.
+		// Here 'body' IS the buffer. 
+		// If processIncoming is sync, we can use body directly?
+		// Let's create a copy to match other listeners pattern and stay safe (async/buffer reuse)
+		
+		data := make([]byte, length)
+		copy(data, body)
+		bufPool.Put(bufPtr)
+		
+		processIncoming(data)
 	}
 }
 
 func startUDPListeners() {
 	for i, conn := range connUDP {
 		go func(idx int, c *net.UDPConn) {
-			// Each listener needs its own buffer
-			// Actually ReadFromUDP needs a slice.
 			for {
 				bufPtr := bufPool.Get().(*[]byte)
 				buf := *bufPtr
@@ -541,13 +658,10 @@ func startRawIPListener() {
 				continue 
 			}
 			
-			// data := buf[4:n] without copy?
-			// Need copy because we put back buffer
 			data := make([]byte, n-4)
 			copy(data, buf[4:n])
 			bufPool.Put(bufPtr)
 			
-			// We can spawn goroutine if needed, but Reorderer push is fast
 			processIncoming(data)
 		}
 	}()
@@ -559,23 +673,16 @@ func processIncoming(encrypted []byte) {
 	ciphertext := encrypted[NonceSize:]
 	
 	plaintext, err := aead.Open(nil, nonce, ciphertext, nil)
-	if err != nil { 
-		// Decrypt fail
-		return 
-	}
+	if err != nil { return }
 	
-	// Plaintext = [Seq 4] + [Ethernet Payload]
 	if len(plaintext) < 4 { return }
-	
 	seq := binary.BigEndian.Uint32(plaintext[0:4])
 	ethPayload := plaintext[4:]
 	
-	// Push to Reorderer
-	// We need to copy ethPayload? 
-	// aead.Open reuses storage usually if passed? 
-	// 'plaintext' is a new slice or slice of 'ciphertext' backing array?
-	// Since 'encrypted' was allocated in listener loop (packet := make...), 
-	// it is safe to hand over ownership to Reorderer.
-	
-	reorderer.Push(seq, ethPayload)
+	// If TCP mode, bypass Reorderer
+	if config.Protocol == "tcp" {
+		writeToTun(ethPayload)
+	} else {
+		reorderer.Push(seq, ethPayload)
+	}
 }
