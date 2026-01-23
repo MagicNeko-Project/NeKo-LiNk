@@ -356,7 +356,12 @@ func (v *VPNInstance) TAPReaderLoop() {
 			}
 
 			if dstIP != 0 {
-				key := (uint64(dstIP) << 32) | uint64(idx)
+				// Fix: In Raw mode, we only listen/learn on idx 0 (ConnRaw), so we must lookup on idx 0.
+				// For UDP, we learn on specific channels.
+				lookupIdx := idx
+				if v.Cfg.Protocol == "raw" { lookupIdx = 0 }
+				
+				key := (uint64(dstIP) << 32) | uint64(lookupIdx)
 				if val, ok := v.PeerMap.Load(key); ok {
 					destAddr = val.(net.Addr)
 				}
