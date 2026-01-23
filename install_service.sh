@@ -33,22 +33,36 @@ if [ "$choice" == "1" ]; then
         echo "当前目录无 $CFG_SRC，是否生成默认服务端配置？(y/n)"
         read -p "> " gen_cfg
         if [ "$gen_cfg" == "y" ]; then
+             echo "是否开启现代科技加速 (AF_XDP)? (y/N)"
+             read -p "> " use_xdp
+             USE_XDP_VAL="false"
+             PHY_IFACE=""
+             if [ "$use_xdp" == "y" ] || [ "$use_xdp" == "Y" ]; then
+                USE_XDP_VAL="true"
+                echo "请输入物理网卡名称 (例如 eth0):"
+                read -p "> " PHY_IFACE
+                if [ -z "$PHY_IFACE" ]; then PHY_IFACE="eth0"; fi
+             fi
+
              RAND_KEY=$(openssl rand -hex 32)
              cat > config.json <<EOF
-{
-  "server_addr": "[::]",
-  "protocol": "udp",
-  "ip_protocol_num": 233,
-  "base_port": 9000,
-  "port_count": 4,
-  "key": "$RAND_KEY",
-  "local_addr": "10.0.0.1/24",
-  "mode": "server",
-  "interface_name": "neko0",
-  "mtu": 1400
-}
+[
+  {
+    "mode": "server",
+    "protocol": "udp",
+    "use_xdp": $USE_XDP_VAL,
+    "xdp_device": "$PHY_IFACE",
+    "interface_name": "neko0",
+    "local_addr": "10.0.0.1/24",
+    "server_addr": "0.0.0.0",
+    "base_port": 9000,
+    "port_count": 4,
+    "key": "$RAND_KEY",
+    "mtu": 1400
+  }
+]
 EOF
-            echo "已生成默认配置 (Key: $RAND_KEY)"
+             echo "已生成默认配置 (Key: $RAND_KEY)"
         else
             echo "错误：找不到配置文件。"; exit 1
         fi
@@ -58,20 +72,37 @@ elif [ "$choice" == "2" ]; then
     CFG_SRC="client_config.json"
     if [ ! -f "$CFG_SRC" ]; then
          echo "警告：当前目录找不到 $CFG_SRC，安装后请务必去 $CONF_DIR/config.json 手动配置！"
-         # 创建一个空模版
+         
+         # 同样的 XDP 询问逻辑
+         echo "是否开启现代科技加速 (AF_XDP)? (y/N)"
+         read -p "> " use_xdp
+         USE_XDP_VAL="false"
+         PHY_IFACE=""
+         if [ "$use_xdp" == "y" ] || [ "$use_xdp" == "Y" ]; then
+            USE_XDP_VAL="true"
+            echo "请输入物理网卡名称 (例如 eth0):"
+            read -p "> " PHY_IFACE
+            if [ -z "$PHY_IFACE" ]; then PHY_IFACE="eth0"; fi
+         fi
+
          cat > client_config.json <<EOF
-{
-  "server_addr": "1.2.3.4",
-  "protocol": "udp",
-  "ip_protocol_num": 233,
-  "base_port": 9000,
-  "port_count": 4,
-  "key": "FILL_ME",
-  "local_addr": "10.0.0.2/24",
-  "mode": "client",
-  "interface_name": "neko0",
-  "mtu": 1400
-}
+[
+  {
+    "mode": "client",
+    "protocol": "udp",
+    "use_xdp": $USE_XDP_VAL,
+    "xdp_device": "$PHY_IFACE",
+    "interface_name": "neko0",
+    "local_addr": "10.0.0.2/24",
+    "server_ip": "1.2.3.4",
+    "server_port": 9000,
+    "base_port": 9000,
+    "port_count": 4,
+    "key": "FILL_ME",
+    "socks_bind": "127.0.0.1:1080",
+    "mtu": 1400
+  }
+]
 EOF
     fi
     SERVICE_DESC="NekoLink VPN Client"
