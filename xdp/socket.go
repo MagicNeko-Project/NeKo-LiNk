@@ -2,6 +2,7 @@ package xdp
 
 import (
 	"bytes"
+	"embed"
 	"fmt"
 	"log"
 	"net"
