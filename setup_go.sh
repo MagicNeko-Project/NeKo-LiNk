@@ -6,7 +6,7 @@ GREEN='\033[0;32m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-GO_VERSION="1.24.0"
+GO_VERSION="1.24.12"
 LOCAL_GO_DIR="$(pwd)/.go"
 ARCH=$(uname -m)
 
