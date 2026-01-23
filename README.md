@@ -5,8 +5,7 @@
 
 ## ✨ 特性 (Features)
 
-*   **Layer 3 虚拟化 (TUN)**: 基于 TUN 设备，直接处理 IP 包。告别 ARP 广播风暴，专注于高效的端到端 IP 传输。
-*   **零拷贝加速 (Zero-Copy)**: 引入 `wireguard/tun` 库，支持 GSO (Generic Segmentation Offload) 和 Batch Read/Write，大幅降低系统调用开销。
+*   **Layer 2 虚拟化**: 基于 TAP 设备，构建虚拟以太网。这意味着你可以在隧道内运行 ARP, DHCP, OSPF, IPv6 等任何二层协议。
 *   **双模传输 (Dual Mode)**:
     *   `UDP` 模式: 标准兼容模式，适合 NAT 环境。
     *   `Raw IP` 模式: 使用自定义 IP 协议号 (默认 233)，无视端口封锁，拥有极高的隐蔽性。
@@ -24,7 +23,7 @@
 
 ### 1. 编译 (Build)
 
-需要 Go 1.22+ 环境（不用担心，脚本会自动为您在项目目录下安装，不污染系统）。
+需要 Go 1.19+ 环境。
 
 ```bash
 git clone https://github.com/yourname/go-ethertunnel.git
@@ -48,9 +47,7 @@ go build -o vpn main.go
   "local_addr": "10.0.0.1/24",     // 虚拟网卡 IP
   "mode": "server",                // "server" 或 "client"
   "interface_name": "tap0",        // 自定义网卡名称
-  "mtu": 1400,
-  "use_xdp": false,                // 是否开启 AF_XDP 加速 (需 Linux 5.10+)
-  "xdp_device": "eth0"             // 物理网卡名称 (仅开启 XDP 时需要)
+  "mtu": 1400
 }
 ```
 
@@ -58,11 +55,10 @@ go build -o vpn main.go
 
 ```bash
 # 服务端
-make                   # 自动下载 Go 1.22 并编译
-sudo ./install_service.sh  # 或手动 ./vpp -c config.json
+sudo ./vpn -c config.json
 
-# 调试与排错
-sudo ./debug.sh        # 一键停止服务、重编译、前台运行并打印 verbose 日志
+# 客户端
+sudo ./vpn -c client_config.json
 ```
 
 ## 🧪 进阶玩法 (Advanced)
@@ -149,57 +145,3 @@ NekoLink 的服务端采用 **智能动态学习** 机制。
 *   **服务端**: 只需要配置一份。
 *   **客户端**: 可以有 N 个。只需给每个客户端配置不同的 `local_addr` (例如 `10.0.0.2`, `10.0.0.3`...)。
 *   **连接**: 当客户端发送数据包时，服务端会自动记录该 IP 对应的物理地址。支持点对多点 (Point-to-Multipoint) 拓扑。
-
----
-
-### 8. 🧪 现代科技：AF_XDP (Zero Copy) 技术详解
-
-> **注意**: 本章节仅适用于 `feature/af-xdp` 分支。这是 Linux 网络编程的皇冠明珠。
-
-#### 8.1 为什么要重写？(The Pain)
-在标准模式下，当网卡收到一个 VPN UDP 包时，它经历了漫长的旅程：
-1.  **网卡中断**: CPU 停止工作去响应。
-2.  **内核分配**: Linux 内核分配 `sk_buff` 内存结构。
-3.  **协议栈处理**: Netfilter (防火墙), Conntrack (连接追踪), IP 路由查找...
-4.  **内存拷贝**: 数据从内核空间拷贝到 NekoLink 的用户空间内存 (Go Runtime)。
-5.  **上下文切换**: CPU 上下文从内核态切到用户态。
-**痛点**: 对于小包（游戏/语音），这套流程的开销比发包本身还大！
-
-#### 8.2 AF_XDP 的魔法 (The Magic)
-这个分支引入了 **XDP (eXpress Data Path)**，它是一条高速公路：
-
-1.  **eBPF 拦截器 (`xdp_kern.c`)**:
-    *   我们在网卡驱动里植入了一个微型 C 程序。
-    *   数据包刚从网线进来，还没进操作系统，就被它拦截了。
-    *   它看一眼端口号：“哟，是 NekoLink 的包？直接带走！”
-
-2.  **直接内存访问 (UMEM)**:
-    *   **Zero Copy (零拷贝)**: 网卡直接把数据写到了 Go 程序能看到的**物理内存地址**。
-    *   没有 `sk_buff`，没有防火墙检查，没有内核拷贝。
-    *   数据“瞬移”到了我们的加密函数面前。
-
-#### 8.3 架构对比
-
-| 特性 | 标准版 (Main Branch) | AF_XDP 版 (This Branch) |
-| :--- | :--- | :--- |
-| **收包路径** | 网卡 -> 内核 -> Go | 网卡 -> Go |
-| **内存拷贝** | 至少 1 次 | **0 次** |
-| **系统调用** | `recvfrom` (频繁) | `poll` (批量) |
-| **小包性能** | 约 300k PPS | **10M+ PPS** (理论值) |
-| **CPU 占用** | 高 (内核处理) | 低 (仅业务逻辑) |
-
-#### 8.4 如何开启 (How to Enable)
-不再需要修改协议类型！只需在 `config.json` 中添加 `"use_xdp": true`。
-
-```json
-{
-  "mode": "server",
-  "protocol": "udp",
-  "use_xdp": true,          // 开启核动力加速！
-  "xdp_device": "eth0",     // 【重点】这里填您的物理网卡名 (用来上网的那个)
-  "interface_name": "neko0" // VPN 虚拟网卡名
-}
-```
-
-*   **UDP / Raw**: 完美支持，性能提升巨大。
-*   **TCP**: 暂不支持 (自动降级为标准内核模式)。

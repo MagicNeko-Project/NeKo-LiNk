@@ -19,10 +19,8 @@ import (
 	"syscall"
 	"time"
 
-	"golang.zx2c4.com/wireguard/tun"
+	"github.com/songgao/water"
 	"golang.org/x/crypto/chacha20poly1305"
-	"golang.org/x/net/ipv4"
-	"vpn/xdp"
 )
 
 // --- Configuration ---
@@ -43,8 +41,6 @@ type Config struct {
 
 	IPProtocolNum int `json:"ip_protocol_num"`
 	PortCount     int `json:"port_count"`
-	UseXDP        bool   `json:"use_xdp"`
-	XDPDevice     string `json:"xdp_device"` // Physical Interface for XDP binding
 
 	SocksBind string `json:"socks_bind"`
 }
@@ -67,21 +63,8 @@ const (
 	NonceSize = chacha20poly1305.NonceSizeX
 	Overhead  = chacha20poly1305.Overhead
 	SeqSize   = 4
-	MaxReorderBuffer = 8192 // Increased to 8192 (16MB) to safely buffer high-speed jitter
-	TunOffset = 4 // Set to 4 for Linux TUN (Packet Information header)
+	MaxReorderBuffer = 256
 )
-
-// --- Helper Functions ---
-
-// 检测是否为组播或广播包
-func isMulticastOrBroadcast(ethFrame []byte) bool {
-	if len(ethFrame) < 14 { return false }
-	
-	// 组播/广播判断：目标 MAC 最低位为 1
-	// 组播: 01:xx:xx:xx:xx:xx
-	// 广播: ff:ff:ff:ff:ff:ff
-	return ethFrame[0]&0x01 != 0
-}
 
 var bufPool = sync.Pool{
 	New: func() interface{} {
@@ -95,7 +78,7 @@ var bufPool = sync.Pool{
 type VPNInstance struct {
 	Cfg Config
 	
-	TunDev tun.Device
+	Iface *water.Interface
 	AEAD  cipher.AEAD
 	
 	ConnUDP   []*net.UDPConn
@@ -107,8 +90,6 @@ type VPNInstance struct {
 	
 	ClientRemoteUDP []*net.UDPAddr
 	ClientRemoteIP  *net.IPAddr
-	
-	XDP *xdp.XDPSocket
 	
 	SessionID uint32
 	TxSeq     uint32
@@ -130,41 +111,47 @@ func NewVPNInstance(cfg Config) *VPNInstance {
 	v.SessionID = binary.BigEndian.Uint32(b)
 
 	v.Reorderer = NewReorderer()
-	v.Reorderer.WriteFunc = v.IfaceWrite
 	
 	return v
 }
 
-func (v *VPNInstance) InitTUN() {
-	// Create TUN device
-	dev, err := tun.CreateTUN(v.Cfg.InterfaceName, v.Cfg.MTU)
-	if err != nil { j, _ := tun.CreateTUN("utun", v.Cfg.MTU); if j!=nil{dev=j; err=nil} else {log.Fatalf("TUN Init Fail: %v", err)} }
-    if err != nil { log.Fatal(err) }
+func (v *VPNInstance) Start() {
+	log.Printf("[%s] Starting %s mode on %s...", v.Cfg.InterfaceName, v.Cfg.Mode, v.Cfg.LocalAddr)
+	v.InitTAP()
+	// Reorderer callback needs Instance method, but struct function pointer is easy
+	v.Reorderer.WriteFunc = v.IfaceWrite
 	
-	v.TunDev = dev
+	v.InitNetwork()
+
+	if v.Cfg.Mode == "client" && v.Cfg.SocksBind != "" {
+		go v.StartSocks5()
+	}
+	if v.Cfg.Mode == "client" {
+		go v.KeepaliveLoop()
+	}
+	go v.TAPReaderLoop()
+}
+
+// --- TAP ---
+
+func (v *VPNInstance) InitTAP() {
+	configIface := water.Config{ DeviceType: water.TAP }
+	configIface.Name = v.Cfg.InterfaceName
+	var err error
+	v.Iface, err = water.New(configIface)
+	if err != nil { log.Fatalf("TAP Init Fail: %v", err) }
 	
-	// Native TUN implementation doesn't execute 'ip' commands. We do it manually.
 	go func() {
 		time.Sleep(500 * time.Millisecond)
-		runCmd("ip", "addr", "add", v.Cfg.LocalAddr, "dev", v.Cfg.InterfaceName)
-		runCmd("ip", "link", "set", v.Cfg.InterfaceName, "up")
-		runCmd("ip", "link", "set", v.Cfg.InterfaceName, "mtu", fmt.Sprintf("%d", v.Cfg.MTU))
-		log.Printf("[%s] Interface Up (TUN L3 - WireGuard)", v.Cfg.InterfaceName)
+		runCmd("ip", "addr", "add", v.Cfg.LocalAddr, "dev", v.Iface.Name())
+		runCmd("ip", "link", "set", v.Iface.Name(), "mtu", fmt.Sprintf("%d", v.Cfg.MTU))
+		runCmd("ip", "link", "set", v.Iface.Name(), "up")
+		log.Printf("[%s] Interface Up", v.Cfg.InterfaceName)
 	}()
 }
 
-
-
-
 func (v *VPNInstance) IfaceWrite(data []byte) {
-	// TUN Write works with batch ([][]byte).
-	// We wrap single packet for compatibility with current Reorderer
-	// Note: offset must match the headroom we reserved (TunOffset)
-	// log.Printf("TUN Write %d bytes (Offset %d)", len(data)-TunOffset, TunOffset)
-	_, err := v.TunDev.Write([][]byte{data}, TunOffset)
-	if err != nil {
-		log.Printf("TUN Write Error: %v", err)
-	}
+	v.Iface.Write(data)
 }
 
 // --- Network ---
@@ -194,11 +181,7 @@ func (v *VPNInstance) InitNetwork() {
 			lAddr, _ := net.ResolveUDPAddr("udp", bindAddrStr)
 			c, err := net.ListenUDP("udp", lAddr)
 			if err != nil { log.Fatal(err) }
-			
-			// Increase Buffer to 16MB to match tuned system limits
-			c.SetReadBuffer(16<<20)
-			c.SetWriteBuffer(16<<20)
-			
+			c.SetReadBuffer(4<<20); c.SetWriteBuffer(4<<20)
 			v.ConnUDP[i] = c
 			
 			if v.Cfg.Mode == "client" {
@@ -217,8 +200,7 @@ func (v *VPNInstance) InitNetwork() {
 		if v.Cfg.Mode == "server" && v.Cfg.ServerBindAddr != "0.0.0.0" { lAddr, _ = net.ResolveIPAddr("ip", v.Cfg.ServerBindAddr) }
 		c, err := net.ListenIP(protoStr, lAddr)
 		if err != nil { log.Fatal(err) }
-		// Increase Buffer to 16MB to match tuned system limits
-		c.SetReadBuffer(16<<20); c.SetWriteBuffer(16<<20)
+		c.SetReadBuffer(4<<20); c.SetWriteBuffer(4<<20)
 		v.ConnRaw = c
 		if v.Cfg.Mode == "client" {
 			v.ClientRemoteIP, _ = net.ResolveIPAddr("ip", v.Cfg.RemoteIP)
@@ -228,40 +210,13 @@ func (v *VPNInstance) InitNetwork() {
 }
 
 func (v *VPNInstance) UDPListenerLoop(idx int, c *net.UDPConn) {
-	// GSO/GRO Optimization: Use ReadBatch (recvmmsg)
-	pc := ipv4.NewPacketConn(c)
-	const batchSize = 64 // Linux limit for recvmmsg is typically high, 64 is standard for offload
-	
-	msgs := make([]ipv4.Message, batchSize)
-	bufPtrs := make([]*[]byte, batchSize) // Keep track of pointers to return/pass ownership
-	
-	// Pre-fill buffers
-	for i := range msgs {
-		bufPtrs[i] = bufPool.Get().(*[]byte)
-		msgs[i].Buffers = [][]byte{ *bufPtrs[i] }
-	}
-
 	for {
-		nMsgs, err := pc.ReadBatch(msgs, 0)
-		if err != nil {
-			log.Printf("ReadBatch error: %v", err)
-			// Wait a bit before retry to avoid busy loop on error
-			time.Sleep(100 * time.Millisecond)
-			continue
-		}
-
-		for i := 0; i < nMsgs; i++ {
-			msg := &msgs[i]
-			bufPtr := bufPtrs[i]
-			
-			// ProcessPacket takes ownership of bufPtr and will Put it back to pool
-			v.ProcessPacket(bufPtr, msg.N, msg.Addr, idx)
-			
-			// Refill the slot with a NEW buffer for next read
-			newPtr := bufPool.Get().(*[]byte)
-			bufPtrs[i] = newPtr
-			msg.Buffers[0] = *newPtr
-		}
+		bufPtr := bufPool.Get().(*[]byte)
+		buf := *bufPtr
+		n, src, err := c.ReadFromUDP(buf)
+		if err != nil { bufPool.Put(bufPtr); return }
+		packet := make([]byte, n); copy(packet, buf[:n]); bufPool.Put(bufPtr)
+		v.ProcessPacket(packet, src, idx)
 	}
 }
 
@@ -272,23 +227,8 @@ func (v *VPNInstance) RawListenerLoop(c *net.IPConn) {
 		n, src, err := c.ReadFromIP(buf)
 		if err != nil { bufPool.Put(bufPtr); return }
 		if n < 4 { bufPool.Put(bufPtr); continue }
-		
-		// Zero-Copy for Raw:
-		// We need to strip 4 bytes header. 
-		// Instead of copy, we can just slice the buffer?
-		// But ProcessPacket expects *bufPtr to point to the start of encryption data.
-		// If we slice (*bufPtr)[4:], that's fine for data, but when we Put(bufPtr) back, we put the original slice header?
-		// bufPool New() returns 2048 byte slice.
-		// If we modify *bufPtr to be a sub-slice, Put() might be confused if it relies on cap? 
-		// Go's sync.Pool doesn't care about cap/len resets unless we do it manually.
-		// Our New() does not reset.
-		// Ideally we should copy if we want to align payload?
-		// Or we pass an offset? ProcessPacket takes *bufPtr.
-		// Let's slide data to front? overlap copy.
-		// copy(buf, buf[4:n]) -> data is now at 0.
-		// n = n - 4
-		copy(buf, buf[4:n])
-		v.ProcessPacket(bufPtr, n-4, src, 0)
+		data := make([]byte, n-4); copy(data, buf[4:n]); bufPool.Put(bufPtr)
+		v.ProcessPacket(data, src, 0)
 	}
 }
 
@@ -320,358 +260,128 @@ func (v *VPNInstance) TCPHandler(c net.Conn) {
 		if cap(buf) < int(l) { newB := make([]byte, l); buf = newB }
 		body := buf[:l]
 		if _, err := io.ReadFull(c, body); err != nil { bufPool.Put(bufPtr); return }
-		// TCP Framing: Body is the packet.
-		// Zero-Copy: Pass bufPtr directly.
-		v.ProcessPacket(bufPtr, int(l), c.RemoteAddr(), 0)
+		data := make([]byte, l); copy(data, body); bufPool.Put(bufPtr)
+		v.ProcessPacket(data, c.RemoteAddr(), 0)
 	}
 }
 
-// ProcessPacket takes ownership of bufPtr (which contains data at *bufPtr)
-func (v *VPNInstance) ProcessPacket(bufPtr *[]byte, n int, srcAddr net.Addr, idx int) {
-	encrypted := (*bufPtr)[:n]
-	log.Printf("RX %d bytes from %v", n, srcAddr)
-	
-	if len(encrypted) < NonceSize+Overhead { 
-		log.Printf("Drop: Too short for crypto (expected %d, got %d)", NonceSize+Overhead, len(encrypted))
-		bufPool.Put(bufPtr)
-		return 
-	}
+func (v *VPNInstance) ProcessPacket(encrypted []byte, srcAddr net.Addr, idx int) {
+	if len(encrypted) < NonceSize+Overhead { return }
 	nonce := encrypted[:NonceSize]
 	ciphertext := encrypted[NonceSize:]
 	
-	// Zero-Copy Decrypt: Reuse 'encrypted' buffer for plaintext
-	// Open appends to dst. If we pass nil as dst, it allocates.
-	// We want to decrypt in-place or reuse buffer. 
-	// AEAD.Open can decrypt in-place if dst and src overlap/are same.
-	// But we need to be careful about Nonce preservation if needed? No, nonce is outside ciphertext.
+	plaintext, err := v.AEAD.Open(nil, nonce, ciphertext, nil)
+	if err != nil { return }
 	
-	// Open(dst, nonce, ciphertext, additionalData)
-	// We use the capacity of bufPtr.
-	// Let's perform in-place decryption. 'ciphertext' is part of 'encrypted' underlying array.
-	// We can reuse the start of 'encrypted' (which holds nonce) to store plaintext.
+	// [Sess 4][Seq 4][Ethernet[IP...]]
+	// Eth=14. IP Start=22. SrcIP=22+12=34.
+	// Min len = 38.
+	if len(plaintext) < 38 { return }
 	
-	// Careful: AEAD.Open clears/overwrites.
-	// dst = ciphertext[:0] -> Strict in-place decryption (dst start == src start).
-	// using encrypted[:0] caused partial overlap (dst=0, src=24) which Panics.
-	plaintext, err := v.AEAD.Open(ciphertext[:0], nonce, ciphertext, nil)
-	if err != nil { 
-		log.Printf("Decrypt Fail: %v", err)
-		bufPool.Put(bufPtr)
-		return 
-	}
-	// log.Printf("Decrypt OK: len %d", len(plaintext))
-	
-	// [Sess 4][Seq 4][IP Packet...]
-	// IP Start=8. 
-	// Min IPv4 Header = 20. Total Min = 28.
-	if len(plaintext) < 28 { 
-		bufPool.Put(bufPtr)
-		return 
-	}
-	
-	ipPacket := plaintext[8:]
-	version := ipPacket[0] >> 4
-	var srcIP uint32
-
-
-	
-	if version == 4 {
-		// IPv4: Src @ 12, Dst @ 16
-		if len(ipPacket) >= 20 {
-			srcIP = binary.BigEndian.Uint32(ipPacket[12:16])
-			_ = binary.BigEndian.Uint32(ipPacket[16:20]) // DstIP unused for now in Server RX
-			
-		}
-	} else if version == 6 {
-		// IPv6: Src @ 8, Dst @ 24
-		if len(ipPacket) >= 40 {
-			// Check logic removed
+	ethType := binary.BigEndian.Uint16(plaintext[8+12 : 8+14])
+	if ethType == 0x0800 {
+		srcIP := binary.BigEndian.Uint32(plaintext[8+14+12 : 8+14+16])
+		if v.Cfg.Mode == "server" {
+			v.PeerMap.Store(srcIP, srcAddr)
 		}
 	}
-
-	// Learn Source (IPv4 only for PeerMap)
-	if v.Cfg.Mode == "server" && version == 4 && srcIP != 0 {
-		// Fix: In Raw mode, we only listen/learn on idx 0
-		lookupIdx := idx
-		if v.Cfg.Protocol == "raw" { lookupIdx = 0 }
-		
-		key := (uint64(srcIP) << 32) | uint64(lookupIdx)
-		v.PeerMap.Store(key, srcAddr)
-	}
-
-
 
 	sessionID := binary.BigEndian.Uint32(plaintext[0:4])
 	seq := binary.BigEndian.Uint32(plaintext[4:8])
-	ethPayload := ipPacket
+	ethPayload := plaintext[8:]
 	
-	// Reorderer Push (Deep Copy Mode - Safe)
-	// We do NOT pass bufPtr. We pass a copy of ethPayload.
-	// But to avoid double copy (one here, one in Push), we can just let Reorderer handle it?
-	// Reorderer needs to store specific packet data.
-	// Let's alloc a new slice for data here if needed, or let Reorderer do it.
-	// Reorderer.Push(..., data []byte) -> it will append/store.
-	
-	// CRITICAL: We MUST perform a deep copy because bufPtr is about to be recycled!
-	// Reorderer.Push will store 'ethPayload'. 
-	// If 'ethPayload' is a slice of 'bufPtr', we must copy it.
-	// FIX: Add Headroom for TUN Write (TunOffset)
-	
-	payloadCopy := make([]byte, TunOffset + len(ethPayload))
-	copy(payloadCopy[TunOffset:], ethPayload)
-	
-	v.Reorderer.Push(sessionID, seq, payloadCopy)
-	
-	// Safe to recycle bufPtr now
-	bufPool.Put(bufPtr)
+	v.Reorderer.Push(sessionID, seq, ethPayload)
 }
 
-func (v *VPNInstance) TUNReaderLoop() {
-	const batchSize = 64
-	buffs := make([][]byte, batchSize)
-	for i := range buffs { buffs[i] = make([]byte, 2048) }
-	sizes := make([]int, batchSize)
-
+func (v *VPNInstance) TAPReaderLoop() {
 	for {
-		n, err := v.TunDev.Read(buffs, sizes, TunOffset)
-		if err != nil { 
-			log.Printf("TUN Read Error: %v", err)
-			break 
-		}
-		// log.Printf("TUN Read %d packets", n) // Verbose
-		
-		for i := 0; i < n; i++ {
-			data := buffs[i][TunOffset : TunOffset+sizes[i]]
-			var dstIP uint32
-			version := data[0] >> 4
-			
-			if version == 4 && len(data) >= 20 {
-				dstIP = binary.BigEndian.Uint32(data[16:20])
-			}
-			
-			var destAddr net.Addr
-			if v.Cfg.Mode == "server" && version == 4 && dstIP != 0 {
-				// Routing: Look for ANY channel connected to this IP
-				for k := 0; k < v.Cfg.PortCount; k++ {
-					key := (uint64(dstIP) << 32) | uint64(k)
-					if val, ok := v.PeerMap.Load(key); ok {
-						destAddr = val.(net.Addr)
-						break
-					}
-				}
-				
-				// OSPF / Multicast
-				if destAddr == nil {
-					if (dstIP & 0xF0000000) == 0xE0000000 { // 224.0.0.0/4
-						// Broadcast on current tx channel index
-						seq := atomic.AddUint32(&v.TxSeq, 1) - 1
-						idx := int(uint64(seq) % uint64(v.Cfg.PortCount))
-						v.BroadcastToAllPeers(data, idx, seq)
-						continue
-					}
-					// Only Unicast with no route is dropped
-					continue 
-				}
-			}
-			
-			// Send
-			seq := atomic.AddUint32(&v.TxSeq, 1) - 1
-			idx := int(uint64(seq) % uint64(v.Cfg.PortCount))
-			v.SendPacket(data, idx, seq, destAddr)
-		}
-	}
-}
-
-
-
-func (v *VPNInstance) XDPListenerLoop() {
-	for {
-		pkt, err := v.XDP.ReadPacket()
-		if err != nil { continue }
-		if pkt == nil { continue }
-		
-		// Parse IP Payload (XDP returns Eth+IP+Payload)
-		// UDP Header = 42 bytes (14 Eth + 20 IP + 8 UDP)
-		// Raw Header = 38 bytes (14 Eth + 20 IP + 4 IDX)
-		// But RawListenerLoop strips IDX (4). XDPListenerLoop receives full frame.
-		// If we use Raw, sender sends [IDX][Nonce][Ciphertext].
-		// So Raw Header on wire is 14+20+4 = 38.
-		// Payload starts at 38.
-		
-		headerLen := 42
-		if v.Cfg.Protocol == "raw" { headerLen = 38 }
-		
-		if len(pkt) < headerLen { continue }
-		data := pkt[headerLen:]
-		
-		// Sender Addr? 
-		// We can extract SrcIP/Port from packet headers.
-		// For ZeroCopy speed, we might skip full net.UDPAddr alloc
-		// But ProcessPacket needs addr to update PeerMap.
- 
-		// Or ProcessPacket handles copy? ProcessPacket copies 'ethPayload' to Reorderer?
-		// Reorderer copies? No, Reorderer stores slice.
-		// If slice in UMEM, we MUST copy before returning frame to kernel!
-		dataCopy := make([]byte, len(data))
-		copy(dataCopy, data)
-		
-		
-		// XDP Zero-Copy Adaptor:
-		// XDP ReadPacket returns a slice from UMEM (or copy depending on implementation).
-		// We need to move it to bufPool to satisfy ProcessPacket ownership contract.
-		// (Ideally XDP should integrate with bufPool directly, but step-by-step).
 		bufPtr := bufPool.Get().(*[]byte)
 		buf := *bufPtr
-		n := len(data)
-		if n > cap(buf) {
-			bufPool.Put(bufPtr)
-			continue // Too large
-		}
-		copy(buf, data)
+		n, err := v.Iface.Read(buf[8:])
+		if err != nil { break }
 		
-		v.ProcessPacket(bufPtr, n, nil, 0)
+		var destAddr net.Addr
+		seq := atomic.AddUint32(&v.TxSeq, 1) - 1
+		idx := int(uint64(seq) % uint64(v.Cfg.PortCount))
+
+		if v.Cfg.Mode == "client" {
+			// Client sends to Server (handled in SendPacket logic)
+		} else {
+	// Server Routing
+			// Offset 12: EthType
+			ethType := binary.BigEndian.Uint16(buf[8+12 : 8+14])
+			var dstIP uint32
+			
+			if ethType == 0x0800 { // IPv4
+				// DstIP at 30
+				dstIP = binary.BigEndian.Uint32(buf[8+14+16 : 8+14+20])
+			} else if ethType == 0x0806 { // ARP
+				// Target IP at 14+24 = 38
+				dstIP = binary.BigEndian.Uint32(buf[8+14+24 : 8+14+28])
+			}
+
+			if dstIP != 0 {
+				if val, ok := v.PeerMap.Load(dstIP); ok {
+					destAddr = val.(net.Addr)
+				}
+			}
+			
+			// If not found, we drop (Unicast logic). 
+			// If it's a new client, Server wouldn't be sending to it anyway unless it spoke first.
+			if destAddr == nil && v.Cfg.Mode == "server" {
+				// Special Case: If destAddr is nil, we can't send.
+				// For BroadCast ARP? We don't support L2 broadcasting yet.
+				// So if we don't know the IP, we can't switch.
+				bufPool.Put(bufPtr)
+				continue
+			}
+		}
+
+		binary.BigEndian.PutUint32(buf[0:4], v.SessionID)
+		binary.BigEndian.PutUint32(buf[4:8], seq)
+		packet := buf[:n+8]
+		
+		dstPtr := bufPool.Get().(*[]byte)
+		dst := *dstPtr; dst = dst[:0]
+		nonce := make([]byte, NonceSize)
+		io.ReadFull(rand.Reader, nonce)
+		dst = append(dst, nonce...)
+		dst = v.AEAD.Seal(dst, nonce, packet, nil)
+		bufPool.Put(bufPtr)
+
+		v.SendPacket(dst, idx, destAddr)
+		bufPool.Put(dstPtr)
 	}
 }
 
-func (v *VPNInstance) SendPacket(ipPacket []byte, idx int, seq uint32, destAddr net.Addr) {
-	// XDP Acceleration:
-	// RX is handled via eBPF + AF_XDP (Zero Copy)
-	// TX is handled via Standard Syscall (Mixed Mode) because implementing 
-	// a full driver-like TX path in userspace is complex and prone to errors.
+func (v *VPNInstance) SendPacket(data []byte, idx int, destAddr net.Addr) {
 	if v.Cfg.Protocol == "tcp" {
-		// TCP Encryption logic not fully implemented in this migration step (TCP was minimal)
-		// But basic framing:
 		v.TCPMutex.Lock(); c := v.ConnTCP; v.TCPMutex.Unlock()
 		if c == nil { return }
-		
-		// For TCP we should also Encrypt? 
-		// Previous TCP logic was raw write?
-		// Actually NekoLink TCP should be encrypted too.
-		// Assuming we stick to UDP focus for now.
-		// If using TCP, we need framing.
-		// Let's focus on UDP optimization.
-		l := len(ipPacket); h := make([]byte, 2); binary.BigEndian.PutUint16(h, uint16(l))
-		c.Write(h); c.Write(ipPacket)
+		l := len(data); h := make([]byte, 2); binary.BigEndian.PutUint16(h, uint16(l))
+		c.Write(h); c.Write(data)
 		return
 	}
 	if v.Cfg.Protocol == "udp" {
-		// Encryption Logic (Moved from ReaderLoop)
-		// 1. Prepare Buffer (Sess+Seq+IP)
-		// We need a temp buffer for plaintext.
-		ptLen := 8 + len(ipPacket)
-		
-		// Get buffer for Result (Encrypted Frame)
-		// Frame: [Nonce 24][Ciphertext (ptLen + 16)]
-		
-		dstPtr := bufPool.Get().(*[]byte)
-		dst := *dstPtr; dst = dst[:0]
-		
-		// Nonce
-		nonce := make([]byte, NonceSize)
-		io.ReadFull(rand.Reader, nonce)
-		dst = append(dst, nonce...)
-		
-		// Plaintext Construction
-		// To avoid alloc, we could reuse `data` if we had headroom.
-		// For now, alloc or use another pool buffer?
-		// Using another pool buffer for plaintext is safest.
-		ptBufPtr := bufPool.Get().(*[]byte)
-		ptBuf := *ptBufPtr
-		if cap(ptBuf) < ptLen { ptBuf = make([]byte, ptLen) } // Should fit in 2048 usually
-		ptBuf = ptBuf[:ptLen]
-		
-		binary.BigEndian.PutUint32(ptBuf[0:4], v.SessionID)
-		binary.BigEndian.PutUint32(ptBuf[4:8], seq)
-		copy(ptBuf[8:], ipPacket)
-		
-		// Encrypt
-		dst = v.AEAD.Seal(dst, nonce, ptBuf, nil)
-		bufPool.Put(ptBufPtr)
-		
-		// Send
 		c := v.ConnUDP[idx]
 		var addr *net.UDPAddr
 		if v.Cfg.Mode == "client" { addr = v.ClientRemoteUDP[idx] } else {
-			if destAddr == nil { 
-				bufPool.Put(dstPtr) // Don't leak
-				return 
-			}
+			if destAddr == nil { return }
 			addr = destAddr.(*net.UDPAddr)
 		}
-		c.WriteToUDP(dst, addr)
-		bufPool.Put(dstPtr)
+		c.WriteToUDP(data, addr)
 		return
 	}
 	if v.Cfg.Protocol == "raw" {
-		// Raw Mode: [IDX 4][Nonce 24][Ciphertext]
-		
-		dstPtr := bufPool.Get().(*[]byte)
-		dst := *dstPtr; dst = dst[:0]
-		
-		// 1. IDX Header (4 bytes)
-		var idxBytes [4]byte
-		binary.BigEndian.PutUint32(idxBytes[:], uint32(idx))
-		dst = append(dst, idxBytes[:]...)
-		
-		// 2. Nonce
-		nonce := make([]byte, NonceSize)
-		io.ReadFull(rand.Reader, nonce)
-		dst = append(dst, nonce...)
-		
-		// 3. Plaintext
-		ptLen := 8 + len(ipPacket)
-		ptBufPtr := bufPool.Get().(*[]byte)
-		ptBuf := *ptBufPtr
-		if cap(ptBuf) < ptLen { ptBuf = make([]byte, ptLen) }
-		ptBuf = ptBuf[:ptLen]
-		
-		binary.BigEndian.PutUint32(ptBuf[0:4], v.SessionID)
-		binary.BigEndian.PutUint32(ptBuf[4:8], seq)
-		copy(ptBuf[8:], ipPacket)
-		
-		// 4. Encrypt
-		dst = v.AEAD.Seal(dst, nonce, ptBuf, nil)
-		bufPool.Put(ptBufPtr)
-		
-		// 5. Send
+		payload := make([]byte, 4 + len(data))
+		binary.BigEndian.PutUint32(payload[0:4], uint32(idx))
+		copy(payload[4:], data)
 		var addr *net.IPAddr
-		if v.Cfg.Mode == "client" { 
-			addr = v.ClientRemoteIP 
-		} else {
-			if destAddr == nil { 
-				bufPool.Put(dstPtr)
-				return 
-			}
+		if v.Cfg.Mode == "client" { addr = v.ClientRemoteIP } else {
+			if destAddr == nil { return }
 			addr = destAddr.(*net.IPAddr)
 		}
-		
-		if _, err := v.ConnRaw.WriteToIP(dst, addr); err != nil {
-			// Rate limit logs? For debug, print all.
-			log.Printf("Raw Write Fail: %v", err)
-		}
-		bufPool.Put(dstPtr)
-		return 
-	}
-}
-
-
-// BroadcastToAllPeers 广播数据包给所有已知的 peer
-func (v *VPNInstance) BroadcastToAllPeers(data []byte, channelIdx int, seq uint32) {
-	var peers []net.Addr
-	
-	// 收集同一通道的所有 peer
-	v.PeerMap.Range(func(key, value interface{}) bool {
-		k := key.(uint64)
-		// 检查通道索引匹配 (低 32 位存储通道索引)
-		if uint32(k&0xFFFFFFFF) == uint32(channelIdx) {
-			peers = append(peers, value.(net.Addr))
-		}
-		return true
-	})
-	
-	// 向所有 peer 发送
-	for _, addr := range peers {
-		v.SendPacket(data, channelIdx, seq, addr)
+		v.ConnRaw.WriteToIP(payload, addr)
 	}
 }
 
@@ -758,22 +468,23 @@ func (v *VPNInstance) KeepaliveLoop() {
 	copy(pkt[30:34], []byte{255,255,255,255})
 	
 	for range tick.C {
-
-		
-		// Keepalive: Send random payload using SendPacket
-		// SendPacket will add Header(8) + Encrypt + Send
 		bufPtr := bufPool.Get().(*[]byte); buf := *bufPtr
-		if cap(buf) < 34 { buf = make([]byte, 34) }
-		payload := buf[:34]
-		if _, err := io.ReadFull(rand.Reader, payload); err != nil { bufPool.Put(bufPtr); continue }
 		
+		binary.BigEndian.PutUint32(buf[0:4], v.SessionID)
 		seq := atomic.AddUint32(&v.TxSeq, 1) - 1
+		binary.BigEndian.PutUint32(buf[4:8], seq)
 		
-		// Send to ALL ports to maintain NAT mappings for multi-channel mode
-		for i := 0; i < v.Cfg.PortCount; i++ {
-			v.SendPacket(payload, i, seq, nil)
-		}
+		copy(buf[8:], pkt)
+		packetWithHeader := buf[:8+34]
+		
+		dstPtr := bufPool.Get().(*[]byte); dst := *dstPtr; dst = dst[:0]
+		nonce := make([]byte, NonceSize); rand.Read(nonce)
+		dst = append(dst, nonce...)
+		dst = v.AEAD.Seal(dst, nonce, packetWithHeader, nil)
 		bufPool.Put(bufPtr)
+		
+		v.SendPacket(dst, 0, nil)
+		bufPool.Put(dstPtr)
 	}
 }
 
@@ -808,112 +519,54 @@ func NewReorderer() *PacketReorderer {
 	return r
 }
 
-// Push now accepts pre-copied data (ownership transferred to Reorderer/GC)
 func (pr *PacketReorderer) Push(sess uint32, seq uint32, data []byte) {
-	var toSend [][]byte
-	
-	pr.mu.Lock()
-	
+	pr.mu.Lock(); defer pr.mu.Unlock()
 	if sess != pr.lastSession {
-		pr.lastSession = sess; pr.nextSeq = seq
-		pr.buffer = make(PacketHeap, 0)
+		pr.lastSession = sess; pr.nextSeq = seq; pr.buffer = make(PacketHeap, 0)
 	}
-	// Handle sequence wrapping and duplicates
-	diff := int32(seq - pr.nextSeq)
-	// log.Printf("Reorderer Push: Sess %d Seq %d (Expected %d) Diff %d", sess, seq, pr.nextSeq, diff)
-	
-	if diff < 0 { 
-		// log.Printf("Reorderer Drop Old: Seq %d < Next %d", seq, pr.nextSeq)
-		pr.mu.Unlock(); return 
-	} // Old packet
-	
+	if int32(seq - pr.nextSeq) < 0 { return }
 	if seq == pr.nextSeq {
-		toSend = append(toSend, data)
+		if pr.WriteFunc != nil { pr.WriteFunc(data) }
 		pr.nextSeq++
-		
-		// Drain consecutive packets
-		for pr.buffer.Len() > 0 {
-			min := pr.buffer[0]
-			if min.Seq == pr.nextSeq {
-				heap.Pop(&pr.buffer)
-				toSend = append(toSend, min.Data)
-				pr.nextSeq++
-			} else { break }
-		}
-	} else {
-		// Log buffer event
-		log.Printf("Reorderer Buffer: Seq %d > Next %d (Buffer Len %d)", seq, pr.nextSeq, pr.buffer.Len())
-		
-		if pr.buffer.Len() > MaxReorderBuffer {
-			// Buffer overflow - force pop the oldest
-			min := heap.Pop(&pr.buffer).(SeqPacket)
-			log.Printf("Reorderer Force Pop: Seq %d", min.Seq)
-			pr.nextSeq = min.Seq
-			toSend = append(toSend, min.Data)
-			pr.nextSeq++
-			// Drain
-			for pr.buffer.Len() > 0 {
-				m := pr.buffer[0]
-				if m.Seq == pr.nextSeq {
-					heap.Pop(&pr.buffer)
-					toSend = append(toSend, m.Data)
-					pr.nextSeq++
-				} else { break }
-			}
-		}
-		heap.Push(&pr.buffer, SeqPacket{Seq: seq, Data: data, T: time.Now()})
+		pr.drain()
+		return
 	}
-	pr.mu.Unlock()
-	
-	// IO out of lock
-	if len(toSend) > 0 {
-		// log.Printf("Reorderer Emit %d packets", len(toSend))
-		if pr.WriteFunc != nil {
-			for _, p := range toSend {
-				pr.WriteFunc(p)
-			}
-		}
+	if pr.buffer.Len() > MaxReorderBuffer {
+		min := heap.Pop(&pr.buffer).(SeqPacket)
+		pr.nextSeq = min.Seq
+		if pr.WriteFunc != nil { pr.WriteFunc(min.Data) }
+		pr.nextSeq++
+		pr.drain()
+	}
+	heap.Push(&pr.buffer, SeqPacket{Seq: seq, Data: data, T: time.Now()})
+}
+
+func (pr *PacketReorderer) drain() {
+	for pr.buffer.Len() > 0 {
+		min := pr.buffer[0]
+		if min.Seq == pr.nextSeq {
+			heap.Pop(&pr.buffer)
+			if pr.WriteFunc != nil { pr.WriteFunc(min.Data) }
+			pr.nextSeq++
+		} else { break }
 	}
 }
 
-// drain is removed, integrated into Push/Watchdog to manage ownership
-
-
 func (pr *PacketReorderer) watchdog() {
-	tick := time.NewTicker(20 * time.Millisecond) // Faster tick
+	tick := time.NewTicker(50 * time.Millisecond)
 	for range tick.C {
-		var toSend [][]byte
-		
 		pr.mu.Lock()
 		if pr.buffer.Len() > 0 {
 			head := pr.buffer[0]
-			// Strict timeout for head of line blocking
-			// Tuned to 200ms: Safer for high-latency/jitter links to prevent TCP collapse
-			if time.Since(head.T) > 200*time.Millisecond {
+			if time.Since(head.T) > 100*time.Millisecond {
 				pr.nextSeq = head.Seq
 				heap.Pop(&pr.buffer)
-				toSend = append(toSend, head.Data)
+				if pr.WriteFunc != nil { pr.WriteFunc(head.Data) }
 				pr.nextSeq++
-				
-				// Drain consecutive
-				for pr.buffer.Len() > 0 {
-					min := pr.buffer[0]
-					if min.Seq == pr.nextSeq {
-						heap.Pop(&pr.buffer)
-						toSend = append(toSend, min.Data)
-						pr.nextSeq++
-					} else { break }
-				}
+				pr.drain()
 			}
 		}
 		pr.mu.Unlock()
-		
-		// IO out of lock
-		if pr.WriteFunc != nil {
-			for _, p := range toSend {
-				pr.WriteFunc(p)
-			}
-		}
 	}
 }
 
@@ -948,29 +601,6 @@ func main() {
 	
 	<-c
 	log.Println("Shutting down...")
-}
-func (v *VPNInstance) Start() {
-	v.InitTUN()
-	v.InitNetwork()
-	
-	// Start TUN Reader (L3 -> Network)
-	go v.TUNReaderLoop()
-	
-	if v.Cfg.Mode == "client" {
-		go v.KeepaliveLoop()
-		if v.Cfg.SocksBind != "" {
-			go v.StartSocks5()
-		}
-	} else {
-		// Server Mode Log
-		log.Printf("[%s] Server Ready (UDP/Raw)", v.Cfg.InterfaceName)
-	}
-
-	// Handle signals (Per instance blocking - acceptable for 1 instance)
-	// If multiple instances, main() loop will block here and 2nd instance won't start.
-	// FIX: Don't block here. Let main() handle signal.
-	// Remove signal handling from Start().
-	// main.go main() handles signal and waits.
 }
 
 func runCmd(name string, args ...string) {
