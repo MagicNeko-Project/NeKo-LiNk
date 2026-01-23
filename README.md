@@ -70,5 +70,17 @@ interface tap0
  ip ospf area 0
 ```
 
-## ⚠️ 免责声明 (Disclaimer)
-本项目仅供技术研究和学习使用。请遵守当地法律法规。
+### 4. 安装为系统服务 (Systemd Service)
+
+如果需要开机自启或后台长期运行，可以使用一键安装脚本：
+
+```bash
+# 先确保配置好 config.json 或 client_config.json
+sudo ./install_service.sh
+```
+
+脚本会引导您选择安装为 Server 或 Client 模式，并自动设置开机自启。安装后可以使用 `systemctl` 管理：
+```bash
+sudo systemctl start vpn
+sudo systemctl status vpn
+```
