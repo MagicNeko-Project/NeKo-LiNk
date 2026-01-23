@@ -368,35 +368,24 @@ func (v *VPNInstance) ProcessPacket(bufPtr *[]byte, n int, srcAddr net.Addr, idx
 	seq := binary.BigEndian.Uint32(plaintext[4:8])
 	ethPayload := plaintext[8:]
 	
-	// Reorderer now takes ownership of bufPtr to recycle it later
-	// We copy the necessary data? NO. We want zero copy.
-	// But Reorderer stores packets. If we reuse bufPtr immediately, we corrupt data.
-	// So Reorderer MUST hold bufPtr until packet is written to TAP.
+	// Reorderer Push (Deep Copy Mode - Safe)
+	// We do NOT pass bufPtr. We pass a copy of ethPayload.
+	// But to avoid double copy (one here, one in Push), we can just let Reorderer handle it?
+	// Reorderer needs to store specific packet data.
+	// Let's alloc a new slice for data here if needed, or let Reorderer do it.
+	// Reorderer.Push(..., data []byte) -> it will append/store.
 	
-	// Problem: plaintext is a slice of *bufPtr.
-	// We need to pass *bufPtr (the wrapper) or the byte slice itself if we assume manual pool management.
-	// Let's modify Reorderer to accept the raw slice and the cleanup func? or just the slice and we identify it?
+	// CRITICAL: We MUST perform a deep copy because bufPtr is about to be recycled!
+	// Reorderer.Push will store 'ethPayload'. 
+	// If 'ethPayload' is a slice of 'bufPtr', we must copy it.
 	
-	// To keep it simple and truly zero-copy without complex ownership tracking in Heap:
-	// We might have to COPY if we put into Heap (long term storage).
-	// BUT, for packets that are in-order (fast path), we can avoid copy!
+	payloadCopy := make([]byte, len(ethPayload))
+	copy(payloadCopy, ethPayload)
 	
-	// FAST PATH (Zero-Copy):
-	// If seq == expected, write immediately, then Put(bufPtr).
-	// SLOW PATH (Reorder):
-	// If seq != expected, we MUST copy data to store in Heap, then Put(bufPtr) immediately.
-	// Why? Because holding 4096 2KB buffers in Heap is memory heavy (8MB), but maybe acceptable?
-	// Actually 8MB is fine.
-	// Let's try to hold bufPtr in Reorderer.
+	v.Reorderer.Push(sessionID, seq, payloadCopy)
 	
-	// Need to create a copy of the slice header that points to the pool buffer, 
-	// OR just pass the data slice and let Reorderer handle it.
-	// But Reorderer needs to know it came from Pool to Put it back.
-	
-	// Simplification: 
-	// Reorderer.Push now takes (..., data []byte, bufPtr *[]byte)
-	// If bufPtr is not nil, Reorderer is responsible for Put() when done.
-	v.Reorderer.Push(sessionID, seq, ethPayload, bufPtr)
+	// Safe to recycle bufPtr now
+	bufPool.Put(bufPtr)
 }
 
 func (v *VPNInstance) TAPReaderLoop() {
@@ -670,10 +659,9 @@ func (v *VPNInstance) KeepaliveLoop() {
 // --- Reorderer ---
 
 type SeqPacket struct {
-	Seq    uint32
-	Data   []byte
-	BufPtr *[]byte // Reference for recycling
-	T      time.Time 
+	Seq  uint32
+	Data []byte
+	T    time.Time 
 }
 type PacketHeap []SeqPacket
 func (h PacketHeap) Len() int           { return len(h) }
@@ -687,7 +675,6 @@ func (h *PacketHeap) Pop() interface{} {
 type PacketReorderer struct {
 	mu          sync.Mutex
 	nextSeq     uint32
-	// Buffer Wrapping for Pool Management
 	buffer      PacketHeap
 	lastSession uint32
 	WriteFunc   func([]byte)
@@ -700,33 +687,22 @@ func NewReorderer() *PacketReorderer {
 	return r
 }
 
-func (pr *PacketReorderer) Push(sess uint32, seq uint32, data []byte, bufPtr *[]byte) {
+// Push now accepts pre-copied data (ownership transferred to Reorderer/GC)
+func (pr *PacketReorderer) Push(sess uint32, seq uint32, data []byte) {
 	var toSend [][]byte
-	var toFree []*[]byte
 	
 	pr.mu.Lock()
 	
 	if sess != pr.lastSession {
 		pr.lastSession = sess; pr.nextSeq = seq
-		// Drain and free old buffer
-		for pr.buffer.Len() > 0 {
-			pkt := heap.Pop(&pr.buffer).(SeqPacket)
-			if pkt.BufPtr != nil { bufPool.Put(pkt.BufPtr) }
-		}
 		pr.buffer = make(PacketHeap, 0)
 	}
 	// Handle sequence wrapping and duplicates
 	diff := int32(seq - pr.nextSeq)
-	if diff < 0 { 
-		pr.mu.Unlock(); 
-		if bufPtr != nil { bufPool.Put(bufPtr) }
-		return 
-	} // Old packet
+	if diff < 0 { pr.mu.Unlock(); return } // Old packet
 	
 	if seq == pr.nextSeq {
 		toSend = append(toSend, data)
-		if bufPtr != nil { toFree = append(toFree, bufPtr) }
-		
 		pr.nextSeq++
 		
 		// Drain consecutive packets
@@ -735,7 +711,6 @@ func (pr *PacketReorderer) Push(sess uint32, seq uint32, data []byte, bufPtr *[]
 			if min.Seq == pr.nextSeq {
 				heap.Pop(&pr.buffer)
 				toSend = append(toSend, min.Data)
-				if min.BufPtr != nil { toFree = append(toFree, min.BufPtr) }
 				pr.nextSeq++
 			} else { break }
 		}
@@ -743,11 +718,8 @@ func (pr *PacketReorderer) Push(sess uint32, seq uint32, data []byte, bufPtr *[]
 		if pr.buffer.Len() > MaxReorderBuffer {
 			// Buffer overflow - force pop the oldest
 			min := heap.Pop(&pr.buffer).(SeqPacket)
-			
 			pr.nextSeq = min.Seq
 			toSend = append(toSend, min.Data)
-			if min.BufPtr != nil { toFree = append(toFree, min.BufPtr) }
-			
 			pr.nextSeq++
 			// Drain
 			for pr.buffer.Len() > 0 {
@@ -755,12 +727,11 @@ func (pr *PacketReorderer) Push(sess uint32, seq uint32, data []byte, bufPtr *[]
 				if m.Seq == pr.nextSeq {
 					heap.Pop(&pr.buffer)
 					toSend = append(toSend, m.Data)
-					if m.BufPtr != nil { toFree = append(toFree, m.BufPtr) }
 					pr.nextSeq++
 				} else { break }
 			}
 		}
-		heap.Push(&pr.buffer, SeqPacket{Seq: seq, Data: data, T: time.Now(), BufPtr: bufPtr})
+		heap.Push(&pr.buffer, SeqPacket{Seq: seq, Data: data, T: time.Now()})
 	}
 	pr.mu.Unlock()
 
@@ -769,10 +740,6 @@ func (pr *PacketReorderer) Push(sess uint32, seq uint32, data []byte, bufPtr *[]
 		for _, p := range toSend {
 			pr.WriteFunc(p)
 		}
-	}
-	// Recycle Buffers
-	for _, ptr := range toFree {
-		bufPool.Put(ptr)
 	}
 }
 
@@ -783,7 +750,6 @@ func (pr *PacketReorderer) watchdog() {
 	tick := time.NewTicker(20 * time.Millisecond) // Faster tick
 	for range tick.C {
 		var toSend [][]byte
-		var toFree []*[]byte
 		
 		pr.mu.Lock()
 		if pr.buffer.Len() > 0 {
@@ -794,8 +760,6 @@ func (pr *PacketReorderer) watchdog() {
 				pr.nextSeq = head.Seq
 				heap.Pop(&pr.buffer)
 				toSend = append(toSend, head.Data)
-				if head.BufPtr != nil { toFree = append(toFree, head.BufPtr) }
-				
 				pr.nextSeq++
 				
 				// Drain consecutive
@@ -804,7 +768,6 @@ func (pr *PacketReorderer) watchdog() {
 					if min.Seq == pr.nextSeq {
 						heap.Pop(&pr.buffer)
 						toSend = append(toSend, min.Data)
-						if min.BufPtr != nil { toFree = append(toFree, min.BufPtr) }
 						pr.nextSeq++
 					} else { break }
 				}
@@ -817,9 +780,6 @@ func (pr *PacketReorderer) watchdog() {
 			for _, p := range toSend {
 				pr.WriteFunc(p)
 			}
-		}
-		for _, ptr := range toFree {
-			bufPool.Put(ptr)
 		}
 	}
 }
