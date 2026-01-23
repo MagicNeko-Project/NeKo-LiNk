@@ -6,6 +6,7 @@ require (
 	github.com/cilium/ebpf v0.11.0
 	github.com/songgao/water v0.0.0-20200317203138-2b4b6d7c09d8
 	golang.org/x/crypto v0.10.0
+	golang.org/x/net v0.10.0
 )
 
 require (

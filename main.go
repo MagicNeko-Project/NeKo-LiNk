@@ -21,6 +21,7 @@ import (
 
 	"github.com/songgao/water"
 	"golang.org/x/crypto/chacha20poly1305"
+	"golang.org/x/net/ipv4"
 	"vpn/xdp"
 )
 
@@ -232,15 +233,40 @@ func (v *VPNInstance) InitNetwork() {
 }
 
 func (v *VPNInstance) UDPListenerLoop(idx int, c *net.UDPConn) {
+	// GSO/GRO Optimization: Use ReadBatch (recvmmsg)
+	pc := ipv4.NewPacketConn(c)
+	const batchSize = 64 // Linux limit for recvmmsg is typically high, 64 is standard for offload
+	
+	msgs := make([]ipv4.Message, batchSize)
+	bufPtrs := make([]*[]byte, batchSize) // Keep track of pointers to return/pass ownership
+	
+	// Pre-fill buffers
+	for i := range msgs {
+		bufPtrs[i] = bufPool.Get().(*[]byte)
+		msgs[i].Buffers = [][]byte{ *bufPtrs[i] }
+	}
+
 	for {
-		bufPtr := bufPool.Get().(*[]byte)
-		buf := *bufPtr
-		n, src, err := c.ReadFromUDP(buf)
-		if err != nil { bufPool.Put(bufPtr); return }
-		// Zero-Copy Optimization:
-		// Pass bufPtr ownership to ProcessPacket -> Reorderer -> Put back to pool
-		// DO NOT Put back here.
-		v.ProcessPacket(bufPtr, n, src, idx)
+		nMsgs, err := pc.ReadBatch(msgs, 0)
+		if err != nil {
+			log.Printf("ReadBatch error: %v", err)
+			// Wait a bit before retry to avoid busy loop on error
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+
+		for i := 0; i < nMsgs; i++ {
+			msg := &msgs[i]
+			bufPtr := bufPtrs[i]
+			
+			// ProcessPacket takes ownership of bufPtr and will Put it back to pool
+			v.ProcessPacket(bufPtr, msg.N, msg.Addr, idx)
+			
+			// Refill the slot with a NEW buffer for next read
+			newPtr := bufPool.Get().(*[]byte)
+			bufPtrs[i] = newPtr
+			msg.Buffers[0] = *newPtr
+		}
 	}
 }
 
