@@ -393,12 +393,10 @@ func (v *VPNInstance) XDPListenerLoop() {
 }
 
 func (v *VPNInstance) SendPacket(data []byte, idx int, destAddr net.Addr) {
-	// XDP Acceleration
-	if v.Cfg.UseXDP {
-		// Construct full Eth/IP/UDP packet
-		// Then v.XDP.WritePacket(frame)
-		return
-	}
+	// XDP Acceleration:
+	// RX is handled via eBPF + AF_XDP (Zero Copy)
+	// TX is handled via Standard Syscall (Mixed Mode) because implementing 
+	// a full driver-like TX path in userspace is complex and prone to errors.
 	if v.Cfg.Protocol == "tcp" {
 		v.TCPMutex.Lock(); c := v.ConnTCP; v.TCPMutex.Unlock()
 		if c == nil { return }
