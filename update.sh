@@ -60,6 +60,11 @@ git pull
 if [ $? -ne 0 ]; then echo "Git pull 失败，请检查网络或仓库状态"; exit 1; fi
 
 echo ">>> 正在编译新版本 (使用 Make)..."
+# Check env
+if [ ! -f ".go/bin/go" ] && ! command -v go &> /dev/null; then
+    echo ">>> 检测到缺失 Go 环境，正在初始化..."
+    bash setup_go.sh
+fi
 make
 if [ $? -ne 0 ]; then echo "编译失败"; exit 1; fi
 

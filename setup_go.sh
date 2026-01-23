@@ -6,29 +6,19 @@ NC='\033[0m'
 
 echo -e "${GREEN}>>> 开始安装 Go 语言环境...${NC}"
 
-# Check if Go is already installed and new enough
-if command -v go &> /dev/null; then
-    GO_VERSION=$(go version | awk '{print $3}' | sed 's/go//')
-    GO_MAJOR=$(echo $GO_VERSION | cut -d. -f1)
-    GO_MINOR=$(echo $GO_VERSION | cut -d. -f2)
-    if [ "$GO_MAJOR" -ge 1 ] && [ "$GO_MINOR" -ge 21 ]; then
-        echo -e "${GREEN}>>> Go 版本足够新: $(go version)${NC}"
-    else
-        echo "Go 版本太旧 ($GO_VERSION)，需要 1.21+。正在升级..."
-        rm -rf /usr/local/go
-        wget -q https://golang.google.cn/dl/go1.22.5.linux-amd64.tar.gz -O /tmp/go.tar.gz
-        tar -C /usr/local -xzf /tmp/go.tar.gz
-        export PATH=$PATH:/usr/local/go/bin
-        echo 'export PATH=$PATH:/usr/local/go/bin' >> /etc/profile
-        echo -e "${GREEN}>>> Go 已升级到 $(go version)${NC}"
-    fi
+# Check local Go installation
+if [ -d ".go" ] && [ -f ".go/bin/go" ]; then
+    GO_VERSION=$(./.go/bin/go version | awk '{print $3}' | sed 's/go//')
+    echo -e "${GREEN}>>> 本地 Go 版本: $GO_VERSION${NC}"
 else
-    echo "Go 未找到，正在安装 Go 1.22..."
+    echo "本地 Go 未找到，正在安装 Go 1.22 到 ./.go 目录..."
     wget -q https://golang.google.cn/dl/go1.22.5.linux-amd64.tar.gz -O /tmp/go.tar.gz
-    tar -C /usr/local -xzf /tmp/go.tar.gz
-    export PATH=$PATH:/usr/local/go/bin
-    echo 'export PATH=$PATH:/usr/local/go/bin' >> /etc/profile
-    echo -e "${GREEN}>>> Go 已安装: $(go version)${NC}"
+    # Extract to temp dir then move to .go
+    mkdir -p .go_tmp
+    tar -C .go_tmp -xzf /tmp/go.tar.gz
+    mv .go_tmp/go/* .go/ 2>/dev/null || mv .go_tmp/go .go
+    rm -rf .go_tmp
+    echo -e "${GREEN}>>> Go 已安装: $(./.go/bin/go version)${NC}"
 fi
 
 # 配置国内代理
@@ -52,11 +42,6 @@ if [ ! -f "go.mod" ]; then
     go mod init vpn
 fi
 
-echo -e "${GREEN}>>> 下载依赖库 (water, crypto)...${NC}"
-# 使用 tidy 自动管理，更加稳健
-go mod tidy
-go get github.com/songgao/water
-go get golang.org/x/crypto/chacha20poly1305
-go get golang.org/x/net/ipv6
+echo -e "${GREEN}>>> 这里的 go get 已废弃，编译时会自动 tidy...${NC}"
 
 echo -e "${GREEN}>>> 环境准备完成！${NC}"
