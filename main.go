@@ -399,7 +399,10 @@ func startTAPReader() {
 		}
 		
 		// Fill SeqNum at buf[0:4]
-		seq := atomic.AddUint32(&globalTxSeq, 1)
+		// atomic.AddUint32 returns new value. 
+		// Sender start: 0. Receiver start: 0.
+		// So we want 0, 1, 2...
+		seq := atomic.AddUint32(&globalTxSeq, 1) - 1
 		binary.BigEndian.PutUint32(buf[0:4], seq)
 		
 		packetWithSeq := buf[:n+4] // This is the plaintext
