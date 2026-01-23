@@ -273,21 +273,14 @@ func (v *VPNInstance) ProcessPacket(encrypted []byte, srcAddr net.Addr, idx int)
 	plaintext, err := v.AEAD.Open(nil, nonce, ciphertext, nil)
 	if err != nil { return }
 	
-	if len(plaintext) < 24 { return } // Sess4 + Seq4 + IP(20)
-	
-	srcIP := binary.BigEndian.Uint32(plaintext[28:32]) // IP Packet starts at 8. SrcIP at 8+12+IPHeaderOffset? 
-	// Ethernet Frame...
-	// Plaintext = [Sess 4][Seq 4][Ethernet Frame]
-	// Ethernet Header = 14 bytes.
-	// IPv4 Header starts at 8+14 = 22.
-	// Source IP in IPv4 is bytes 12-15.
-	// So SrcIP is at 22 + 12 = 34.
+	// [Sess 4][Seq 4][Ethernet[IP...]]
+	// Eth=14. IP Start=22. SrcIP=22+12=34.
+	// Min len = 38.
 	if len(plaintext) < 38 { return }
 	
-	// Wait, is it 0x0800 IPv4?
 	ethType := binary.BigEndian.Uint16(plaintext[8+12 : 8+14])
 	if ethType == 0x0800 {
-		srcIP = binary.BigEndian.Uint32(plaintext[8+14+12 : 8+14+16])
+		srcIP := binary.BigEndian.Uint32(plaintext[8+14+12 : 8+14+16])
 		if v.Cfg.Mode == "server" {
 			v.PeerMap.Store(srcIP, srcAddr)
 		}
@@ -431,22 +424,48 @@ func (v *VPNInstance) HandleSocks5(c net.Conn) {
 
 func (v *VPNInstance) KeepaliveLoop() {
 	tick := time.NewTicker(15 * time.Second)
-	dummy := make([]byte, 14)
-	copy(dummy[0:6], []byte{0xFF,0xFF,0xFF,0xFF,0xFF,0xFF})
-	copy(dummy[12:14], []byte{0x99, 0x99})
+	
+	// Parse Local IP from CIDR
+	ip, _, err := net.ParseCIDR(v.Cfg.LocalAddr)
+	if err != nil { return }
+	ip4 := ip.To4()
+	if ip4 == nil { return }
+
+	// Construct IPv4 Header (20 bytes) + Eth (14 bytes)
+	// Eth
+	pkt := make([]byte, 34)
+	// Dst MAC (Random/Broadcast)
+	copy(pkt[0:6], []byte{0xFF,0xFF,0xFF,0xFF,0xFF,0xFF})
+	// Src MAC (Random)
+	rand.Read(pkt[6:12])
+	// EthType 0800
+	pkt[12] = 0x08; pkt[13] = 0x00
+	
+	// IP Header
+	pkt[14] = 0x45 // Ver 4, IHL 5
+	pkt[26] = 0x80 // TTL
+	pkt[27] = 253  // Proto (Experimental/Testing)
+	
+	// Src IP
+	copy(pkt[30:34], ip4)
+	
+	// Dst IP (Broadcast 255.255.255.255)
+	copy(pkt[34:38], []byte{255,255,255,255})
 	
 	for range tick.C {
 		bufPtr := bufPool.Get().(*[]byte); buf := *bufPtr
+		
 		binary.BigEndian.PutUint32(buf[0:4], v.SessionID)
 		seq := atomic.AddUint32(&v.TxSeq, 1) - 1
 		binary.BigEndian.PutUint32(buf[4:8], seq)
-		copy(buf[8:], dummy)
-		pkt := buf[:22]
+		
+		copy(buf[8:], pkt)
+		packetWithHeader := buf[:8+34]
 		
 		dstPtr := bufPool.Get().(*[]byte); dst := *dstPtr; dst = dst[:0]
 		nonce := make([]byte, NonceSize); rand.Read(nonce)
 		dst = append(dst, nonce...)
-		dst = v.AEAD.Seal(dst, nonce, pkt, nil)
+		dst = v.AEAD.Seal(dst, nonce, packetWithHeader, nil)
 		bufPool.Put(bufPtr)
 		
 		v.SendPacket(dst, 0, nil)
