@@ -161,6 +161,11 @@ func (v *VPNInstance) InitTUN() {
 		// Manual Configuration Reuse
 		time.Sleep(500 * time.Millisecond)
 		runCmd("ip", "addr", "add", v.Cfg.LocalAddr, "dev", v.Cfg.InterfaceName)
+		
+		// Force Static MAC for Debugging (02:00:00:00:00:01)
+		// This avoids random MAC mismatch if client expects something specific.
+		runCmd("ip", "link", "set", "dev", v.Cfg.InterfaceName, "address", "02:00:00:00:00:01")
+		
 		runCmd("ip", "link", "set", v.Cfg.InterfaceName, "up") // Ensure UP
 		
 		// Log MAC Address
@@ -398,7 +403,14 @@ func (v *VPNInstance) ProcessPacket(bufPtr *[]byte, n int, srcAddr net.Addr, idx
 	if v.Cfg.Mode == "server" && len(plaintext) > 16 {
 		// Log first packet or occasional packets
 		if seq % 100 == 0 || seq < 100 {
-			log.Printf("RX Debug: Sess=%d Seq=%d HeaderHex=%x", sessionID, seq, plaintext[:16])
+			// Analyze EtherType (Bytes 12-13 of ethFrame)
+			// ethFrame starts at plaintext[8]
+			// So plaintext[20], plaintext[21]
+			var etherType uint16
+			if len(plaintext) >= 22 {
+				etherType = binary.BigEndian.Uint16(plaintext[20:22])
+			}
+			log.Printf("RX Debug: Sess=%d Seq=%d HeaderHex=%x EtherType=%04x", sessionID, seq, plaintext[:22], etherType)
 		}
 	}
 
