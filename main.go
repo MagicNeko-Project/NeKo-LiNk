@@ -607,9 +607,50 @@ func (v *VPNInstance) SendPacket(ipPacket []byte, idx int, seq uint32, destAddr 
 		return
 	}
 	if v.Cfg.Protocol == "raw" {
-		// Raw Mode (UDP without UDP Header? Or Raw IP?)
-		// Logic similar to UDP but write to RawConn.
-		// Not updating Raw mode for TUN yet (focus on UDP).
+		// Raw Mode: [IDX 4][Nonce 24][Ciphertext]
+		
+		dstPtr := bufPool.Get().(*[]byte)
+		dst := *dstPtr; dst = dst[:0]
+		
+		// 1. IDX Header (4 bytes)
+		var idxBytes [4]byte
+		binary.BigEndian.PutUint32(idxBytes[:], uint32(idx))
+		dst = append(dst, idxBytes[:]...)
+		
+		// 2. Nonce
+		nonce := make([]byte, NonceSize)
+		io.ReadFull(rand.Reader, nonce)
+		dst = append(dst, nonce...)
+		
+		// 3. Plaintext
+		ptLen := 8 + len(ipPacket)
+		ptBufPtr := bufPool.Get().(*[]byte)
+		ptBuf := *ptBufPtr
+		if cap(ptBuf) < ptLen { ptBuf = make([]byte, ptLen) }
+		ptBuf = ptBuf[:ptLen]
+		
+		binary.BigEndian.PutUint32(ptBuf[0:4], v.SessionID)
+		binary.BigEndian.PutUint32(ptBuf[4:8], seq)
+		copy(ptBuf[8:], ipPacket)
+		
+		// 4. Encrypt
+		dst = v.AEAD.Seal(dst, nonce, ptBuf, nil)
+		bufPool.Put(ptBufPtr)
+		
+		// 5. Send
+		var addr *net.IPAddr
+		if v.Cfg.Mode == "client" { 
+			addr = v.ClientRemoteIP 
+		} else {
+			if destAddr == nil { 
+				bufPool.Put(dstPtr)
+				return 
+			}
+			addr = destAddr.(*net.IPAddr)
+		}
+		
+		v.ConnRaw.WriteToIP(dst, addr)
+		bufPool.Put(dstPtr)
 		return 
 	}
 }
