@@ -198,7 +198,11 @@ func (v *VPNInstance) InitNetwork() {
 			lAddr, _ := net.ResolveUDPAddr("udp", bindAddrStr)
 			c, err := net.ListenUDP("udp", lAddr)
 			if err != nil { log.Fatal(err) }
-			c.SetReadBuffer(4<<20); c.SetWriteBuffer(4<<20)
+			
+			// Increase Buffer to 16MB to match tuned system limits
+			c.SetReadBuffer(16<<20)
+			c.SetWriteBuffer(16<<20)
+			
 			v.ConnUDP[i] = c
 			
 			if v.Cfg.Mode == "client" {
@@ -217,7 +221,8 @@ func (v *VPNInstance) InitNetwork() {
 		if v.Cfg.Mode == "server" && v.Cfg.ServerBindAddr != "0.0.0.0" { lAddr, _ = net.ResolveIPAddr("ip", v.Cfg.ServerBindAddr) }
 		c, err := net.ListenIP(protoStr, lAddr)
 		if err != nil { log.Fatal(err) }
-		c.SetReadBuffer(4<<20); c.SetWriteBuffer(4<<20)
+		// Increase Buffer to 16MB to match tuned system limits
+		c.SetReadBuffer(16<<20); c.SetWriteBuffer(16<<20)
 		v.ConnRaw = c
 		if v.Cfg.Mode == "client" {
 			v.ClientRemoteIP, _ = net.ResolveIPAddr("ip", v.Cfg.RemoteIP)
