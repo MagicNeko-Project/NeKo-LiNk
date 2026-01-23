@@ -19,7 +19,7 @@ import (
 	"syscall"
 	"time"
 
-	"golang.zx2c4.com/wireguard/tun"
+	"github.com/songgao/water"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/net/ipv4"
 	"vpn/xdp"
@@ -68,7 +68,7 @@ const (
 	Overhead  = chacha20poly1305.Overhead
 	SeqSize   = 4
 	MaxReorderBuffer = 8192 // Increased to 8192 (16MB) to safely buffer high-speed jitter
-	TunOffset = 0 // Try 0 (NoPI / No VnetHdr)
+	TunOffset = 0 // TAP does not use PI/VirtioNet headers in water
 )
 
 // --- Helper Functions ---
@@ -95,7 +95,7 @@ var bufPool = sync.Pool{
 type VPNInstance struct {
 	Cfg Config
 	
-	TunDev tun.Device
+	TunDev *water.Interface
 	AEAD  cipher.AEAD
 	
 	ConnUDP   []*net.UDPConn
@@ -136,20 +136,30 @@ func NewVPNInstance(cfg Config) *VPNInstance {
 }
 
 func (v *VPNInstance) InitTUN() {
-	// Create TUN device
-	dev, err := tun.CreateTUN(v.Cfg.InterfaceName, v.Cfg.MTU)
-	if err != nil { j, _ := tun.CreateTUN("utun", v.Cfg.MTU); if j!=nil{dev=j; err=nil} else {log.Fatalf("TUN Init Fail: %v", err)} }
-    if err != nil { log.Fatal(err) }
+	// Switch to TAP (L2) Mode using water
+	config := water.Config{
+		DeviceType: water.TAP,
+	}
+	config.Name = v.Cfg.InterfaceName
+	
+	dev, err := water.New(config)
+	if err != nil {
+		// Fallback
+		config.Name = ""
+		dev, err = water.New(config)
+		if err != nil { log.Fatalf("TAP Init Fail: %v", err) }
+	}
 	
 	v.TunDev = dev
+	v.Cfg.InterfaceName = dev.Name()
 	
-	// Native TUN implementation doesn't execute 'ip' commands. We do it manually.
 	go func() {
 		time.Sleep(500 * time.Millisecond)
+		// L2 TAP Configuration
 		runCmd("ip", "addr", "add", v.Cfg.LocalAddr, "dev", v.Cfg.InterfaceName)
 		runCmd("ip", "link", "set", v.Cfg.InterfaceName, "up")
 		runCmd("ip", "link", "set", v.Cfg.InterfaceName, "mtu", fmt.Sprintf("%d", v.Cfg.MTU))
-		log.Printf("[%s] Interface Up (TUN L3 - WireGuard)", v.Cfg.InterfaceName)
+		log.Printf("[%s] Interface Up (TAP L2 - EtherGuard Compatible)", v.Cfg.InterfaceName)
 	}()
 }
 
@@ -157,13 +167,15 @@ func (v *VPNInstance) InitTUN() {
 
 
 func (v *VPNInstance) IfaceWrite(data []byte) {
-	// TUN Write works with batch ([][]byte).
-	// We wrap single packet for compatibility with current Reorderer
-	// Note: offset must match the headroom we reserved (TunOffset)
-	// log.Printf("TUN Write %d bytes (Offset %d)", len(data)-TunOffset, TunOffset)
-	_, err := v.TunDev.Write([][]byte{data}, TunOffset)
+	// TAP Write (L2 Frame) - No offset needed for water TAP
+	// Reorderer data might include TunOffset if we kept that logic?
+	// We should reset TunOffset to 0 for TAP!
+	// Assuming TunOffset = 0.
+	
+	// log.Printf("TAP Write %d bytes", len(data))
+	_, err := v.TunDev.Write(data)
 	if err != nil {
-		log.Printf("TUN Write Error: %v", err)
+		log.Printf("TAP Write Error: %v", err)
 	}
 }
 
@@ -361,49 +373,30 @@ func (v *VPNInstance) ProcessPacket(bufPtr *[]byte, n int, srcAddr net.Addr, idx
 	}
 	// log.Printf("Decrypt OK: len %d", len(plaintext))
 	
-	// [Sess 4][Seq 4][IP Packet...]
-	// IP Start=8. 
-	// Min IPv4 Header = 20. Total Min = 28.
-	if len(plaintext) < 28 { 
+	// [Sess 4][Seq 4][Ethernet Frame...]
+	if len(plaintext) < 8+14 { 
 		bufPool.Put(bufPtr)
 		return 
 	}
 	
-	ipPacket := plaintext[8:]
-	version := ipPacket[0] >> 4
-	var srcIP uint32
-
-
+	ethFrame := plaintext[8:]
+	// ethFrame[0:6] Dst, [6:12] Src
 	
-	if version == 4 {
-		// IPv4: Src @ 12, Dst @ 16
-		if len(ipPacket) >= 20 {
-			srcIP = binary.BigEndian.Uint32(ipPacket[12:16])
-			_ = binary.BigEndian.Uint32(ipPacket[16:20]) // DstIP unused for now in Server RX
-			
-		}
-	} else if version == 6 {
-		// IPv6: Src @ 8, Dst @ 24
-		if len(ipPacket) >= 40 {
-			// Check logic removed
-		}
-	}
-
-	// Learn Source (IPv4 only for PeerMap)
-	if v.Cfg.Mode == "server" && version == 4 && srcIP != 0 {
-		// Fix: In Raw mode, we only listen/learn on idx 0
-		lookupIdx := idx
-		if v.Cfg.Protocol == "raw" { lookupIdx = 0 }
+	if v.Cfg.Mode == "server" {
+		srcMac := ethFrame[6:12]
+		// Determine MAC Key
+		key := uint64(srcMac[5]) | uint64(srcMac[4])<<8 | uint64(srcMac[3])<<16 | uint64(srcMac[2])<<24 | uint64(srcMac[1])<<32 | uint64(srcMac[0])<<40
 		
-		key := (uint64(srcIP) << 32) | uint64(lookupIdx)
-		v.PeerMap.Store(key, srcAddr)
+		isMcastSrc := (srcMac[0] & 1) == 1
+		if !isMcastSrc {
+			v.PeerMap.Store(key, srcAddr)
+		}
 	}
-
-
-
+	
 	sessionID := binary.BigEndian.Uint32(plaintext[0:4])
 	seq := binary.BigEndian.Uint32(plaintext[4:8])
-	ethPayload := ipPacket
+	// L2: Payload is the whole EthFrame
+	ethPayload := ethFrame
 	
 	// Reorderer Push (Deep Copy Mode - Safe)
 	// We do NOT pass bufPtr. We pass a copy of ethPayload.
@@ -427,57 +420,60 @@ func (v *VPNInstance) ProcessPacket(bufPtr *[]byte, n int, srcAddr net.Addr, idx
 }
 
 func (v *VPNInstance) TUNReaderLoop() {
-	const batchSize = 64
-	buffs := make([][]byte, batchSize)
-	for i := range buffs { buffs[i] = make([]byte, 2048) }
-	sizes := make([]int, batchSize)
-
+	buf := make([]byte, 2048)
 	for {
-		n, err := v.TunDev.Read(buffs, sizes, TunOffset)
+		n, err := v.TunDev.Read(buf)
 		if err != nil { 
-			log.Printf("TUN Read Error: %v", err)
+			log.Printf("TAP Read Error: %v", err)
 			break 
 		}
-		// log.Printf("TUN Read %d packets", n) // Verbose
 		
-		for i := 0; i < n; i++ {
-			data := buffs[i][TunOffset : TunOffset+sizes[i]]
-			var dstIP uint32
-			version := data[0] >> 4
+		data := buf[:n]
+		if n < 14 { continue } // Min Eth Header
+
+		// Parse Ethernet Header
+		// Dst: 0-6, Src: 6-12, Type: 12-14
+		// broadcast := isBroadcast(data[0:6])
+		
+		// Unicast Learning (L2 Learning Bridge)
+		// We shouldn't learn from TAP Read? TAP Read = From Kernel/Local.
+		// We learn where Local sends to? No.
+		// We learn that 'SrcMAC' is Local.
+		// But for Routing OUTBOUND:
+		// We look at 'DstMAC' (data[0:6]).
+		// If DstMAC is in PeerMap, send there.
+		// If DstMAC is FF:FF... (Broadcast), Flood.
+		// If DstMAC is Unknown, Flood.
+		
+		dstMac := data[0:6]
+		// srcMac := data[6:12] // Local MAC
+		
+		isMcast := (dstMac[0] & 1) == 1
+		
+		var destAddr net.Addr
+		if v.Cfg.Mode == "server" && !isMcast {
+			// L2 Routing: Look up DstMAC
+			// To store MAC in PeerMap (which expects uint64 key):
+			// MAC is 6 bytes. Fits in uint64.
+			key := uint64(dstMac[5]) | uint64(dstMac[4])<<8 | uint64(dstMac[3])<<16 | uint64(dstMac[2])<<24 | uint64(dstMac[1])<<32 | uint64(dstMac[0])<<40
 			
-			if version == 4 && len(data) >= 20 {
-				dstIP = binary.BigEndian.Uint32(data[16:20])
+			// Try to find which channel/peer owns this MAC
+			// Note: We need to modify ProcessPacket to Learn MACs first!
+			// For now, if we don't find it, we broadcast.
+			
+			if val, ok := v.PeerMap.Load(key); ok {
+				destAddr = val.(net.Addr)
 			}
-			
-			var destAddr net.Addr
-			if v.Cfg.Mode == "server" && version == 4 && dstIP != 0 {
-				// Routing: Look for ANY channel connected to this IP
-				for k := 0; k < v.Cfg.PortCount; k++ {
-					key := (uint64(dstIP) << 32) | uint64(k)
-					if val, ok := v.PeerMap.Load(key); ok {
-						destAddr = val.(net.Addr)
-						break
-					}
-				}
-				
-				// OSPF / Multicast
-				if destAddr == nil {
-					if (dstIP & 0xF0000000) == 0xE0000000 { // 224.0.0.0/4
-						// Broadcast on current tx channel index
-						seq := atomic.AddUint32(&v.TxSeq, 1) - 1
-						idx := int(uint64(seq) % uint64(v.Cfg.PortCount))
-						v.BroadcastToAllPeers(data, idx, seq)
-						continue
-					}
-					// Only Unicast with no route is dropped
-					continue 
-				}
-			}
-			
-			// Send
-			seq := atomic.AddUint32(&v.TxSeq, 1) - 1
-			idx := int(uint64(seq) % uint64(v.Cfg.PortCount))
+		}
+		
+		seq := atomic.AddUint32(&v.TxSeq, 1) - 1
+		idx := int(uint64(seq) % uint64(v.Cfg.PortCount))
+		
+		if destAddr != nil {
 			v.SendPacket(data, idx, seq, destAddr)
+		} else {
+			// Broadcast / Flood / Unknown Unicast
+			v.BroadcastToAllPeers(data, idx, seq)
 		}
 	}
 }
