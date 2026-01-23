@@ -129,6 +129,7 @@ func NewVPNInstance(cfg Config) *VPNInstance {
 	v.SessionID = binary.BigEndian.Uint32(b)
 
 	v.Reorderer = NewReorderer()
+	v.Reorderer.WriteFunc = v.IfaceWrite
 	
 	return v
 }
