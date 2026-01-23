@@ -5,17 +5,9 @@
 
 ## ✨ 特性 (Features)
 
-*   **Layer 2 虚拟化**: 基于 TAP 设备，构建虚拟以太网。这意味着你可以在隧道内运行 ARP, DHCP, OSPF, IPv6 等任何二层协议。
-*   **双模传输 (Dual Mode)**:
-    *   `UDP` 模式: 标准兼容模式，适合 NAT 环境。
-    *   `Raw IP` 模式: 使用自定义 IP 协议号 (默认 233)，无视端口封锁，拥有极高的隐蔽性。
-*   **多通道负载均衡 (Multi-Channel Balancing)**: 
-    *   **V3 核心科技**: 独创的 **“单流加速 (Single Stream Acceleration)”** 技术。
-    *   即使是单个 TCP 连接（如浏览器下载），也能利用多通道并行传输，并通过内部重排序算法保证 0 乱序，实现真正的网速叠加！
-*   **TCP / MPTCP 模式**:
-    *   支持 `protocol: "tcp"` 模式。
-    *   自动适配内核级 **MPTCP** (需 Linux 5.6+)，实现真正的物理链路聚合（如 Wi-Fi + 5G 同时传输）。
-    *   拥有极强的防火墙穿透能力，伪装成普通流量。
+*   **Layer 3 虚拟化 (WireGuard-TUN)**: 基于官方 `wireguard/tun` 库，支持多队列和 GSO/GRO，提供目前 Go 生态中最顶级的 TUN 读写性能。
+*   **批处理传输 (UDP/IPv4 Batching)**: 引入 `x/net/ipv4` 的 `ReadBatch` 技术，一次系统调用处理一组数据包，极大降低高吞吐下的 CPU 中断和损耗。
+*   **零拷贝加速 (Zero-Copy)**: 全链路数据包尽可能减少内存分配，配合 `sync.Pool` 智能缓冲池，即使 10Gbps 流量也能从容应对。
 *   **现代加密**: 全程使用 ChaCha20-Poly1305 (IETF) 进行加密和完整性校验，安全无忧。
 *   **IPv6 Ready**: 完美支持 IPv6 (隧道内与隧道外)。
 
@@ -23,7 +15,7 @@
 
 ### 1. 编译 (Build)
 
-需要 Go 1.19+ 环境。
+需要 Go 1.24+ 环境。
 
 ```bash
 git clone https://github.com/yourname/go-ethertunnel.git
