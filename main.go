@@ -19,8 +19,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/KusakabeSi/EtherGuard-VPN/mtypes"
-	"github.com/KusakabeSi/EtherGuard-VPN/tap"
+	"github.com/songgao/water"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/net/ipv4"
 	"vpn/xdp"
@@ -96,7 +95,7 @@ var bufPool = sync.Pool{
 type VPNInstance struct {
 	Cfg Config
 	
-	TunDev tap.Device
+	TunDev *water.Interface
 	AEAD  cipher.AEAD
 	
 	ConnUDP   []*net.UDPConn
@@ -137,65 +136,46 @@ func NewVPNInstance(cfg Config) *VPNInstance {
 }
 
 func (v *VPNInstance) InitTUN() {
-	// EtherGuard-VPN TAP
-	conf := mtypes.InterfaceConf{
-		Name:          v.Cfg.InterfaceName,
-		MTU:           uint16(v.Cfg.MTU),
-		MacAddrPrefix: "02:00", // Default prefix
-		IPv4CIDR:      "",      // Disable internal IP logic (We set manually)
+	// Switch to TAP (L2) Mode using water
+	config := water.Config{
+		DeviceType: water.TAP,
 	}
-
-	// Use SessionID as NodeID (truncated to uint16)
-	nodeID := mtypes.Vertex(v.SessionID)
-
-	dev, err := tap.CreateTAP(conf, nodeID)
-	if err != nil {
-		log.Fatalf("TAP Init Fail: %v", err)
-	}
-
-	v.TunDev = dev
-	v.Cfg.InterfaceName, _ = dev.Name()
+	config.Name = v.Cfg.InterfaceName
 	
-	// Start Event consumer to prevent blocking
+	dev, err := water.New(config)
+	if err != nil {
+		// Fallback
+		config.Name = ""
+		dev, err = water.New(config)
+		if err != nil { log.Fatalf("TAP Init Fail: %v", err) }
+	}
+	
+	v.TunDev = dev
+	v.Cfg.InterfaceName = dev.Name()
+	
 	go func() {
-		// Manual Configuration Reuse
 		time.Sleep(500 * time.Millisecond)
+		// L2 TAP Configuration
 		runCmd("ip", "addr", "add", v.Cfg.LocalAddr, "dev", v.Cfg.InterfaceName)
-		
-		// Force Static MAC for Debugging (02:00:00:00:00:01)
-		// This avoids random MAC mismatch if client expects something specific.
-		runCmd("ip", "link", "set", "dev", v.Cfg.InterfaceName, "address", "02:00:00:00:00:01")
-		runCmd("ip", "link", "set", "dev", v.Cfg.InterfaceName, "promisc", "on") // Enable Promiscuous Mode to accept all Dst MACs
-		
-		runCmd("ip", "link", "set", v.Cfg.InterfaceName, "up") // Ensure UP
-		
-		// Log MAC Address
-		ifif, err := net.InterfaceByName(v.Cfg.InterfaceName)
-		if err == nil {
-			log.Printf("TAP MAC: %s", ifif.HardwareAddr.String())
-		} else {
-			log.Printf("TAP MAC Query Fail: %v", err)
-		}
-		
-		for event := range dev.Events() {
-			log.Printf("TAP Event: %v", event)
-		}
+		runCmd("ip", "link", "set", v.Cfg.InterfaceName, "up")
+		runCmd("ip", "link", "set", v.Cfg.InterfaceName, "mtu", fmt.Sprintf("%d", v.Cfg.MTU))
+		log.Printf("[%s] Interface Up (TAP L2 - EtherGuard Compatible)", v.Cfg.InterfaceName)
 	}()
-
-	log.Printf("TAP Device %s initialized (IP: %s)", v.Cfg.InterfaceName, v.Cfg.LocalAddr)
 }
 
 
 
 
 func (v *VPNInstance) IfaceWrite(data []byte) {
-	// TAP Write (L2 Frame)
-	log.Printf("TAP Write: %d bytes", len(data))
-	n, err := v.TunDev.Write(data, 0)
+	// TAP Write (L2 Frame) - No offset needed for water TAP
+	// Reorderer data might include TunOffset if we kept that logic?
+	// We should reset TunOffset to 0 for TAP!
+	// Assuming TunOffset = 0.
+	
+	// log.Printf("TAP Write %d bytes", len(data))
+	_, err := v.TunDev.Write(data)
 	if err != nil {
 		log.Printf("TAP Write Error: %v", err)
-	} else {
-		log.Printf("TAP Write OK: %d bytes written", n)
 	}
 }
 
@@ -399,87 +379,41 @@ func (v *VPNInstance) ProcessPacket(bufPtr *[]byte, n int, srcAddr net.Addr, idx
 		return 
 	}
 	
-	// Parse Header
-	sessionID := binary.BigEndian.Uint32(plaintext[0:4])
-	seq := binary.BigEndian.Uint32(plaintext[4:8])
-	
-	// Debug Log for Header Analysis
-	if v.Cfg.Mode == "server" && len(plaintext) > 16 {
-		// Log first packet or occasional packets
-		if seq % 100 == 0 || seq < 100 {
-			// Analyze EtherType (Bytes 12-13 of ethFrame)
-			// ethFrame starts at plaintext[8]
-			// So plaintext[20], plaintext[21]
-			var etherType uint16
-			if len(plaintext) >= 22 {
-				etherType = binary.BigEndian.Uint16(plaintext[20:22])
-			}
-			log.Printf("RX Debug: Sess=%d Seq=%d HeaderHex=%x EtherType=%04x", sessionID, seq, plaintext[:22], etherType)
-		}
-	}
-
-
 	ethFrame := plaintext[8:]
 	// ethFrame[0:6] Dst, [6:12] Src
 	
-	// L3/L2 Compatibility: Auto-detect if this is an IP packet or Ethernet frame
-	// IP packets start with 0x45 (IPv4) or 0x60 (IPv6)
-	// Ethernet frames have Dst MAC first, which shouldn't be 0x45/0x60 reliably
-	isRawIP := false
-	if len(ethFrame) >= 1 {
-		firstByte := ethFrame[0]
-		// IPv4: Version 4, IHL usually 5 = 0x45
-		// IPv6: Version 6, Traffic class = 0x60
-		if (firstByte >> 4) == 4 || (firstByte >> 4) == 6 {
-			isRawIP = true
-			log.Printf("L3 Compat: Detected raw IP packet (first byte: 0x%02x), encapsulating with Ethernet header", firstByte)
+	if v.Cfg.Mode == "server" {
+		srcMac := ethFrame[6:12]
+		// Determine MAC Key
+		key := uint64(srcMac[5]) | uint64(srcMac[4])<<8 | uint64(srcMac[3])<<16 | uint64(srcMac[2])<<24 | uint64(srcMac[1])<<32 | uint64(srcMac[0])<<40
+		
+		isMcastSrc := (srcMac[0] & 1) == 1
+		if !isMcastSrc {
+			v.PeerMap.Store(key, srcAddr)
 		}
 	}
 	
-	var finalPayload []byte
-	if isRawIP {
-		// Encapsulate IP packet with Ethernet header
-		// Dst MAC: Broadcast (for now, to let kernel handle ARP)
-		// Or we could use local TAP MAC
-		// Src MAC: Generate from peer or use dummy
-		etherType := uint16(0x0800) // IPv4
-		if len(ethFrame) > 0 && (ethFrame[0]>>4) == 6 {
-			etherType = 0x86DD // IPv6
-		}
-		
-		ethHeader := make([]byte, 14)
-		// Dst MAC: ff:ff:ff:ff:ff:ff (Broadcast) - Let kernel handle routing
-		copy(ethHeader[0:6], []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff})
-		// Src MAC: 02:00:00:00:00:02 (Dummy remote)
-		copy(ethHeader[6:12], []byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x02})
-		// EtherType
-		binary.BigEndian.PutUint16(ethHeader[12:14], etherType)
-		
-		finalPayload = make([]byte, 14+len(ethFrame))
-		copy(finalPayload[0:14], ethHeader)
-		copy(finalPayload[14:], ethFrame)
-	} else {
-		// Already Ethernet frame
-		finalPayload = make([]byte, len(ethFrame))
-		copy(finalPayload, ethFrame)
-		
-		// MAC Learning for L2
-		if v.Cfg.Mode == "server" && len(ethFrame) >= 14 {
-			srcMac := ethFrame[6:12]
-			key := uint64(srcMac[5]) | uint64(srcMac[4])<<8 | uint64(srcMac[3])<<16 | uint64(srcMac[2])<<24 | uint64(srcMac[1])<<32 | uint64(srcMac[0])<<40
-			
-			isMcastSrc := (srcMac[0] & 1) == 1
-			if !isMcastSrc {
-				v.PeerMap.Store(key, srcAddr)
-			}
-		}
-	}
+	sessionID := binary.BigEndian.Uint32(plaintext[0:4])
+	seq := binary.BigEndian.Uint32(plaintext[4:8])
+	// L2: Payload is the whole EthFrame
+	ethPayload := ethFrame
 	
-	sessionID = binary.BigEndian.Uint32(plaintext[0:4])
-	seq = binary.BigEndian.Uint32(plaintext[4:8])
+	// Reorderer Push (Deep Copy Mode - Safe)
+	// We do NOT pass bufPtr. We pass a copy of ethPayload.
+	// But to avoid double copy (one here, one in Push), we can just let Reorderer handle it?
+	// Reorderer needs to store specific packet data.
+	// Let's alloc a new slice for data here if needed, or let Reorderer do it.
+	// Reorderer.Push(..., data []byte) -> it will append/store.
 	
-	log.Printf("ProcessPacket: Pushing to Reorderer: Sess=%d Seq=%d PayloadLen=%d (isRawIP=%v)", sessionID, seq, len(finalPayload), isRawIP)
-	v.Reorderer.Push(sessionID, seq, finalPayload)
+	// CRITICAL: We MUST perform a deep copy because bufPtr is about to be recycled!
+	// Reorderer.Push will store 'ethPayload'. 
+	// If 'ethPayload' is a slice of 'bufPtr', we must copy it.
+	// FIX: Add Headroom for TUN Write (TunOffset)
+	
+	payloadCopy := make([]byte, TunOffset + len(ethPayload))
+	copy(payloadCopy[TunOffset:], ethPayload)
+	
+	v.Reorderer.Push(sessionID, seq, payloadCopy)
 	
 	// Safe to recycle bufPtr now
 	bufPool.Put(bufPtr)
@@ -488,7 +422,7 @@ func (v *VPNInstance) ProcessPacket(bufPtr *[]byte, n int, srcAddr net.Addr, idx
 func (v *VPNInstance) TUNReaderLoop() {
 	buf := make([]byte, 2048)
 	for {
-		n, err := v.TunDev.Read(buf, 0)
+		n, err := v.TunDev.Read(buf)
 		if err != nil { 
 			log.Printf("TAP Read Error: %v", err)
 			break 
@@ -892,42 +826,38 @@ func (pr *PacketReorderer) Push(sess uint32, seq uint32, data []byte) {
 	if seq == pr.nextSeq {
 		toSend = append(toSend, data)
 		pr.nextSeq++
-	} else {
-		// Gap Detected
-		// log.Printf("Reorderer Gap: Seq %d > Next %d", seq, pr.nextSeq)
 		
-		// FAST PATH FIX: If gap is large or simple reordering, just process it.
-		// For L2 TAP, tight strict ordering isn't always critical (TCP handles it).
-		// Preventing STALL is more important.
-		
-		if pr.buffer.Len() > MaxReorderBuffer || diff > 20 { 
-			// If gap is too big, skip ahead!
-			log.Printf("Reorderer Skip/Force: Seq %d > Next %d (Diff %d)", seq, pr.nextSeq, diff)
-			pr.nextSeq = seq
-			toSend = append(toSend, data)
-			pr.nextSeq++
-			// Clear buffer? No, maybe old packets arrive later.
-			// But since we advanced nextSeq, old packets (processed by diff<0 check) will be dropped.
-			// This effectively Resets the stream to new Seq.
-		} else {
-			// Small gap, buffer it
-			heap.Push(&pr.buffer, SeqPacket{Seq: seq, Data: data, T: time.Now()})
+		// Drain consecutive packets
+		for pr.buffer.Len() > 0 {
+			min := pr.buffer[0]
+			if min.Seq == pr.nextSeq {
+				heap.Pop(&pr.buffer)
+				toSend = append(toSend, min.Data)
+				pr.nextSeq++
+			} else { break }
 		}
-	}
-	
-	// Drain buffer if matches new nextSeq
-	for pr.buffer.Len() > 0 {
-		min := pr.buffer[0]
-		if min.Seq == pr.nextSeq {
-			heap.Pop(&pr.buffer)
+	} else {
+		// Log buffer event
+		log.Printf("Reorderer Buffer: Seq %d > Next %d (Buffer Len %d)", seq, pr.nextSeq, pr.buffer.Len())
+		
+		if pr.buffer.Len() > MaxReorderBuffer {
+			// Buffer overflow - force pop the oldest
+			min := heap.Pop(&pr.buffer).(SeqPacket)
+			log.Printf("Reorderer Force Pop: Seq %d", min.Seq)
+			pr.nextSeq = min.Seq
 			toSend = append(toSend, min.Data)
 			pr.nextSeq++
-		} else if min.Seq < pr.nextSeq {
-			// Clean up old
-			heap.Pop(&pr.buffer)
-		} else {
-			break
+			// Drain
+			for pr.buffer.Len() > 0 {
+				m := pr.buffer[0]
+				if m.Seq == pr.nextSeq {
+					heap.Pop(&pr.buffer)
+					toSend = append(toSend, m.Data)
+					pr.nextSeq++
+				} else { break }
+			}
 		}
+		heap.Push(&pr.buffer, SeqPacket{Seq: seq, Data: data, T: time.Now()})
 	}
 	pr.mu.Unlock()
 	

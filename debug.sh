@@ -4,14 +4,6 @@
 
 if [ "$EUID" -ne 0 ]; then echo "Please run as root (sudo)"; exit 1; fi
 
-# Create TUN device if missing
-if [ ! -c /dev/net/tun ]; then
-    echo "Creating /dev/net/tun..."
-    mkdir -p /dev/net
-    mknod /dev/net/tun c 10 200
-    chmod 666 /dev/net/tun
-fi
-
 echo ">>> [Debug] Stopping systemd service..."
 systemctl stop neko-link
 
@@ -24,12 +16,10 @@ make build
 if [ $? -ne 0 ]; then echo "❌ Build Failed!"; exit 1; fi
 
 # Detect Config
-# Priority: System Config > Local Config (Modified per user request)
 CONF="/etc/neko-link/config.json" 
-if [ ! -f "$CONF" ]; then
-    if [ -f "config.json" ]; then CONF="config.json"; fi
-    if [ -f "client_config.json" ]; then CONF="client_config.json"; fi
-fi
+# Priority: System config (User Request)
+# if [ -f "config.json" ]; then CONF="config.json"; fi
+# if [ -f "client_config.json" ]; then CONF="client_config.json"; fi
 
 if [ ! -f "$CONF" ]; then
     echo "❌ No config file found (looked for config.json, client_config.json, /etc/neko-link/config.json)"
