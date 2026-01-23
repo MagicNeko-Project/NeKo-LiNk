@@ -13,7 +13,7 @@ else
     echo "Go 未找到，正在尝试自动安装..."
     
     # Try apt first (Debian/Ubuntu)
-    elif command -v apt-get &> /dev/null; then
+    if command -v apt-get &> /dev/null; then
         sudo apt-get update
         sudo apt-get install -y golang clang llvm libelf-dev gcc-multilib make
     elif command -v yum &> /dev/null; then
