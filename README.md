@@ -5,7 +5,8 @@
 
 ## ✨ 特性 (Features)
 
-*   **Layer 2 虚拟化**: 基于 TAP 设备，构建虚拟以太网。这意味着你可以在隧道内运行 ARP, DHCP, OSPF, IPv6 等任何二层协议。
+*   **Layer 3 虚拟化 (TUN)**: 基于 TUN 设备，直接处理 IP 包。告别 ARP 广播风暴，专注于高效的端到端 IP 传输。
+*   **零拷贝加速 (Zero-Copy)**: 引入 `wireguard/tun` 库，支持 GSO (Generic Segmentation Offload) 和 Batch Read/Write，大幅降低系统调用开销。
 *   **双模传输 (Dual Mode)**:
     *   `UDP` 模式: 标准兼容模式，适合 NAT 环境。
     *   `Raw IP` 模式: 使用自定义 IP 协议号 (默认 233)，无视端口封锁，拥有极高的隐蔽性。
@@ -23,7 +24,7 @@
 
 ### 1. 编译 (Build)
 
-需要 Go 1.19+ 环境。
+需要 Go 1.22+ 环境（不用担心，脚本会自动为您在项目目录下安装，不污染系统）。
 
 ```bash
 git clone https://github.com/yourname/go-ethertunnel.git
@@ -47,7 +48,9 @@ go build -o vpn main.go
   "local_addr": "10.0.0.1/24",     // 虚拟网卡 IP
   "mode": "server",                // "server" 或 "client"
   "interface_name": "tap0",        // 自定义网卡名称
-  "mtu": 1400
+  "mtu": 1400,
+  "use_xdp": false,                // 是否开启 AF_XDP 加速 (需 Linux 5.10+)
+  "xdp_device": "eth0"             // 物理网卡名称 (仅开启 XDP 时需要)
 }
 ```
 
@@ -55,10 +58,11 @@ go build -o vpn main.go
 
 ```bash
 # 服务端
-sudo ./vpn -c config.json
+make                   # 自动下载 Go 1.22 并编译
+sudo ./install_service.sh  # 或手动 ./vpp -c config.json
 
-# 客户端
-sudo ./vpn -c client_config.json
+# 调试与排错
+sudo ./debug.sh        # 一键停止服务、重编译、前台运行并打印 verbose 日志
 ```
 
 ## 🧪 进阶玩法 (Advanced)
