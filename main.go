@@ -165,6 +165,7 @@ func (v *VPNInstance) InitTUN() {
 		// Force Static MAC for Debugging (02:00:00:00:00:01)
 		// This avoids random MAC mismatch if client expects something specific.
 		runCmd("ip", "link", "set", "dev", v.Cfg.InterfaceName, "address", "02:00:00:00:00:01")
+		runCmd("ip", "link", "set", "dev", v.Cfg.InterfaceName, "promisc", "on") // Enable Promiscuous Mode to accept all Dst MACs
 		
 		runCmd("ip", "link", "set", v.Cfg.InterfaceName, "up") // Ensure UP
 		
