@@ -1,0 +1,10 @@
+# Binaries
+vpn
+
+# OS specific
+.DS_Store
+
+# User configs (Templates are okay, but if these contain real secrets we should ignore them. 
+# For this demo, we keep them as they are basically templates)
+# client_config.json
+# config.json.bak

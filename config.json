@@ -1,0 +1,11 @@
+{
+    "server_addr": "127.0.0.1",
+    "protocol": "udp",
+    "ip_protocol_num": 250,
+    "base_port": 9000,
+    "port_count": 4,
+    "key": "change-this-to-a-secure-key-32-chars-exact!",
+    "local_addr": "10.0.0.1/24",
+    "mode": "server",
+    "mtu": 1400
+}
