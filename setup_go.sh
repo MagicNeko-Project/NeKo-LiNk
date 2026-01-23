@@ -15,13 +15,13 @@ else
     # Try apt first (Debian/Ubuntu)
     if command -v apt-get &> /dev/null; then
         sudo apt-get update
-        sudo apt-get install -y golang clang llvm libelf-dev gcc-multilib make
+        sudo apt-get install -y golang clang llvm libelf-dev libbpf-dev gcc-multilib make linux-headers-$(uname -r)
     elif command -v yum &> /dev/null; then
-        sudo yum install -y golang clang llvm libelf-devel make
+        sudo yum install -y golang clang llvm libelf-devel libbpf-devel make kernel-headers
     elif command -v dnf &> /dev/null; then
-        sudo dnf install -y golang clang llvm libelf-devel make
+        sudo dnf install -y golang clang llvm libelf-devel libbpf-devel make kernel-headers
     elif command -v apk &> /dev/null; then
-        sudo apk add go clang llvm libelf-dev make
+        sudo apk add go clang llvm libelf-dev libbpf-dev make linux-headers
     else
         echo "无法自动安装 Go，请手动安装后重试。"
         exit 1
