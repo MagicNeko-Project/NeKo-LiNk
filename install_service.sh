@@ -8,6 +8,13 @@ BIN_NAME="neko-link"
 CONF_DIR="/etc/neko-link"
 BIN_DIR="/usr/local/bin"
 
+# 检查依赖
+if ! command -v clang &> /dev/null; then
+    echo "错误: 未找到 clang 编译器。"
+    echo "请先运行依赖安装脚本: sudo bash setup_go.sh"
+    exit 1
+fi
+
 echo ">>> 正在编译 $APP_NAME (使用 Make)..."
 make
 if [ $? -ne 0 ]; then echo "编译失败"; exit 1; fi
