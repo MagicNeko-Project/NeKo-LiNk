@@ -68,7 +68,7 @@ const (
 	Overhead  = chacha20poly1305.Overhead
 	SeqSize   = 4
 	MaxReorderBuffer = 8192 // Increased to 8192 (16MB) to safely buffer high-speed jitter
-	TunOffset = 16 // Headroom for TUN (VirtioNet/PI) headers
+	TunOffset = 10 // Standard virtio_net_hdr size
 )
 
 // --- Helper Functions ---
