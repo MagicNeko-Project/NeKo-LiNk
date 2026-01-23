@@ -159,7 +159,11 @@ func (v *VPNInstance) IfaceWrite(data []byte) {
 	// TUN Write works with batch ([][]byte).
 	// We wrap single packet for compatibility with current Reorderer
 	// Note: offset 0.
-	v.TunDev.Write([][]byte{data}, 0)
+	log.Printf("TUN Write %d bytes", len(data))
+	_, err := v.TunDev.Write([][]byte{data}, 0)
+	if err != nil {
+		log.Printf("TUN Write Error: %v", err)
+	}
 }
 
 // --- Network ---
@@ -813,7 +817,12 @@ func (pr *PacketReorderer) Push(sess uint32, seq uint32, data []byte) {
 	}
 	// Handle sequence wrapping and duplicates
 	diff := int32(seq - pr.nextSeq)
-	if diff < 0 { pr.mu.Unlock(); return } // Old packet
+	// log.Printf("Reorderer Push: Sess %d Seq %d (Expected %d) Diff %d", sess, seq, pr.nextSeq, diff)
+	
+	if diff < 0 { 
+		// log.Printf("Reorderer Drop Old: Seq %d < Next %d", seq, pr.nextSeq)
+		pr.mu.Unlock(); return 
+	} // Old packet
 	
 	if seq == pr.nextSeq {
 		toSend = append(toSend, data)
@@ -829,9 +838,13 @@ func (pr *PacketReorderer) Push(sess uint32, seq uint32, data []byte) {
 			} else { break }
 		}
 	} else {
+		// Log buffer event
+		log.Printf("Reorderer Buffer: Seq %d > Next %d (Buffer Len %d)", seq, pr.nextSeq, pr.buffer.Len())
+		
 		if pr.buffer.Len() > MaxReorderBuffer {
 			// Buffer overflow - force pop the oldest
 			min := heap.Pop(&pr.buffer).(SeqPacket)
+			log.Printf("Reorderer Force Pop: Seq %d", min.Seq)
 			pr.nextSeq = min.Seq
 			toSend = append(toSend, min.Data)
 			pr.nextSeq++
@@ -848,11 +861,14 @@ func (pr *PacketReorderer) Push(sess uint32, seq uint32, data []byte) {
 		heap.Push(&pr.buffer, SeqPacket{Seq: seq, Data: data, T: time.Now()})
 	}
 	pr.mu.Unlock()
-
+	
 	// IO out of lock
-	if pr.WriteFunc != nil {
-		for _, p := range toSend {
-			pr.WriteFunc(p)
+	if len(toSend) > 0 {
+		// log.Printf("Reorderer Emit %d packets", len(toSend))
+		if pr.WriteFunc != nil {
+			for _, p := range toSend {
+				pr.WriteFunc(p)
+			}
 		}
 	}
 }
