@@ -68,7 +68,7 @@ const (
 	Overhead  = chacha20poly1305.Overhead
 	SeqSize   = 4
 	MaxReorderBuffer = 8192 // Increased to 8192 (16MB) to safely buffer high-speed jitter
-	TunOffset = 0 // Try 0 (NoPI / No VnetHdr)
+	TunOffset = 4 // Set to 4 for Linux TUN (Packet Information header)
 )
 
 // --- Helper Functions ---
