@@ -66,7 +66,7 @@ const (
 	NonceSize = chacha20poly1305.NonceSizeX
 	Overhead  = chacha20poly1305.Overhead
 	SeqSize   = 4
-	MaxReorderBuffer = 4096 // Reverted to 4096 for stability
+	MaxReorderBuffer = 2048 // Tuned for balance between memory and jitter tolerance
 )
 
 // --- Helper Functions ---
@@ -232,8 +232,10 @@ func (v *VPNInstance) UDPListenerLoop(idx int, c *net.UDPConn) {
 		buf := *bufPtr
 		n, src, err := c.ReadFromUDP(buf)
 		if err != nil { bufPool.Put(bufPtr); return }
-		packet := make([]byte, n); copy(packet, buf[:n]); bufPool.Put(bufPtr)
-		v.ProcessPacket(packet, src, idx)
+		// Zero-Copy Optimization:
+		// Pass bufPtr ownership to ProcessPacket -> Reorderer -> Put back to pool
+		// DO NOT Put back here.
+		v.ProcessPacket(bufPtr, n, src, idx)
 	}
 }
 
@@ -244,8 +246,23 @@ func (v *VPNInstance) RawListenerLoop(c *net.IPConn) {
 		n, src, err := c.ReadFromIP(buf)
 		if err != nil { bufPool.Put(bufPtr); return }
 		if n < 4 { bufPool.Put(bufPtr); continue }
-		data := make([]byte, n-4); copy(data, buf[4:n]); bufPool.Put(bufPtr)
-		v.ProcessPacket(data, src, 0)
+		
+		// Zero-Copy for Raw:
+		// We need to strip 4 bytes header. 
+		// Instead of copy, we can just slice the buffer?
+		// But ProcessPacket expects *bufPtr to point to the start of encryption data.
+		// If we slice (*bufPtr)[4:], that's fine for data, but when we Put(bufPtr) back, we put the original slice header?
+		// bufPool New() returns 2048 byte slice.
+		// If we modify *bufPtr to be a sub-slice, Put() might be confused if it relies on cap? 
+		// Go's sync.Pool doesn't care about cap/len resets unless we do it manually.
+		// Our New() does not reset.
+		// Ideally we should copy if we want to align payload?
+		// Or we pass an offset? ProcessPacket takes *bufPtr.
+		// Let's slide data to front? overlap copy.
+		// copy(buf, buf[4:n]) -> data is now at 0.
+		// n = n - 4
+		copy(buf, buf[4:n])
+		v.ProcessPacket(bufPtr, n-4, src, 0)
 	}
 }
 
@@ -277,20 +294,41 @@ func (v *VPNInstance) TCPHandler(c net.Conn) {
 		if cap(buf) < int(l) { newB := make([]byte, l); buf = newB }
 		body := buf[:l]
 		if _, err := io.ReadFull(c, body); err != nil { bufPool.Put(bufPtr); return }
-		data := make([]byte, l); copy(data, body); bufPool.Put(bufPtr)
-		v.ProcessPacket(data, c.RemoteAddr(), 0)
+		// TCP Framing: Body is the packet.
+		// Zero-Copy: Pass bufPtr directly.
+		v.ProcessPacket(bufPtr, int(l), c.RemoteAddr(), 0)
 	}
 }
 
-func (v *VPNInstance) ProcessPacket(encrypted []byte, srcAddr net.Addr, idx int) {
-	if len(encrypted) < NonceSize+Overhead { return }
+// ProcessPacket takes ownership of bufPtr (which contains data at *bufPtr)
+func (v *VPNInstance) ProcessPacket(bufPtr *[]byte, n int, srcAddr net.Addr, idx int) {
+	encrypted := (*bufPtr)[:n]
+	
+	if len(encrypted) < NonceSize+Overhead { 
+		bufPool.Put(bufPtr)
+		return 
+	}
 	nonce := encrypted[:NonceSize]
 	ciphertext := encrypted[NonceSize:]
 	
-	// Open in-place checks or pool usage could be added here.
-	// Current allocs: 'plaintext' is a new slice.
-	plaintext, err := v.AEAD.Open(nil, nonce, ciphertext, nil)
-	if err != nil { return }
+	// Zero-Copy Decrypt: Reuse 'encrypted' buffer for plaintext
+	// Open appends to dst. If we pass nil as dst, it allocates.
+	// We want to decrypt in-place or reuse buffer. 
+	// AEAD.Open can decrypt in-place if dst and src overlap/are same.
+	// But we need to be careful about Nonce preservation if needed? No, nonce is outside ciphertext.
+	
+	// Open(dst, nonce, ciphertext, additionalData)
+	// We use the capacity of bufPtr.
+	// Let's perform in-place decryption. 'ciphertext' is part of 'encrypted' underlying array.
+	// We can reuse the start of 'encrypted' (which holds nonce) to store plaintext.
+	
+	// Careful: AEAD.Open clears/overwrites.
+	// dst = encrypted[:0] -> Reuses same backing array
+	plaintext, err := v.AEAD.Open(encrypted[:0], nonce, ciphertext, nil)
+	if err != nil { 
+		bufPool.Put(bufPtr)
+		return 
+	}
 	
 	// [Sess 4][Seq 4][Ethernet[IP...]]
 	// Eth=14. IP Start=22. SrcIP=22+12=34.
@@ -325,7 +363,35 @@ func (v *VPNInstance) ProcessPacket(encrypted []byte, srcAddr net.Addr, idx int)
 	seq := binary.BigEndian.Uint32(plaintext[4:8])
 	ethPayload := plaintext[8:]
 	
-	v.Reorderer.Push(sessionID, seq, ethPayload)
+	// Reorderer now takes ownership of bufPtr to recycle it later
+	// We copy the necessary data? NO. We want zero copy.
+	// But Reorderer stores packets. If we reuse bufPtr immediately, we corrupt data.
+	// So Reorderer MUST hold bufPtr until packet is written to TAP.
+	
+	// Problem: plaintext is a slice of *bufPtr.
+	// We need to pass *bufPtr (the wrapper) or the byte slice itself if we assume manual pool management.
+	// Let's modify Reorderer to accept the raw slice and the cleanup func? or just the slice and we identify it?
+	
+	// To keep it simple and truly zero-copy without complex ownership tracking in Heap:
+	// We might have to COPY if we put into Heap (long term storage).
+	// BUT, for packets that are in-order (fast path), we can avoid copy!
+	
+	// FAST PATH (Zero-Copy):
+	// If seq == expected, write immediately, then Put(bufPtr).
+	// SLOW PATH (Reorder):
+	// If seq != expected, we MUST copy data to store in Heap, then Put(bufPtr) immediately.
+	// Why? Because holding 4096 2KB buffers in Heap is memory heavy (8MB), but maybe acceptable?
+	// Actually 8MB is fine.
+	// Let's try to hold bufPtr in Reorderer.
+	
+	// Need to create a copy of the slice header that points to the pool buffer, 
+	// OR just pass the data slice and let Reorderer handle it.
+	// But Reorderer needs to know it came from Pool to Put it back.
+	
+	// Simplification: 
+	// Reorderer.Push now takes (..., data []byte, bufPtr *[]byte)
+	// If bufPtr is not nil, Reorderer is responsible for Put() when done.
+	v.Reorderer.Push(sessionID, seq, ethPayload, bufPtr)
 }
 
 func (v *VPNInstance) TAPReaderLoop() {
@@ -410,19 +476,28 @@ func (v *VPNInstance) XDPListenerLoop() {
 		// We can extract SrcIP/Port from packet headers.
 		// For ZeroCopy speed, we might skip full net.UDPAddr alloc
 		// But ProcessPacket needs addr to update PeerMap.
-		// Implementation skipped for brevity in skeleton.
-		var srcAddr net.Addr 
-		
-		// Copy data to avoid UMEM race if async? 
+ 
 		// Or ProcessPacket handles copy? ProcessPacket copies 'ethPayload' to Reorderer?
 		// Reorderer copies? No, Reorderer stores slice.
 		// If slice in UMEM, we MUST copy before returning frame to kernel!
 		dataCopy := make([]byte, len(data))
 		copy(dataCopy, data)
 		
-		// Free UMEM frame here (conceptually)
 		
-		v.ProcessPacket(dataCopy, srcAddr, 0)
+		// XDP Zero-Copy Adaptor:
+		// XDP ReadPacket returns a slice from UMEM (or copy depending on implementation).
+		// We need to move it to bufPool to satisfy ProcessPacket ownership contract.
+		// (Ideally XDP should integrate with bufPool directly, but step-by-step).
+		bufPtr := bufPool.Get().(*[]byte)
+		buf := *bufPtr
+		n := len(data)
+		if n > cap(buf) {
+			bufPool.Put(bufPtr)
+			continue // Too large
+		}
+		copy(buf, data)
+		
+		v.ProcessPacket(bufPtr, n, nil, 0)
 	}
 }
 
@@ -590,9 +665,10 @@ func (v *VPNInstance) KeepaliveLoop() {
 // --- Reorderer ---
 
 type SeqPacket struct {
-	Seq  uint32
-	Data []byte
-	T    time.Time 
+	Seq    uint32
+	Data   []byte
+	BufPtr *[]byte // Reference for recycling
+	T      time.Time 
 }
 type PacketHeap []SeqPacket
 func (h PacketHeap) Len() int           { return len(h) }
@@ -606,6 +682,7 @@ func (h *PacketHeap) Pop() interface{} {
 type PacketReorderer struct {
 	mu          sync.Mutex
 	nextSeq     uint32
+	// Buffer Wrapping for Pool Management
 	buffer      PacketHeap
 	lastSession uint32
 	WriteFunc   func([]byte)
@@ -618,80 +695,126 @@ func NewReorderer() *PacketReorderer {
 	return r
 }
 
-func (pr *PacketReorderer) Push(sess uint32, seq uint32, data []byte) {
+func (pr *PacketReorderer) Push(sess uint32, seq uint32, data []byte, bufPtr *[]byte) {
 	var toSend [][]byte
+	var toFree []*[]byte
+	
 	pr.mu.Lock()
 	
 	if sess != pr.lastSession {
-		pr.lastSession = sess; pr.nextSeq = seq; pr.buffer = make(PacketHeap, 0)
+		pr.lastSession = sess; pr.nextSeq = seq
+		// Drain and free old buffer
+		for pr.buffer.Len() > 0 {
+			pkt := heap.Pop(&pr.buffer).(SeqPacket)
+			if pkt.BufPtr != nil { bufPool.Put(pkt.BufPtr) }
+		}
+		pr.buffer = make(PacketHeap, 0)
 	}
 	// Handle sequence wrapping and duplicates
 	diff := int32(seq - pr.nextSeq)
-	if diff < 0 { pr.mu.Unlock(); return } // Old packet
+	if diff < 0 { 
+		pr.mu.Unlock(); 
+		if bufPtr != nil { bufPool.Put(bufPtr) }
+		return 
+	} // Old packet
 	
 	if seq == pr.nextSeq {
 		toSend = append(toSend, data)
+		if bufPtr != nil { toFree = append(toFree, bufPtr) }
+		
 		pr.nextSeq++
-		toSend = append(toSend, pr.drain()...)
+		
+		// Drain consecutive packets
+		for pr.buffer.Len() > 0 {
+			min := pr.buffer[0]
+			if min.Seq == pr.nextSeq {
+				heap.Pop(&pr.buffer)
+				toSend = append(toSend, min.Data)
+				if min.BufPtr != nil { toFree = append(toFree, min.BufPtr) }
+				pr.nextSeq++
+			} else { break }
+		}
 	} else {
 		if pr.buffer.Len() > MaxReorderBuffer {
-			// Buffer overflow - force pop the oldest packet to make room
+			// Buffer overflow - force pop the oldest
 			min := heap.Pop(&pr.buffer).(SeqPacket)
-			// We are skipping packets from pr.nextSeq to min.Seq
+			
 			pr.nextSeq = min.Seq
 			toSend = append(toSend, min.Data)
+			if min.BufPtr != nil { toFree = append(toFree, min.BufPtr) }
+			
 			pr.nextSeq++
-			toSend = append(toSend, pr.drain()...)
+			// Drain
+			for pr.buffer.Len() > 0 {
+				m := pr.buffer[0]
+				if m.Seq == pr.nextSeq {
+					heap.Pop(&pr.buffer)
+					toSend = append(toSend, m.Data)
+					if m.BufPtr != nil { toFree = append(toFree, m.BufPtr) }
+					pr.nextSeq++
+				} else { break }
+			}
 		}
-		heap.Push(&pr.buffer, SeqPacket{Seq: seq, Data: data, T: time.Now()})
+		heap.Push(&pr.buffer, SeqPacket{Seq: seq, Data: data, T: time.Now(), BufPtr: bufPtr})
 	}
 	pr.mu.Unlock()
 
 	// IO out of lock
-	if len(toSend) > 0 && pr.WriteFunc != nil {
+	if pr.WriteFunc != nil {
 		for _, p := range toSend {
 			pr.WriteFunc(p)
 		}
 	}
+	// Recycle Buffers
+	for _, ptr := range toFree {
+		bufPool.Put(ptr)
+	}
 }
 
-func (pr *PacketReorderer) drain() [][]byte {
-	var out [][]byte
-	for pr.buffer.Len() > 0 {
-		min := pr.buffer[0]
-		if min.Seq == pr.nextSeq {
-			heap.Pop(&pr.buffer)
-			out = append(out, min.Data)
-			pr.nextSeq++
-		} else { break }
-	}
-	return out
-}
+// drain is removed, integrated into Push/Watchdog to manage ownership
+
 
 func (pr *PacketReorderer) watchdog() {
 	tick := time.NewTicker(20 * time.Millisecond) // Faster tick
 	for range tick.C {
 		var toSend [][]byte
+		var toFree []*[]byte
+		
 		pr.mu.Lock()
 		if pr.buffer.Len() > 0 {
 			head := pr.buffer[0]
 			// Strict timeout for head of line blocking
-			// Reverted to 300ms to prevent packet loss on jittery connections
-			if time.Since(head.T) > 300*time.Millisecond {
+			// Tuned to 100ms: Safe middle ground for high jitter without excessive delay
+			if time.Since(head.T) > 100*time.Millisecond {
 				pr.nextSeq = head.Seq
 				heap.Pop(&pr.buffer)
 				toSend = append(toSend, head.Data)
+				if head.BufPtr != nil { toFree = append(toFree, head.BufPtr) }
+				
 				pr.nextSeq++
-				toSend = append(toSend, pr.drain()...)
+				
+				// Drain consecutive
+				for pr.buffer.Len() > 0 {
+					min := pr.buffer[0]
+					if min.Seq == pr.nextSeq {
+						heap.Pop(&pr.buffer)
+						toSend = append(toSend, min.Data)
+						if min.BufPtr != nil { toFree = append(toFree, min.BufPtr) }
+						pr.nextSeq++
+					} else { break }
+				}
 			}
 		}
 		pr.mu.Unlock()
 		
 		// IO out of lock
-		if len(toSend) > 0 && pr.WriteFunc != nil {
+		if pr.WriteFunc != nil {
 			for _, p := range toSend {
 				pr.WriteFunc(p)
 			}
+		}
+		for _, ptr := range toFree {
+			bufPool.Put(ptr)
 		}
 	}
 }
