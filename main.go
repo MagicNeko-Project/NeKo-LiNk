@@ -19,7 +19,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/songgao/water"
+	"github.com/KusakabeSi/EtherGuard-VPN/mtypes"
+	"github.com/KusakabeSi/EtherGuard-VPN/tap"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/net/ipv4"
 	"vpn/xdp"
@@ -95,7 +96,7 @@ var bufPool = sync.Pool{
 type VPNInstance struct {
 	Cfg Config
 	
-	TunDev *water.Interface
+	TunDev tap.Device
 	AEAD  cipher.AEAD
 	
 	ConnUDP   []*net.UDPConn
@@ -136,44 +137,41 @@ func NewVPNInstance(cfg Config) *VPNInstance {
 }
 
 func (v *VPNInstance) InitTUN() {
-	// Switch to TAP (L2) Mode using water
-	config := water.Config{
-		DeviceType: water.TAP,
+	// EtherGuard-VPN TAP
+	conf := mtypes.InterfaceConf{
+		Name:          v.Cfg.InterfaceName,
+		MTU:           uint16(v.Cfg.MTU),
+		MacAddrPrefix: "02:00", // Default prefix
+		IPv4CIDR:      v.Cfg.LocalAddr,
 	}
-	config.Name = v.Cfg.InterfaceName
-	
-	dev, err := water.New(config)
+
+	// Use SessionID as NodeID (truncated to uint16)
+	nodeID := mtypes.Vertex(v.SessionID)
+
+	dev, err := tap.CreateTAP(conf, nodeID)
 	if err != nil {
-		// Fallback
-		config.Name = ""
-		dev, err = water.New(config)
-		if err != nil { log.Fatalf("TAP Init Fail: %v", err) }
+		log.Fatalf("TAP Init Fail: %v", err)
 	}
-	
+
 	v.TunDev = dev
-	v.Cfg.InterfaceName = dev.Name()
+	v.Cfg.InterfaceName, _ = dev.Name()
 	
+	// Start Event consumer to prevent blocking
 	go func() {
-		time.Sleep(500 * time.Millisecond)
-		// L2 TAP Configuration
-		runCmd("ip", "addr", "add", v.Cfg.LocalAddr, "dev", v.Cfg.InterfaceName)
-		runCmd("ip", "link", "set", v.Cfg.InterfaceName, "up")
-		runCmd("ip", "link", "set", v.Cfg.InterfaceName, "mtu", fmt.Sprintf("%d", v.Cfg.MTU))
-		log.Printf("[%s] Interface Up (TAP L2 - EtherGuard Compatible)", v.Cfg.InterfaceName)
+		for event := range dev.Events() {
+			log.Printf("TAP Event: %v", event)
+		}
 	}()
+
+	log.Printf("TAP Device %s initialized (IP: %s)", v.Cfg.InterfaceName, v.Cfg.LocalAddr)
 }
 
 
 
 
 func (v *VPNInstance) IfaceWrite(data []byte) {
-	// TAP Write (L2 Frame) - No offset needed for water TAP
-	// Reorderer data might include TunOffset if we kept that logic?
-	// We should reset TunOffset to 0 for TAP!
-	// Assuming TunOffset = 0.
-	
-	// log.Printf("TAP Write %d bytes", len(data))
-	_, err := v.TunDev.Write(data)
+	// TAP Write (L2 Frame)
+	_, err := v.TunDev.Write(data, 0)
 	if err != nil {
 		log.Printf("TAP Write Error: %v", err)
 	}
@@ -379,6 +377,18 @@ func (v *VPNInstance) ProcessPacket(bufPtr *[]byte, n int, srcAddr net.Addr, idx
 		return 
 	}
 	
+	// Parse Header
+	sessionID := binary.BigEndian.Uint32(plaintext[0:4])
+	seq := binary.BigEndian.Uint32(plaintext[4:8])
+	
+	// Debug Log for Header Analysis
+	if v.Cfg.Mode == "server" && len(plaintext) > 16 {
+		// Log first packet or occasional packets
+		if seq % 100 == 0 || seq < 100 {
+			log.Printf("RX Debug: Sess=%d Seq=%d HeaderHex=%x", sessionID, seq, plaintext[:16])
+		}
+	}
+
 	ethFrame := plaintext[8:]
 	// ethFrame[0:6] Dst, [6:12] Src
 	
@@ -393,8 +403,8 @@ func (v *VPNInstance) ProcessPacket(bufPtr *[]byte, n int, srcAddr net.Addr, idx
 		}
 	}
 	
-	sessionID := binary.BigEndian.Uint32(plaintext[0:4])
-	seq := binary.BigEndian.Uint32(plaintext[4:8])
+	sessionID = binary.BigEndian.Uint32(plaintext[0:4])
+	seq = binary.BigEndian.Uint32(plaintext[4:8])
 	// L2: Payload is the whole EthFrame
 	ethPayload := ethFrame
 	
@@ -408,10 +418,10 @@ func (v *VPNInstance) ProcessPacket(bufPtr *[]byte, n int, srcAddr net.Addr, idx
 	// CRITICAL: We MUST perform a deep copy because bufPtr is about to be recycled!
 	// Reorderer.Push will store 'ethPayload'. 
 	// If 'ethPayload' is a slice of 'bufPtr', we must copy it.
-	// FIX: Add Headroom for TUN Write (TunOffset)
+	// FIX: Add Headroom for TUN Write (TunOffset) - REMOVED FOR TAP
 	
-	payloadCopy := make([]byte, TunOffset + len(ethPayload))
-	copy(payloadCopy[TunOffset:], ethPayload)
+	payloadCopy := make([]byte, len(ethPayload))
+	copy(payloadCopy, ethPayload)
 	
 	v.Reorderer.Push(sessionID, seq, payloadCopy)
 	
@@ -422,7 +432,7 @@ func (v *VPNInstance) ProcessPacket(bufPtr *[]byte, n int, srcAddr net.Addr, idx
 func (v *VPNInstance) TUNReaderLoop() {
 	buf := make([]byte, 2048)
 	for {
-		n, err := v.TunDev.Read(buf)
+		n, err := v.TunDev.Read(buf, 0)
 		if err != nil { 
 			log.Printf("TAP Read Error: %v", err)
 			break 
@@ -826,38 +836,42 @@ func (pr *PacketReorderer) Push(sess uint32, seq uint32, data []byte) {
 	if seq == pr.nextSeq {
 		toSend = append(toSend, data)
 		pr.nextSeq++
-		
-		// Drain consecutive packets
-		for pr.buffer.Len() > 0 {
-			min := pr.buffer[0]
-			if min.Seq == pr.nextSeq {
-				heap.Pop(&pr.buffer)
-				toSend = append(toSend, min.Data)
-				pr.nextSeq++
-			} else { break }
-		}
 	} else {
-		// Log buffer event
-		log.Printf("Reorderer Buffer: Seq %d > Next %d (Buffer Len %d)", seq, pr.nextSeq, pr.buffer.Len())
+		// Gap Detected
+		// log.Printf("Reorderer Gap: Seq %d > Next %d", seq, pr.nextSeq)
 		
-		if pr.buffer.Len() > MaxReorderBuffer {
-			// Buffer overflow - force pop the oldest
-			min := heap.Pop(&pr.buffer).(SeqPacket)
-			log.Printf("Reorderer Force Pop: Seq %d", min.Seq)
-			pr.nextSeq = min.Seq
+		// FAST PATH FIX: If gap is large or simple reordering, just process it.
+		// For L2 TAP, tight strict ordering isn't always critical (TCP handles it).
+		// Preventing STALL is more important.
+		
+		if pr.buffer.Len() > MaxReorderBuffer || diff > 20 { 
+			// If gap is too big, skip ahead!
+			log.Printf("Reorderer Skip/Force: Seq %d > Next %d (Diff %d)", seq, pr.nextSeq, diff)
+			pr.nextSeq = seq
+			toSend = append(toSend, data)
+			pr.nextSeq++
+			// Clear buffer? No, maybe old packets arrive later.
+			// But since we advanced nextSeq, old packets (processed by diff<0 check) will be dropped.
+			// This effectively Resets the stream to new Seq.
+		} else {
+			// Small gap, buffer it
+			heap.Push(&pr.buffer, SeqPacket{Seq: seq, Data: data, T: time.Now()})
+		}
+	}
+	
+	// Drain buffer if matches new nextSeq
+	for pr.buffer.Len() > 0 {
+		min := pr.buffer[0]
+		if min.Seq == pr.nextSeq {
+			heap.Pop(&pr.buffer)
 			toSend = append(toSend, min.Data)
 			pr.nextSeq++
-			// Drain
-			for pr.buffer.Len() > 0 {
-				m := pr.buffer[0]
-				if m.Seq == pr.nextSeq {
-					heap.Pop(&pr.buffer)
-					toSend = append(toSend, m.Data)
-					pr.nextSeq++
-				} else { break }
-			}
+		} else if min.Seq < pr.nextSeq {
+			// Clean up old
+			heap.Pop(&pr.buffer)
+		} else {
+			break
 		}
-		heap.Push(&pr.buffer, SeqPacket{Seq: seq, Data: data, T: time.Now()})
 	}
 	pr.mu.Unlock()
 	
