@@ -418,42 +418,68 @@ func (v *VPNInstance) ProcessPacket(bufPtr *[]byte, n int, srcAddr net.Addr, idx
 		}
 	}
 
+
 	ethFrame := plaintext[8:]
 	// ethFrame[0:6] Dst, [6:12] Src
 	
-	if v.Cfg.Mode == "server" {
-		srcMac := ethFrame[6:12]
-		// Determine MAC Key
-		key := uint64(srcMac[5]) | uint64(srcMac[4])<<8 | uint64(srcMac[3])<<16 | uint64(srcMac[2])<<24 | uint64(srcMac[1])<<32 | uint64(srcMac[0])<<40
+	// L3/L2 Compatibility: Auto-detect if this is an IP packet or Ethernet frame
+	// IP packets start with 0x45 (IPv4) or 0x60 (IPv6)
+	// Ethernet frames have Dst MAC first, which shouldn't be 0x45/0x60 reliably
+	isRawIP := false
+	if len(ethFrame) >= 1 {
+		firstByte := ethFrame[0]
+		// IPv4: Version 4, IHL usually 5 = 0x45
+		// IPv6: Version 6, Traffic class = 0x60
+		if (firstByte >> 4) == 4 || (firstByte >> 4) == 6 {
+			isRawIP = true
+			log.Printf("L3 Compat: Detected raw IP packet (first byte: 0x%02x), encapsulating with Ethernet header", firstByte)
+		}
+	}
+	
+	var finalPayload []byte
+	if isRawIP {
+		// Encapsulate IP packet with Ethernet header
+		// Dst MAC: Broadcast (for now, to let kernel handle ARP)
+		// Or we could use local TAP MAC
+		// Src MAC: Generate from peer or use dummy
+		etherType := uint16(0x0800) // IPv4
+		if len(ethFrame) > 0 && (ethFrame[0]>>4) == 6 {
+			etherType = 0x86DD // IPv6
+		}
 		
-		isMcastSrc := (srcMac[0] & 1) == 1
-		if !isMcastSrc {
-			v.PeerMap.Store(key, srcAddr)
+		ethHeader := make([]byte, 14)
+		// Dst MAC: ff:ff:ff:ff:ff:ff (Broadcast) - Let kernel handle routing
+		copy(ethHeader[0:6], []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff})
+		// Src MAC: 02:00:00:00:00:02 (Dummy remote)
+		copy(ethHeader[6:12], []byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x02})
+		// EtherType
+		binary.BigEndian.PutUint16(ethHeader[12:14], etherType)
+		
+		finalPayload = make([]byte, 14+len(ethFrame))
+		copy(finalPayload[0:14], ethHeader)
+		copy(finalPayload[14:], ethFrame)
+	} else {
+		// Already Ethernet frame
+		finalPayload = make([]byte, len(ethFrame))
+		copy(finalPayload, ethFrame)
+		
+		// MAC Learning for L2
+		if v.Cfg.Mode == "server" && len(ethFrame) >= 14 {
+			srcMac := ethFrame[6:12]
+			key := uint64(srcMac[5]) | uint64(srcMac[4])<<8 | uint64(srcMac[3])<<16 | uint64(srcMac[2])<<24 | uint64(srcMac[1])<<32 | uint64(srcMac[0])<<40
+			
+			isMcastSrc := (srcMac[0] & 1) == 1
+			if !isMcastSrc {
+				v.PeerMap.Store(key, srcAddr)
+			}
 		}
 	}
 	
 	sessionID = binary.BigEndian.Uint32(plaintext[0:4])
 	seq = binary.BigEndian.Uint32(plaintext[4:8])
-	// L2: Payload is the whole EthFrame
-	ethPayload := ethFrame
 	
-	// Reorderer Push (Deep Copy Mode - Safe)
-	// We do NOT pass bufPtr. We pass a copy of ethPayload.
-	// But to avoid double copy (one here, one in Push), we can just let Reorderer handle it?
-	// Reorderer needs to store specific packet data.
-	// Let's alloc a new slice for data here if needed, or let Reorderer do it.
-	// Reorderer.Push(..., data []byte) -> it will append/store.
-	
-	// CRITICAL: We MUST perform a deep copy because bufPtr is about to be recycled!
-	// Reorderer.Push will store 'ethPayload'. 
-	// If 'ethPayload' is a slice of 'bufPtr', we must copy it.
-	// FIX: Add Headroom for TUN Write (TunOffset) - REMOVED FOR TAP
-	
-	payloadCopy := make([]byte, len(ethPayload))
-	copy(payloadCopy, ethPayload)
-	
-	log.Printf("ProcessPacket: Pushing to Reorderer: Sess=%d Seq=%d PayloadLen=%d", sessionID, seq, len(payloadCopy))
-	v.Reorderer.Push(sessionID, seq, payloadCopy)
+	log.Printf("ProcessPacket: Pushing to Reorderer: Sess=%d Seq=%d PayloadLen=%d (isRawIP=%v)", sessionID, seq, len(finalPayload), isRawIP)
+	v.Reorderer.Push(sessionID, seq, finalPayload)
 	
 	// Safe to recycle bufPtr now
 	bufPool.Put(bufPtr)
