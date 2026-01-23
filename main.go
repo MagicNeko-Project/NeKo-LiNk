@@ -343,8 +343,10 @@ func (v *VPNInstance) TCPHandler(c net.Conn) {
 // ProcessPacket takes ownership of bufPtr (which contains data at *bufPtr)
 func (v *VPNInstance) ProcessPacket(bufPtr *[]byte, n int, srcAddr net.Addr, idx int) {
 	encrypted := (*bufPtr)[:n]
+	// log.Printf("UDP Recv %d bytes", n)
 	
 	if len(encrypted) < NonceSize+Overhead { 
+		// log.Printf("Drop: Too short for crypto")
 		bufPool.Put(bufPtr)
 		return 
 	}
@@ -367,9 +369,11 @@ func (v *VPNInstance) ProcessPacket(bufPtr *[]byte, n int, srcAddr net.Addr, idx
 	// using encrypted[:0] caused partial overlap (dst=0, src=24) which Panics.
 	plaintext, err := v.AEAD.Open(ciphertext[:0], nonce, ciphertext, nil)
 	if err != nil { 
+		log.Printf("Decrypt Fail: %v", err)
 		bufPool.Put(bufPtr)
 		return 
 	}
+	// log.Printf("Decrypt OK: len %d", len(plaintext))
 	
 	// [Sess 4][Seq 4][IP Packet...]
 	// IP Start=8. 
@@ -447,6 +451,7 @@ func (v *VPNInstance) TUNReaderLoop() {
 			log.Printf("TUN Read Error: %v", err)
 			break 
 		}
+		// log.Printf("TUN Read %d packets", n) // Verbose
 		
 		for i := 0; i < n; i++ {
 			data := buffs[i][:sizes[i]]
