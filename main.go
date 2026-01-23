@@ -21,6 +21,7 @@ import (
 
 	"github.com/songgao/water"
 	"golang.org/x/crypto/chacha20poly1305"
+	"vpn/xdp"
 )
 
 // --- Configuration ---
@@ -90,6 +91,8 @@ type VPNInstance struct {
 	
 	ClientRemoteUDP []*net.UDPAddr
 	ClientRemoteIP  *net.IPAddr
+	
+	XDP *xdp.XDPSocket
 	
 	SessionID uint32
 	TxSeq     uint32
@@ -354,7 +357,44 @@ func (v *VPNInstance) TAPReaderLoop() {
 	}
 }
 
+func (v *VPNInstance) XDPListenerLoop() {
+	for {
+		pkt, err := v.XDP.ReadPacket()
+		if err != nil { continue }
+		if pkt == nil { continue }
+		
+		// Parse UDP Payload
+		// Eth(14) + IP(20) + UDP(8) = 42 bytes header
+		if len(pkt) < 42 { continue }
+		data := pkt[42:]
+		
+		// Sender Addr? 
+		// We can extract SrcIP/Port from packet headers.
+		// For ZeroCopy speed, we might skip full net.UDPAddr alloc
+		// But ProcessPacket needs addr to update PeerMap.
+		// Implementation skipped for brevity in skeleton.
+		var srcAddr net.Addr 
+		
+		// Copy data to avoid UMEM race if async? 
+		// Or ProcessPacket handles copy? ProcessPacket copies 'ethPayload' to Reorderer?
+		// Reorderer copies? No, Reorderer stores slice.
+		// If slice in UMEM, we MUST copy before returning frame to kernel!
+		dataCopy := make([]byte, len(data))
+		copy(dataCopy, data)
+		
+		// Free UMEM frame here (conceptually)
+		
+		v.ProcessPacket(dataCopy, srcAddr, 0)
+	}
+}
+
 func (v *VPNInstance) SendPacket(data []byte, idx int, destAddr net.Addr) {
+	// ... (Existing TCP/UDP/Raw) ...
+	if v.Cfg.Protocol == "af_xdp" {
+		// Construct full Eth/IP/UDP packet
+		// Then v.XDP.WritePacket(frame)
+		return
+	}
 	if v.Cfg.Protocol == "tcp" {
 		v.TCPMutex.Lock(); c := v.ConnTCP; v.TCPMutex.Unlock()
 		if c == nil { return }
