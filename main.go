@@ -220,6 +220,10 @@ func main() {
 	go startTAPReader()
 	startNetworkListeners()
 
+	if config.Mode == "client" {
+		go startKeepalive()
+	}
+
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	<-sig
@@ -384,6 +388,53 @@ func isIPv6(addr string) bool {
 		if addr[i] == ':' { return true }
 	}
 	return false
+}
+
+func startKeepalive() {
+	// Send a dummy packet every 15 seconds to keep NAT open
+	ticker := time.NewTicker(15 * time.Second)
+	dummyEth := make([]byte, 14)
+	// Dest: FF:FF... (Broadcast) so Server sees it (or just Random)
+	// Src: Random
+	// Type: 0x0000 (Invalid, so OS drops it)
+	// Actually better: Use Loopback protocol or just 0x9999
+	copy(dummyEth[0:6], []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}) 
+	copy(dummyEth[12:14], []byte{0x99, 0x99})
+
+	for range ticker.C {
+		// Encrypt and Send
+		bufPtr := bufPool.Get().(*[]byte)
+		buf := *bufPtr
+		
+		// Structure: [SessionID 4] + [Seq 4] + [Eth]
+		binary.BigEndian.PutUint32(buf[0:4], globalSessionID)
+		seq := atomic.AddUint32(&globalTxSeq, 1) - 1
+		binary.BigEndian.PutUint32(buf[4:8], seq)
+		
+		copy(buf[8:], dummyEth)
+		
+		packetWithHeader := buf[:8+14]
+		
+		// Encrypt
+		dstPtr := bufPool.Get().(*[]byte)
+		dst := *dstPtr
+		dst = dst[:0]
+		nonce := make([]byte, NonceSize)
+		io.ReadFull(rand.Reader, nonce)
+		dst = append(dst, nonce...)
+		dst = aead.Seal(dst, nonce, packetWithHeader, nil)
+		bufPool.Put(bufPtr)
+
+		// Send
+		if config.Protocol == "udp" {
+			sendUDP(0, dst) // Use channel 0 for keepalive
+		} else if config.Protocol == "raw" {
+			sendRawIP(0, dst)
+		} else if config.Protocol == "tcp" {
+			sendTCP(dst)
+		}
+		bufPool.Put(dstPtr)
+	}
 }
 
 // TAP -> Network
