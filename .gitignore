@@ -9,3 +9,4 @@ vpn
 # client_config.json
 # config.json.bak
 /.go/
+neko-link
