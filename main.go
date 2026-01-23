@@ -443,14 +443,14 @@ func (v *VPNInstance) KeepaliveLoop() {
 	
 	// IP Header
 	pkt[14] = 0x45 // Ver 4, IHL 5
-	pkt[26] = 0x80 // TTL
-	pkt[27] = 253  // Proto (Experimental/Testing)
+	pkt[22] = 0x80 // TTL (Offset 8)
+	pkt[23] = 253  // Proto (Offset 9)
 	
-	// Src IP
-	copy(pkt[30:34], ip4)
+	// Src IP (Offset 12 -> 14+12=26)
+	copy(pkt[26:30], ip4)
 	
-	// Dst IP (Broadcast 255.255.255.255)
-	copy(pkt[34:38], []byte{255,255,255,255})
+	// Dst IP (Offset 16 -> 14+16=30)
+	copy(pkt[30:34], []byte{255,255,255,255})
 	
 	for range tick.C {
 		bufPtr := bufPool.Get().(*[]byte); buf := *bufPtr
