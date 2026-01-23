@@ -66,7 +66,7 @@ const (
 	NonceSize = chacha20poly1305.NonceSizeX
 	Overhead  = chacha20poly1305.Overhead
 	SeqSize   = 4
-	MaxReorderBuffer = 256
+	MaxReorderBuffer = 4096 // Increased from 256 to 4096 to handle high jitter
 )
 
 var bufPool = sync.Pool{
@@ -275,6 +275,8 @@ func (v *VPNInstance) ProcessPacket(encrypted []byte, srcAddr net.Addr, idx int)
 	nonce := encrypted[:NonceSize]
 	ciphertext := encrypted[NonceSize:]
 	
+	// Open in-place checks or pool usage could be added here.
+	// Current allocs: 'plaintext' is a new slice.
 	plaintext, err := v.AEAD.Open(nil, nonce, ciphertext, nil)
 	if err != nil { return }
 	
@@ -566,15 +568,21 @@ func (pr *PacketReorderer) Push(sess uint32, seq uint32, data []byte) {
 	if sess != pr.lastSession {
 		pr.lastSession = sess; pr.nextSeq = seq; pr.buffer = make(PacketHeap, 0)
 	}
-	if int32(seq - pr.nextSeq) < 0 { return }
+	// Handle sequence wrapping and duplicates
+	diff := int32(seq - pr.nextSeq)
+	if diff < 0 { return } // Old packet
+	
 	if seq == pr.nextSeq {
 		if pr.WriteFunc != nil { pr.WriteFunc(data) }
 		pr.nextSeq++
 		pr.drain()
 		return
 	}
+	
 	if pr.buffer.Len() > MaxReorderBuffer {
+		// Buffer overflow - force pop the oldest packet to make room
 		min := heap.Pop(&pr.buffer).(SeqPacket)
+		// We are skipping packets from pr.nextSeq to min.Seq
 		pr.nextSeq = min.Seq
 		if pr.WriteFunc != nil { pr.WriteFunc(min.Data) }
 		pr.nextSeq++
