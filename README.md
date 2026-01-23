@@ -5,11 +5,11 @@
 
 ## ✨ 特性 (Features)
 
+*   **Pure IP 虚拟化 (L3)**: 抛弃了复杂的二层以太网头，直接在 IP 层进行数据传输。彻底解决 L2 带来的广播风暴和兼容性问题，让 ping 和路由更加稳定。
 *   **Layer 3 虚拟化 (WireGuard-TUN)**: 基于官方 `wireguard/tun` 库，支持多队列和 GSO/GRO，提供目前 Go 生态中最顶级的 TUN 读写性能。
 *   **批处理传输 (UDP/IPv4 Batching)**: 引入 `x/net/ipv4` 的 `ReadBatch` 技术，一次系统调用处理一组数据包，极大降低高吞吐下的 CPU 中断和损耗。
-*   **零拷贝加速 (Zero-Copy)**: 全链路数据包尽可能减少内存分配，配合 `sync.Pool` 智能缓冲池，即使 10Gbps 流量也能从容应对。
+*   **调试监控系统 (Debug Mode)**: 支持通过 `-debug` 参数开启详细的包追踪日志，实时洞察数据包在隧道中的流转状态。
 *   **现代加密**: 全程使用 ChaCha20-Poly1305 (IETF) 进行加密和完整性校验，安全无忧。
-*   **IPv6 Ready**: 完美支持 IPv6 (隧道内与隧道外)。
 
 ## 🛠️ 快速开始 (Quick Start)
 
