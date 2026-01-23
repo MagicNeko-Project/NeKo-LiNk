@@ -1,3 +1,5 @@
+package xdp
+
 import (
 	"bytes"
 	"embed"
