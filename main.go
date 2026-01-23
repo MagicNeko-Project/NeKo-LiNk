@@ -190,9 +190,12 @@ func (v *VPNInstance) InitTUN() {
 
 func (v *VPNInstance) IfaceWrite(data []byte) {
 	// TAP Write (L2 Frame)
-	_, err := v.TunDev.Write(data, 0)
+	log.Printf("TAP Write: %d bytes", len(data))
+	n, err := v.TunDev.Write(data, 0)
 	if err != nil {
 		log.Printf("TAP Write Error: %v", err)
+	} else {
+		log.Printf("TAP Write OK: %d bytes written", n)
 	}
 }
 
@@ -449,6 +452,7 @@ func (v *VPNInstance) ProcessPacket(bufPtr *[]byte, n int, srcAddr net.Addr, idx
 	payloadCopy := make([]byte, len(ethPayload))
 	copy(payloadCopy, ethPayload)
 	
+	log.Printf("ProcessPacket: Pushing to Reorderer: Sess=%d Seq=%d PayloadLen=%d", sessionID, seq, len(payloadCopy))
 	v.Reorderer.Push(sessionID, seq, payloadCopy)
 	
 	// Safe to recycle bufPtr now
