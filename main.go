@@ -562,59 +562,79 @@ func NewReorderer() *PacketReorderer {
 }
 
 func (pr *PacketReorderer) Push(sess uint32, seq uint32, data []byte) {
-	pr.mu.Lock(); defer pr.mu.Unlock()
+	var toSend [][]byte
+	pr.mu.Lock()
+	
 	if sess != pr.lastSession {
 		pr.lastSession = sess; pr.nextSeq = seq; pr.buffer = make(PacketHeap, 0)
 	}
 	// Handle sequence wrapping and duplicates
 	diff := int32(seq - pr.nextSeq)
-	if diff < 0 { return } // Old packet
+	if diff < 0 { pr.mu.Unlock(); return } // Old packet
 	
 	if seq == pr.nextSeq {
-		if pr.WriteFunc != nil { pr.WriteFunc(data) }
+		toSend = append(toSend, data)
 		pr.nextSeq++
-		pr.drain()
-		return
+		toSend = append(toSend, pr.drain()...)
+	} else {
+		if pr.buffer.Len() > MaxReorderBuffer {
+			// Buffer overflow - force pop the oldest packet to make room
+			min := heap.Pop(&pr.buffer).(SeqPacket)
+			// We are skipping packets from pr.nextSeq to min.Seq
+			pr.nextSeq = min.Seq
+			toSend = append(toSend, min.Data)
+			pr.nextSeq++
+			toSend = append(toSend, pr.drain()...)
+		}
+		heap.Push(&pr.buffer, SeqPacket{Seq: seq, Data: data, T: time.Now()})
 	}
-	
-	if pr.buffer.Len() > MaxReorderBuffer {
-		// Buffer overflow - force pop the oldest packet to make room
-		min := heap.Pop(&pr.buffer).(SeqPacket)
-		// We are skipping packets from pr.nextSeq to min.Seq
-		pr.nextSeq = min.Seq
-		if pr.WriteFunc != nil { pr.WriteFunc(min.Data) }
-		pr.nextSeq++
-		pr.drain()
+	pr.mu.Unlock()
+
+	// IO out of lock
+	if len(toSend) > 0 && pr.WriteFunc != nil {
+		for _, p := range toSend {
+			pr.WriteFunc(p)
+		}
 	}
-	heap.Push(&pr.buffer, SeqPacket{Seq: seq, Data: data, T: time.Now()})
 }
 
-func (pr *PacketReorderer) drain() {
+func (pr *PacketReorderer) drain() [][]byte {
+	var out [][]byte
 	for pr.buffer.Len() > 0 {
 		min := pr.buffer[0]
 		if min.Seq == pr.nextSeq {
 			heap.Pop(&pr.buffer)
-			if pr.WriteFunc != nil { pr.WriteFunc(min.Data) }
+			out = append(out, min.Data)
 			pr.nextSeq++
 		} else { break }
 	}
+	return out
 }
 
 func (pr *PacketReorderer) watchdog() {
-	tick := time.NewTicker(50 * time.Millisecond)
+	tick := time.NewTicker(20 * time.Millisecond) // Faster tick
 	for range tick.C {
+		var toSend [][]byte
 		pr.mu.Lock()
 		if pr.buffer.Len() > 0 {
 			head := pr.buffer[0]
-			if time.Since(head.T) > 100*time.Millisecond {
+			// Strict timeout for head of line blocking
+			if time.Since(head.T) > 300*time.Millisecond {
 				pr.nextSeq = head.Seq
 				heap.Pop(&pr.buffer)
-				if pr.WriteFunc != nil { pr.WriteFunc(head.Data) }
+				toSend = append(toSend, head.Data)
 				pr.nextSeq++
-				pr.drain()
+				toSend = append(toSend, pr.drain()...)
 			}
 		}
 		pr.mu.Unlock()
+		
+		// IO out of lock
+		if len(toSend) > 0 && pr.WriteFunc != nil {
+			for _, p := range toSend {
+				pr.WriteFunc(p)
+			}
+		}
 	}
 }
 
