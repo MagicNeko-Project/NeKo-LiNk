@@ -323,10 +323,10 @@ func (v *VPNInstance) TCPHandler(c net.Conn) {
 // ProcessPacket takes ownership of bufPtr (which contains data at *bufPtr)
 func (v *VPNInstance) ProcessPacket(bufPtr *[]byte, n int, srcAddr net.Addr, idx int) {
 	encrypted := (*bufPtr)[:n]
-	// log.Printf("UDP Recv %d bytes", n)
+	log.Printf("RX %d bytes from %v", n, srcAddr)
 	
 	if len(encrypted) < NonceSize+Overhead { 
-		// log.Printf("Drop: Too short for crypto")
+		log.Printf("Drop: Too short for crypto (expected %d, got %d)", NonceSize+Overhead, len(encrypted))
 		bufPool.Put(bufPtr)
 		return 
 	}
@@ -428,10 +428,9 @@ func (v *VPNInstance) TUNReaderLoop() {
 	for {
 		n, err := v.TunDev.Read(buffs, sizes, 0)
 		if err != nil { 
-			log.Printf("TUN Read Error: %v", err)
 			break 
 		}
-		// log.Printf("TUN Read %d packets", n) // Verbose
+		log.Printf("TUN Read %d packets", n) // Verbose
 		
 		for i := 0; i < n; i++ {
 			data := buffs[i][:sizes[i]]
