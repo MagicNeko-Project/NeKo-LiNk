@@ -649,7 +649,10 @@ func (v *VPNInstance) SendPacket(ipPacket []byte, idx int, seq uint32, destAddr 
 			addr = destAddr.(*net.IPAddr)
 		}
 		
-		v.ConnRaw.WriteToIP(dst, addr)
+		if _, err := v.ConnRaw.WriteToIP(dst, addr); err != nil {
+			// Rate limit logs? For debug, print all.
+			log.Printf("Raw Write Fail: %v", err)
+		}
 		bufPool.Put(dstPtr)
 		return 
 	}
