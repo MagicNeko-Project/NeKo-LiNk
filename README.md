@@ -114,3 +114,34 @@ sudo tcpdump -n -i eth0 proto 233
 
 - **成功**: 屏幕上疯狂滚动 `IP 1.2.3.4 > 5.6.7.8: ip-proto-233 1400`，说明这是货真价实的 Raw IP 通讯！
 - **失败**: 没有任何输出，但 VPN 能通？那说明您可能还在跑 UDP 模式，请检查配置文件。
+
+### 7. 高阶用法 (Advanced Usage)
+
+#### 7.1 多实例运行 (Multi-Instance)
+NekoLink 支持在一个进程中同时运行多个 VPN 实例（混合 Client 和 Server 均可）。
+只需将 `config.json` 的内容改为 **数组 `[]`** 格式即可：
+
+```json
+[
+  {
+    "interface_name": "neko0",
+    "mode": "server",
+    "base_port": 9000,
+    "local_addr": "10.0.0.1/24"
+  },
+  {
+    "interface_name": "neko1",
+    "mode": "client",
+    "server_ip": "1.2.3.4",
+    "server_port": 10000,
+    "local_addr": "192.168.1.2/24"
+  }
+]
+```
+这样您就可以在一个配置文件里管理无数条隧道，互不干扰！
+
+#### 7.2 多用户服务端 (Multi-User Server)
+NekoLink 的服务端采用 **智能动态学习** 机制。
+*   **服务端**: 只需要配置一份。
+*   **客户端**: 可以有 N 个。只需给每个客户端配置不同的 `local_addr` (例如 `10.0.0.2`, `10.0.0.3`...)。
+*   **连接**: 当客户端发送数据包时，服务端会自动记录该 IP 对应的物理地址。支持点对多点 (Point-to-Multipoint) 拓扑。
