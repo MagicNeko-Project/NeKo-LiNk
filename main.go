@@ -338,7 +338,11 @@ func (v *VPNInstance) ProcessPacket(bufPtr *[]byte, n int, srcAddr net.Addr, idx
 	// [Sess 4][Seq 4][Ethernet[IP...]]
 	// Eth=14. IP Start=22. SrcIP=22+12=34.
 	// Min len = 38.
-	if len(plaintext) < 38 { return }
+	// Min len = 38.
+	if len(plaintext) < 38 { 
+		bufPool.Put(bufPtr)
+		return 
+	}
 	
 	ethType := binary.BigEndian.Uint16(plaintext[8+12 : 8+14])
 	
