@@ -95,8 +95,6 @@ var bufPool = sync.Pool{
 type VPNInstance struct {
 	Cfg Config
 	
-	Cfg Config
-	
 	TunDev tun.Device
 	AEAD  cipher.AEAD
 	
