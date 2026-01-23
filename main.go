@@ -66,7 +66,7 @@ const (
 	NonceSize = chacha20poly1305.NonceSizeX
 	Overhead  = chacha20poly1305.Overhead
 	SeqSize   = 4
-	MaxReorderBuffer = 2048 // Tuned for balance between memory and jitter tolerance
+	MaxReorderBuffer = 8192 // Increased to 8192 (16MB) to safely buffer high-speed jitter
 )
 
 // --- Helper Functions ---
@@ -784,8 +784,8 @@ func (pr *PacketReorderer) watchdog() {
 		if pr.buffer.Len() > 0 {
 			head := pr.buffer[0]
 			// Strict timeout for head of line blocking
-			// Tuned to 100ms: Safe middle ground for high jitter without excessive delay
-			if time.Since(head.T) > 100*time.Millisecond {
+			// Tuned to 200ms: Safer for high-latency/jitter links to prevent TCP collapse
+			if time.Since(head.T) > 200*time.Millisecond {
 				pr.nextSeq = head.Seq
 				heap.Pop(&pr.buffer)
 				toSend = append(toSend, head.Data)
