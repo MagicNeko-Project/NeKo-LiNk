@@ -582,6 +582,15 @@ func main() {
 		configs = append(configs, single)
 	}
 
+	// Check for duplicate interface names
+	seen := make(map[string]bool)
+	for _, c := range configs {
+		if seen[c.InterfaceName] {
+			log.Fatalf("Duplicate Interface Name detected: %s. Each instance must have a unique interface_name.", c.InterfaceName)
+		}
+		seen[c.InterfaceName] = true
+	}
+
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
 	
