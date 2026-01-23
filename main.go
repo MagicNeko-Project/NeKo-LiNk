@@ -60,7 +60,6 @@ var (
 	peerPathsUDP  []atomic.Value
 	peerPathIP    atomic.Value
 
-	// Session ID (Random on startup)
 	globalSessionID uint32
 	globalTxSeq uint32
 
@@ -78,7 +77,7 @@ var (
 type SeqPacket struct {
 	Seq  uint32
 	Data []byte 
-	T    time.Time // Arrival time
+	T    time.Time 
 }
 
 type PacketHeap []SeqPacket
@@ -111,7 +110,6 @@ func NewReorderer() *PacketReorderer {
 		lastActivity: time.Now(),
 	}
 	heap.Init(&r.buffer)
-	// Start watchdog
 	go r.watchdog()
 	return r
 }
@@ -121,12 +119,8 @@ func (pr *PacketReorderer) watchdog() {
 	for range ticker.C {
 		pr.mu.Lock()
 		if pr.buffer.Len() > 0 {
-			// Check head
 			head := pr.buffer[0]
-			// If head has been verifying order for > 100ms, assume lost packets before it
 			if time.Since(head.T) > 100*time.Millisecond {
-				// Force advance
-				// log.Printf("Reorder Timeout: Skip %d -> %d", pr.nextSeq, head.Seq)
 				pr.nextSeq = head.Seq
 				heap.Pop(&pr.buffer)
 				writeToTun(head.Data)
@@ -142,19 +136,14 @@ func (pr *PacketReorderer) Push(sess uint32, seq uint32, data []byte) {
 	pr.mu.Lock()
 	defer pr.mu.Unlock()
 	
-	// Session Reset Check
-	// If sessionID changes drastically (or just changes), we reset
-	// But simply checking change is risky for packet reordering (if sending from 2 sessions?)
-	// But in this VPN, 1-to-1.
 	if sess != pr.lastSession {
 		log.Printf("Session Changed: %x -> %x. Resetting Sequence.", pr.lastSession, sess)
 		pr.lastSession = sess
-		pr.nextSeq = seq // Sync to new stream
-		// Clear buffer
+		pr.nextSeq = seq 
 		pr.buffer = make(PacketHeap, 0)
 	}
 
-	if int32(seq - pr.nextSeq) < 0 { return } // Old packet
+	if int32(seq - pr.nextSeq) < 0 { return } 
 
 	if seq == pr.nextSeq {
 		writeToTun(data)
@@ -164,7 +153,6 @@ func (pr *PacketReorderer) Push(sess uint32, seq uint32, data []byte) {
 	}
 
 	if pr.buffer.Len() > MaxReorderBuffer {
-		// Overflow
 		minItem := heap.Pop(&pr.buffer).(SeqPacket)
 		pr.nextSeq = minItem.Seq
 		writeToTun(minItem.Data)
@@ -207,7 +195,6 @@ func main() {
 	initTAP()
 	initNetwork()
 
-	// Init SessionID
 	b := make([]byte, 4)
 	rand.Read(b)
 	globalSessionID = binary.BigEndian.Uint32(b)
@@ -391,31 +378,22 @@ func isIPv6(addr string) bool {
 }
 
 func startKeepalive() {
-	// Send a dummy packet every 15 seconds to keep NAT open
 	ticker := time.NewTicker(15 * time.Second)
 	dummyEth := make([]byte, 14)
-	// Dest: FF:FF... (Broadcast) so Server sees it (or just Random)
-	// Src: Random
-	// Type: 0x0000 (Invalid, so OS drops it)
-	// Actually better: Use Loopback protocol or just 0x9999
 	copy(dummyEth[0:6], []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}) 
 	copy(dummyEth[12:14], []byte{0x99, 0x99})
 
 	for range ticker.C {
-		// Encrypt and Send
 		bufPtr := bufPool.Get().(*[]byte)
 		buf := *bufPtr
 		
-		// Structure: [SessionID 4] + [Seq 4] + [Eth]
 		binary.BigEndian.PutUint32(buf[0:4], globalSessionID)
 		seq := atomic.AddUint32(&globalTxSeq, 1) - 1
 		binary.BigEndian.PutUint32(buf[4:8], seq)
 		
 		copy(buf[8:], dummyEth)
-		
 		packetWithHeader := buf[:8+14]
 		
-		// Encrypt
 		dstPtr := bufPool.Get().(*[]byte)
 		dst := *dstPtr
 		dst = dst[:0]
@@ -425,14 +403,9 @@ func startKeepalive() {
 		dst = aead.Seal(dst, nonce, packetWithHeader, nil)
 		bufPool.Put(bufPtr)
 
-		// Send
-		if config.Protocol == "udp" {
-			sendUDP(0, dst) // Use channel 0 for keepalive
-		} else if config.Protocol == "raw" {
-			sendRawIP(0, dst)
-		} else if config.Protocol == "tcp" {
-			sendTCP(dst)
-		}
+		if config.Protocol == "udp" { sendUDP(0, dst) 
+		} else if config.Protocol == "raw" { sendRawIP(0, dst)
+		} else if config.Protocol == "tcp" { sendTCP(dst) }
 		bufPool.Put(dstPtr)
 	}
 }
@@ -443,22 +416,18 @@ func startTAPReader() {
 		bufPtr := bufPool.Get().(*[]byte)
 		buf := *bufPtr
 		
-		// Header Format: [SessionID 4] + [Seq 4] + [Payload]
-		// Read at offset 8
 		n, err := iface.Read(buf[8:]) 
 		if err != nil {
 			log.Printf("TAP Read Error: %v", err)
 			break
 		}
 		
-		// Fill Header
 		binary.BigEndian.PutUint32(buf[0:4], globalSessionID)
 		seq := atomic.AddUint32(&globalTxSeq, 1) - 1
 		binary.BigEndian.PutUint32(buf[4:8], seq)
 		
 		packetWithHeader := buf[:n+8] 
 
-		// Encrypt
 		dstPtr := bufPool.Get().(*[]byte)
 		dst := *dstPtr
 		dst = dst[:0]
@@ -470,7 +439,6 @@ func startTAPReader() {
 		dst = aead.Seal(dst, nonce, packetWithHeader, nil) 
 		bufPool.Put(bufPtr)
 
-		// Send
 		if config.Protocol == "udp" {
 			idx := uint64(seq) % uint64(config.PortCount)
 			sendUDP(idx, dst)
@@ -544,7 +512,7 @@ func handleTCPConn(c net.Conn) {
 		body := buf[:length]
 		if _, err := io.ReadFull(c, body); err != nil { bufPool.Put(bufPtr); return }
 		data := make([]byte, length); copy(data, body); bufPool.Put(bufPtr)
-		processIncoming(data)
+		processIncoming(data, nil)
 	}
 }
 func startUDPListeners() {
@@ -555,9 +523,15 @@ func startUDPListeners() {
 				buf := *bufPtr
 				n, src, err := c.ReadFromUDP(buf)
 				if err != nil { bufPool.Put(bufPtr); return }
-				if config.Mode == "server" { peerPathsUDP[idx].Store(src) }
+				
+				// REMOVED INSECURE UPDATE:
+				// if config.Mode == "server" { peerPathsUDP[idx].Store(src) }
+				
 				packet := make([]byte, n); copy(packet, buf[:n]); bufPool.Put(bufPtr)
-				processIncoming(packet)
+				processIncoming(packet, func() {
+					// Update Route Callback (After Auth)
+					if config.Mode == "server" { peerPathsUDP[idx].Store(src) }
+				})
 			}
 		}(i, conn)
 	}
@@ -569,22 +543,36 @@ func startRawIPListener() {
 			buf := *bufPtr
 			n, src, err := connIP.ReadFromIP(buf)
 			if err != nil { log.Println("IP Read Error:", err); return }
-			if config.Mode == "server" { peerPathIP.Store(src) }
+			
+			// REMOVED INSECURE UPDATE:
+			// if config.Mode == "server" { peerPathIP.Store(src) }
+			
 			if n < 4 { bufPool.Put(bufPtr); continue }
 			data := make([]byte, n-4); copy(data, buf[4:n]); bufPool.Put(bufPtr)
-			processIncoming(data)
+			processIncoming(data, func() {
+				// Update Route Callback (After Auth)
+				if config.Mode == "server" { peerPathIP.Store(src) }
+			})
 		}
 	}()
 }
 
-func processIncoming(encrypted []byte) {
+// processIncoming now takes a callback to update route if auth success
+func processIncoming(encrypted []byte, onAuthSuccess func()) {
 	if len(encrypted) < NonceSize+Overhead { return }
 	nonce := encrypted[:NonceSize]
 	ciphertext := encrypted[NonceSize:]
 	plaintext, err := aead.Open(nil, nonce, ciphertext, nil)
-	if err != nil { return }
+	if err != nil { 
+		// Auth Failed! Ignore packet.
+		return 
+	}
 	
-	// Plaintext = [SessionID 4] + [Seq 4] + [Eth Payload]
+	// Auth Success!
+	if onAuthSuccess != nil {
+		onAuthSuccess()
+	}
+	
 	if len(plaintext) < 8 { return }
 	
 	sessionID := binary.BigEndian.Uint32(plaintext[0:4])
