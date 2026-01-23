@@ -307,18 +307,33 @@ func (v *VPNInstance) TAPReaderLoop() {
 		if v.Cfg.Mode == "client" {
 			// Client sends to Server (handled in SendPacket logic)
 		} else {
-			// Server Routing
+	// Server Routing
+			// Offset 12: EthType
 			ethType := binary.BigEndian.Uint16(buf[8+12 : 8+14])
-			if ethType == 0x0800 {
-				dstIP := binary.BigEndian.Uint32(buf[8+14+16 : 8+14+20])
+			var dstIP uint32
+			
+			if ethType == 0x0800 { // IPv4
+				// DstIP at 30
+				dstIP = binary.BigEndian.Uint32(buf[8+14+16 : 8+14+20])
+			} else if ethType == 0x0806 { // ARP
+				// Target IP at 14+24 = 38
+				dstIP = binary.BigEndian.Uint32(buf[8+14+24 : 8+14+28])
+			}
+
+			if dstIP != 0 {
 				if val, ok := v.PeerMap.Load(dstIP); ok {
 					destAddr = val.(net.Addr)
-				} else {
-					// Broadcast ARP?
-					// Simple implementation: Drop unknown unicast.
-					bufPool.Put(bufPtr)
-					continue
 				}
+			}
+			
+			// If not found, we drop (Unicast logic). 
+			// If it's a new client, Server wouldn't be sending to it anyway unless it spoke first.
+			if destAddr == nil && v.Cfg.Mode == "server" {
+				// Special Case: If destAddr is nil, we can't send.
+				// For BroadCast ARP? We don't support L2 broadcasting yet.
+				// So if we don't know the IP, we can't switch.
+				bufPool.Put(bufPtr)
+				continue
 			}
 		}
 
