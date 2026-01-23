@@ -142,7 +142,7 @@ func (v *VPNInstance) InitTUN() {
 		Name:          v.Cfg.InterfaceName,
 		MTU:           uint16(v.Cfg.MTU),
 		MacAddrPrefix: "02:00", // Default prefix
-		IPv4CIDR:      v.Cfg.LocalAddr,
+		IPv4CIDR:      "",      // Disable internal IP logic (We set manually)
 	}
 
 	// Use SessionID as NodeID (truncated to uint16)
@@ -158,6 +158,11 @@ func (v *VPNInstance) InitTUN() {
 	
 	// Start Event consumer to prevent blocking
 	go func() {
+		// Manual Configuration Reuse
+		time.Sleep(500 * time.Millisecond)
+		runCmd("ip", "addr", "add", v.Cfg.LocalAddr, "dev", v.Cfg.InterfaceName)
+		runCmd("ip", "link", "set", v.Cfg.InterfaceName, "up") // Ensure UP
+		
 		for event := range dev.Events() {
 			log.Printf("TAP Event: %v", event)
 		}
