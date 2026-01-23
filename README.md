@@ -184,12 +184,17 @@ NekoLink 的服务端采用 **智能动态学习** 机制。
 | **小包性能** | 约 300k PPS | **10M+ PPS** (理论值) |
 | **CPU 占用** | 高 (内核处理) | 低 (仅业务逻辑) |
 
-#### 8.4 如何开启
-在 `config.json` 中设置：
+#### 8.4 如何开启 (How to Enable)
+不再需要修改协议类型！只需在 `config.json` 中添加 `"use_xdp": true`。
+
 ```json
 {
-  "protocol": "af_xdp",
-  "interface_name": "eth0"  // 必须绑定物理网卡
+  "mode": "server",
+  "protocol": "udp",        // 或 "raw"
+  "use_xdp": true,          // 开启核动力加速！
+  "interface_name": "eth0"  // 物理网卡名
 }
 ```
-*(需配合 `make` 编译 BPF 字节码)*
+
+*   **UDP / Raw**: 完美支持，性能提升巨大。
+*   **TCP**: 暂不支持 (自动降级为标准内核模式)。

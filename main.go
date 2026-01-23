@@ -42,6 +42,7 @@ type Config struct {
 
 	IPProtocolNum int `json:"ip_protocol_num"`
 	PortCount     int `json:"port_count"`
+	UseXDP        bool `json:"use_xdp"`
 
 	SocksBind string `json:"socks_bind"`
 }

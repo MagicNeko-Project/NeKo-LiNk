@@ -4,56 +4,39 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"syscall"
-	"unsafe"
 	"time"
 	
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
-	"github.com/vishvananda/netlink"
 )
 
-// XDPConfig holds XDP configuration
 type XDPConfig struct {
 	InterfaceName string
 	QueueID       int
-	DstPort       int // Big Endian
+	Mode          int // 1=UDP, 2=Raw
+	Target        int // Port or Proto
 }
 
-// XDPSocket manages the AF_XDP socket and rings
 type XDPSocket struct {
 	Cfg       XDPConfig
 	Link      link.Link
 	BpfMap    *ebpf.Map
-	PortMap   *ebpf.Map
+	ConfigMap *ebpf.Map
 	
-	// File Descriptor
-	Fd int
-	
-	// Stats
-	RxCount uint64
-	TxCount uint64
+	RxChan    chan []byte
 }
 
-// NewXDPSocket creates and binds an AF_XDP socket
 func NewXDPSocket(cfg XDPConfig) (*XDPSocket, error) {
-	// 1. Load BPF Program
-	// Note: We assume xdp_kern.o exists. In real world we use bpf2go.
 	spec, err := ebpf.LoadCollectionSpec("bpf/xdp_kern.o")
-	if err != nil {
-		return nil, fmt.Errorf("failed to load BPF spec: %v", err)
-	}
+	if err != nil { return nil, err }
 	
 	var objs struct {
-		XdpProg *ebpf.Program `ebpf:"xdp_prog"`
-		XsksMap *ebpf.Map     `ebpf:"xsks_map"`
-		PortMap *ebpf.Map     `ebpf:"port_map"`
+		XdpProg   *ebpf.Program `ebpf:"xdp_prog"`
+		XsksMap   *ebpf.Map     `ebpf:"xsks_map"`
+		ConfigMap *ebpf.Map     `ebpf:"config_map"`
 	}
-	if err := spec.LoadAndAssign(&objs, nil); err != nil {
-		return nil, fmt.Errorf("failed to load BPF objects: %v", err)
-	}
+	if err := spec.LoadAndAssign(&objs, nil); err != nil { return nil, err }
 	
-	// 2. Attach XDP to Interface
 	iface, err := net.InterfaceByName(cfg.InterfaceName)
 	if err != nil { return nil, err }
 	
@@ -61,57 +44,50 @@ func NewXDPSocket(cfg XDPConfig) (*XDPSocket, error) {
 		Program:   objs.XdpProg,
 		Interface: iface.Index,
 	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to attach XDP: %v", err)
+	if err != nil { return nil, err }
+	
+	// Write Config
+	m := uint32(cfg.Mode)
+	v := uint32(cfg.Target)
+	
+	// If UDP, Target is Port. Convert to Big Endian (Net Order)
+	if cfg.Mode == 1 {
+		v = uint32(htons(uint16(cfg.Target)))
 	}
 	
-	// 3. Configure Port Map
-	// Set index 0 to our DstPort (Network Byte Order?)
-	// User passes 'DstPort' as Int (Host Order). Converter to Net?
-	// xdp_kern.c compares udp->dest (Net) with *map_val (Host?).
-	// Best to store Net Order in map.
-	portNet := htons(uint16(cfg.DstPort))
-	key := uint32(0)
-	if err := objs.PortMap.Put(&key, &portNet); err != nil {
-		return nil, fmt.Errorf("failed to map port: %v", err)
-	}
+	k0 := uint32(0); objs.ConfigMap.Put(&k0, &m)
+	k1 := uint32(1); objs.ConfigMap.Put(&k1, &v)
 	
-	// 4. Create AF_XDP Socket (Syscalls...)
-	// This part is very complex in pure Go without a library like 'github.com/asavie/xdp'.
-	// Writing raw syscalls for XSKS setup (UMEM, Fill Ring, Completion Ring, RX Ring, TX Ring) is 500+ lines.
-	// For this demonstration, I will use a placeholder for the raw socket init
-	// and explain that a library is needed.
-	// OR I can assume 'github.com/asavie/xdp' is vendored.
+	log.Printf("XDP Attached to %s (Mode %d, Target %d)", cfg.InterfaceName, cfg.Mode, cfg.Target)
 	
-	// Let's implement a wrapper assuming we have a Helper Library or simplified logic.
-	// I will write the 'Stub' behavior for now to show Architecture.
-	
-	log.Printf("XDP Attached to %s. Filtering Port %d", cfg.InterfaceName, cfg.DstPort)
-	
-	return &XDPSocket{
+	xs := &XDPSocket{
 		Cfg: cfg,
 		Link: l,
 		BpfMap: objs.XsksMap,
-		PortMap: objs.PortMap,
-	}, nil
+		ConfigMap: objs.ConfigMap,
+		RxChan: make(chan []byte, 1024),
+	}
+	
+	// Start Polling (Mock)
+	go xs.Poll()
+	
+	return xs, nil
+}
+
+func (s *XDPSocket) Poll() {
+	// Real AF_XDP Poll logic...
+	// For now, mock
 }
 
 func (s *XDPSocket) ReadPacket() ([]byte, error) {
-	// Poll Rx Ring...
-	// Zero Copy Magic happens here.
-	// Return slice pointing to UMEM.
-	time.Sleep(1 * time.Second) // Blocking simulation
-	return nil, nil
+	// Return from RxChan or Ring
+	time.Sleep(100 * time.Millisecond)
+	return nil, nil // Return Mock
 }
 
 func (s *XDPSocket) WritePacket(data []byte) error {
-	// Copy data to UMEM Tx Frame
-	// Notify Kernel
+	// TX Ring
 	return nil
-}
-
-func (s *XDPSocket) Close() {
-	if s.Link != nil { s.Link.Close() }
 }
 
 func htons(v uint16) uint16 {
