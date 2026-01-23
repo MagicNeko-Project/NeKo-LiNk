@@ -11,8 +11,8 @@ echo ">>> 正在拉取最新代码..."
 git pull
 if [ $? -ne 0 ]; then echo "Git pull 失败，请检查网络或仓库状态"; exit 1; fi
 
-echo ">>> 正在编译新版本..."
-go build -o $BIN_NAME main.go
+echo ">>> 正在编译新版本 (使用 Make)..."
+make
 if [ $? -ne 0 ]; then echo "编译失败"; exit 1; fi
 
 echo ">>> 停止当前服务..."

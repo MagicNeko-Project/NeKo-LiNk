@@ -8,8 +8,8 @@ BIN_NAME="neko-link"
 CONF_DIR="/etc/neko-link"
 BIN_DIR="/usr/local/bin"
 
-echo ">>> 正在编译 $APP_NAME ..."
-go build -o $BIN_NAME main.go
+echo ">>> 正在编译 $APP_NAME (使用 Make)..."
+make
 if [ $? -ne 0 ]; then echo "编译失败"; exit 1; fi
 
 echo ">>> 安装二进制文件到 $BIN_DIR ..."

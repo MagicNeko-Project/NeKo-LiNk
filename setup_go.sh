@@ -13,15 +13,15 @@ else
     echo "Go 未找到，正在尝试自动安装..."
     
     # Try apt first (Debian/Ubuntu)
-    if command -v apt-get &> /dev/null; then
+    elif command -v apt-get &> /dev/null; then
         sudo apt-get update
-        sudo apt-get install -y golang
+        sudo apt-get install -y golang clang llvm libelf-dev gcc-multilib make
     elif command -v yum &> /dev/null; then
-        sudo yum install -y golang
+        sudo yum install -y golang clang llvm libelf-devel make
     elif command -v dnf &> /dev/null; then
-        sudo dnf install -y golang
+        sudo dnf install -y golang clang llvm libelf-devel make
     elif command -v apk &> /dev/null; then
-        sudo apk add go
+        sudo apk add go clang llvm libelf-dev make
     else
         echo "无法自动安装 Go，请手动安装后重试。"
         exit 1

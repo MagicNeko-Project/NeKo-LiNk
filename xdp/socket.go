@@ -1,6 +1,6 @@
-package xdp
-
 import (
+	"bytes"
+	"embed"
 	"fmt"
 	"log"
 	"net"
@@ -9,6 +9,9 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 )
+
+//go:embed xdp_kern.o
+var bpfContent embed.FS
 
 type XDPConfig struct {
 	InterfaceName string
@@ -27,7 +30,11 @@ type XDPSocket struct {
 }
 
 func NewXDPSocket(cfg XDPConfig) (*XDPSocket, error) {
-	spec, err := ebpf.LoadCollectionSpec("bpf/xdp_kern.o")
+	// Load from Embed
+	bpfBytes, err := bpfContent.ReadFile("xdp_kern.o")
+	if err != nil { return nil, fmt.Errorf("embed load failed: %v", err) }
+
+	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(bpfBytes))
 	if err != nil { return nil, err }
 	
 	var objs struct {
