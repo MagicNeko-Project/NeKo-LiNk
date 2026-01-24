@@ -1,153 +1,68 @@
-# NekoLink 🐱 (Go-EtherTunnel)
+# NekoLink 🐱 (Shadow WireGuard Edition)
 
-一个极简、高性能的二层 (Layer 2) VPN，使用 Golang 编写。
-它旨在提供一个安全、抗干扰且能够最大化利用带宽的虚拟以太网隧道。
+一个为极端环境设计的、全自动、高隐蔽性的 Layer 3 加密隧道。
+现在的 NekoLink 将官方 `wireguard-go` 的安全性与自定义 Raw Socket 传输的隐蔽性完美结合，为您提供最智能的隧道体验。
 
-## ✨ 核心特性 (Features)
+## ✨ 核心特性
 
-*   **v6.0 Next-Gen QUIC Revolution**: 全面拥抱 QUIC 协议 (基于 HTTP/3 底层)，内置 Google BBR 拥塞控制，彻底解决 UDP 丢包、乱序和卡顿。
-*   **Pure IP 虚拟化 (L3)**: 抛弃了复杂的二层以太网头，直接在 IP 层进行数据传输。彻底解决 L2 带来的广播风暴和兼容性问题，让 ping 和路由更加稳定。
-*   **计数器 Nonce 加密 (Counter Nonce)**: **(New!)** 使用原子计数器生成 Nonce，避免每包调用 `crypto/rand` 的系统调用开销，性能提升 20-30%。
-*   **零拷贝缓冲池 (Zero-Copy Buffer Pool)**: **(New!)** 全链路使用 `sync.Pool` 复用内存，减少 GC 压力，降低延迟抖动。
-*   **智能 MSS 钳制 (Smart MSS Clamping)**: 内置 `nftables` 自动化策略，在隧道建立时自动修正 TCP MSS。完美解决 **PPPoE**、**IPv6 PMTU** 黑洞导致的网页打不开问题，无需手动调整 MTU。
-*   **VoLTE 级 QoS 优化 (VoLTE Priority)**: 自动将 IPv6 数据包标记为 `0xB8` (DSCP 46 / EF)，模拟 VoLTE 语音流量。在移动网络 (4G/5G) 下可获得运营商级的高优先级转发，大幅降低抖动。
-*   **路由协议感知 (Routing Aware)**: 支持 OSPF / RIP 等组播路由协议。服务端采用 Hub-and-Spoke 模式智能分发组播包，让您可以直接在隧道上运行动态路由协议。
-*   **Layer 3 虚拟化 (WireGuard-TUN)**: 基于官方 `wireguard/tun` 库，支持多队列和 GSO/GRO，提供目前 Go 生态中最顶级的 TUN 读写性能。
-*   **批处理传输 (UDP/IPv4 Batching)**: 引入 `x/net/ipv4` 的 `ReadBatch` 技术，一次系统调用处理一组数据包，极大降低高吞吐下的 CPU 中断和损耗。
-*   **调试监控系统 (Debug Mode)**: 支持通过 `-debug` 参数开启详细的包追踪日志，实时洞察数据包在隧道中的流转状态。
-*   **现代加密 (Modern Encryption)**:
-    *   **QUIC 模式**: 使用内置 **TLS 1.3** 进行银行级加密与身份验证。
-    *   **Raw 模式**: 继续使用经典的 **XChaCha20-Poly1305** 自动 Nonce 加密，高性能且安全。
+*   **Shadow WireGuard (wg-raw)**: 官方 WireGuard 内核，但**不走 UDP**。流量被巧妙地封装在自定义 IP 协议号（如 233）或伪装协议中，彻底规避针对 WireGuard 协议特征的识别。
+*   **全自动“零配置”握手**: 彻底告别繁琐的密钥对生成与手工 Peer 配置！只需在两端设置相同的 `key` (密码)，NekoLink 会通过私有的 `0xFE` 握手协议自动交换临时密钥并配置隧道。
+*   **传送门接管 (Shadowing)**: 所有的流量接管对 WireGuard 工具完全透明。外部 `wg` 工具看到的 Endpoint 始终是 `127.0.0.1`，而真实的物理传输由 NekoLink 在底层通过劫持逻辑无感完成。
+*   **NAT-T 全程穿透**: 面对严苛的 NAT 环境，可选开启 UDP 封装模式，让自定义协议流量像普通 UDP 包一样滑过路由器，兼顾隐蔽性与兼容性。
+*   **自进化配置逻辑**: 内置 `-migrate` 智能引擎。无论是升级旧版配置、优化 MTU 还是更新命名规范，程序都能在启动瞬间自动识别并写回优化结果，无需人工干预。
+*   **性能怪兽**: 继承了 v6.0 以来的全链路 `sync.Pool` 内存复用、多队列 TUN 读写支持，提供在 Go 生态中顶级的吞吐性能与超低延迟。
 
-## 🛠️ 快速开始 (Quick Start)
+## 🛠️ 快速开始
 
-### 1. 环境准备 (Prerequisites)
-
-*   **OS**: Linux (支持 nftables)
-*   **Tools**: `nftables` (必须安装，用于 MSS 修复)
-*   **Go**: 1.24+ (可使用 `setup_go.sh` 自动配置)
-
-```bash
-# Ubuntu/Debian
-sudo apt install nftables git
-
-# Arch Linux
-sudo pacman -S nftables git
-```
-
-### 2. 编译 (Build)
-
+### 1. 编译
 ```bash
 git clone https://github.com/yourname/go-ethertunnel.git
 cd go-ethertunnel
-./setup_go.sh  # 自动配置 Go 环境并拉取依赖
-go build -o vpn main.go
+./setup_go.sh  # 自动配置 Go 环境
+go build -o neko-link main.go structs.go wg_bind.go
 ```
 
-### 3. 配置 (Configuration)
-
-创建 `config.json` 文件：
+### 2. 配置 (config.json)
+最简配置，只需填一个密码：
 
 ```json
 {
-  "peer_addr": "1.2.3.4",           // 远端地址 (Client 模式)
-  "peer_port": 23333,               // 远端端口 (Client 模式)
-  "listen_addr": "0.0.0.0",         // 监听地址 (Server 模式)
-  "listen_port": 23333,             // 监听端口 (Server 模式)
-  "protocol": "wg-raw",             // "wg-raw" (推荐) 或 "raw"
-  "wg_port": 51820,                 // WireGuard 内部端口 (选填)
-  "ip_protocol_num": 233,           // 自定义 IP 协议号
-  "use_nat_t": true,                // 是否开启 UDP 封装
-  "key": "your-password-here",      // 共享密码
-  "local_addr": "10.0.0.1/24",      // 虚拟网卡 IP
-  "mode": "server",                 // "server" 或 "client"
-  "interface_name": "neko0",        // 网卡名称
-  "mtu": 1400                       // MTU
+  "mode": "server",           // server 或 client
+  "listen_addr": "0.0.0.0",   // 服务端监听
+  "peer_addr": "1.2.3.4",     // 客户端目标 (client 必填)
+  "key": "myaespassword",     // 共享密码，保持一致即可
+  "protocol": "wg-raw",       // 开启 Shadow WireGuard 模式
+  "local_addr": "10.0.0.1/24",// 隧道内部 IP
+  "mtu": 1400                 // 推荐 1400
 }
 ```
 
-### 4. 运行 (Run)
-
+### 3. 运行
 ```bash
 # 服务端
-sudo ./vpn -c config.json
+sudo ./neko-link -c config.json
 
 # 客户端
-sudo ./vpn -c client_config.json
+sudo ./neko-link -c client_config.json
 ```
 
-## 🧪 进阶玩法 (Advanced)
+## 🧪 进阶玩法
 
-### 动态路由 OSPF
-由于 NekoLink 现在支持组播转发，您可以直接配置 OSPF：
-
+### 自动配置文件优化
+如果您是从旧版本升级，直接运行：
 ```bash
-# 在 config.json 中配置好两端的 IP，例如 10.0.0.1 和 10.0.0.2
-
-# 启动 OSPF (以 Bird 或 FRR 为例)
-protocol ospf {
-    area 0 {
-        interface "tap0" {
-            type ptmp; # 推荐点对多点模式
-            hello 10;
-        };
-    };
-}
+./neko-link -migrate -c config.json
 ```
+程序会自动将旧的协议映射到 `wg-raw`，并将旧的字段名（如 `server_ip`）升级为新的规范命名。
 
-### 开启 Raw Socket 隐身模式
-如果你的服务器在公网（非 NAT 后），可以将 `protocol` 设置为 `raw`。
-这样程序将直接通过 IP 协议号 233 通信，不使用任何 TCP/UDP 端口，传统的端口扫描将无法发现此服务。
+### 自定义协议号伪装
+在配置中设置 `ip_protocol_num`:
+- 设置为 `6`：流量在 IP 层看起来像 TCP (仅限非 NAT 且能接受非标 TCP 头的情况)。
+- 设置为 `200+`: 避开所有标准协议号，走纯净的私有 IP 通道。
 
-### 5. 安装为系统服务 (Systemd Service)
+## 📥 安装与升级
+- **一键安装服务**: `sudo ./install_service.sh`
+- **一键升级并优化**: `sudo ./update.sh` (会自动完成编译、更新二进制及配置平滑迁移)
 
-使用 `install_service.sh` 脚本将 **NekoLink** 安装到系统：
-
-```bash
-sudo ./install_service.sh
-```
-
-- **二进制位置**: `/usr/local/bin/neko-link`
-- **配置文件**: `/etc/neko-link/config.json`
-- **服务名称**: `neko-link.service`
-
-```bash
-sudo systemctl start neko-link
-sudo systemctl status neko-link
-```
-
-### 6. 升级 (Upgrade)
-
-在代码目录下执行升级脚本，它会自动拉取最新代码并重新编译重启服务：
-
-```bash
-./update.sh
-```
-
-### 7. 高阶用法 (Advanced Usage)
-
-#### 7.1 多实例运行 (Multi-Instance)
-NekoLink 支持在一个进程中同时运行多个 VPN 实例（混合 Client 和 Server 均可）。
-只需将 `config.json` 的内容改为 **数组 `[]`** 格式即可：
-
-```json
-[
-  {
-    "interface_name": "neko0",
-    "mode": "server",
-    ...
-  },
-  {
-    "interface_name": "neko1",
-    "mode": "client",
-    ...
-  }
-]
-```
-这样您就可以在一个配置文件里管理无数条隧道，互不干扰！
-
-#### 7.2 多用户服务端 (Multi-User Server)
-NekoLink 的服务端采用 **智能动态学习** 机制。
-*   **服务端**: 只需要配置一份。
-*   **客户端**: 可以有 N 个。只需给每个客户端配置不同的 `local_addr` (例如 `10.0.0.2`, `10.0.0.3`...)。
-*   **连接**: 当客户端发送数据包时，服务端会自动记录该 IP 对应的物理地址。支持点对多点 (Point-to-Multipoint) 拓扑。
+---
+主人，快来体验这属于“影子 WireGuard”的纯净世界吧喵！(≦∇≦)/🐾
