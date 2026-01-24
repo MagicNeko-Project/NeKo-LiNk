@@ -168,7 +168,8 @@ func NewVPNInstance(cfg Config) *VPNInstance {
 	rand.Read(b)
 	v.SessionID = binary.BigEndian.Uint32(b)
 
-	v.Reorderer = NewReorderer()
+	// Reorderer 已禁用，不再需要初始化
+	// v.Reorderer = NewReorderer()
 
 	return v
 }
@@ -177,9 +178,10 @@ func (v *VPNInstance) Start() {
 	if v.Cfg.Debug {
 		debugMode = true
 	}
-	log.Printf("[%s] Starting L3 Engine v4.2 in %s mode on %s...", v.Cfg.InterfaceName, v.Cfg.Mode, v.Cfg.LocalAddr)
+	log.Printf("[%s] Starting L3 Engine v4.3 (No-Reorder) in %s mode on %s...", v.Cfg.InterfaceName, v.Cfg.Mode, v.Cfg.LocalAddr)
 	v.InitTUN()
-	v.Reorderer.WriteFunc = v.IfaceWrite
+	// Reorderer 已禁用，直接透传
+	// v.Reorderer.WriteFunc = v.IfaceWrite
 
 	v.InitNetwork()
 
@@ -481,8 +483,8 @@ func (v *VPNInstance) ProcessPacket(encrypted []byte, srcAddr net.Addr, idx int)
 
 	if len(plaintext) < 8 { return }
 
-	sessionID := binary.BigEndian.Uint32(plaintext[0:4])
-	seq := binary.BigEndian.Uint32(plaintext[4:8])
+	// sessionID := binary.BigEndian.Uint32(plaintext[0:4])  // 不再需要
+	// seq := binary.BigEndian.Uint32(plaintext[4:8])        // 不再需要
 	ipPacket := plaintext[8:]
 
 	if debugMode {
@@ -499,11 +501,8 @@ func (v *VPNInstance) ProcessPacket(encrypted []byte, srcAddr net.Addr, idx int)
 		}
 	}
 
-	// 性能优化: 使用缓冲区池减少内存分配
-	dataPtr := bufPool.Get().(*[]byte)
-	dataCopy := (*dataPtr)[:len(ipPacket)]
-	copy(dataCopy, ipPacket)
-	v.Reorderer.Push(sessionID, seq, dataCopy, dataPtr)
+	// 激进优化: 禁用 Reorderer，直接透传到 TUN (避免锁竞争和超时断流)
+	v.IfaceWrite(ipPacket)
 }
 
 func (v *VPNInstance) TUNReaderLoop() {
