@@ -77,6 +77,17 @@ func (c *Config) ParseLegacy() {
 	}
 }
 
+func writeFull(w io.Writer, b []byte) error {
+	for len(b) > 0 {
+		n, err := w.Write(b)
+		if err != nil {
+			return err
+		}
+		b = b[n:]
+	}
+	return nil
+}
+
 // --- 常量 ---
 
 const (
@@ -219,6 +230,13 @@ func (v *VPNInstance) handleQuicStream(os *quic.Stream) {
 	v.connMx.Unlock()
 
 	v.readStreamToTUN(os)
+	
+	// 清理 helper
+	v.connMx.Lock()
+	if v.activeStream == os {
+		v.activeStream = nil
+	}
+	v.connMx.Unlock()
 }
 
 func (v *VPNInstance) readStreamToTUN(s *quic.Stream) {
@@ -272,22 +290,52 @@ func (v *VPNInstance) TUNReaderLoopQUIC() {
 			if sizes[i] == 0 { continue }
 			plain := buffs[i][TunOffset : TunOffset+sizes[i]]
 			
-			// 1. AEAD 加密
-			// 生成 Nonce (前 24 字节)
-			cipherPkt := make([]byte, NonceSize+len(plain)+Overhead)
+			// 1. 从池里拿一块 Buffer 构造 [Len(2)][Nonce(24)][Ciphertext...]
+			// 计算加密后的总长度: Len(2) + Nonce(24) + Payload + Tag(16)
+			// 注意：AEAD.Seal 的结果包含 Ciphertext + Tag
+			cipherLen := NonceSize + len(plain) + Overhead
+			totalLen := 2 + cipherLen
+			
+			bufPtr := bufPool.Get().(*[]byte)
+			b := *bufPtr
+			
+			// 确保容量足够 (通常 BufSize 64K 足够大)
+			if cap(b) < totalLen {
+				bufPool.Put(bufPtr)
+				continue
+			}
+			
+			// 构造头部
+			binary.BigEndian.PutUint16(b[0:2], uint16(cipherLen))
+			
+			// 构造 Nonce (位置: b[2 : 2+Nonce])
+			nonce := b[2 : 2+NonceSize]
 			vVal := atomic.AddUint64(&v.nonceCounter, 1)
-			binary.BigEndian.PutUint64(cipherPkt[0:8], vVal)
-			binary.BigEndian.PutUint32(cipherPkt[8:12], v.SessionID)
-			// 注意：这里我们简单使用 v.AEAD (pool 中的第一个)
-			// 为了绝对并发安全，可以在此处根据协程 ID 选择不同的 AEAD
-			v.AEAD.Seal(cipherPkt[NonceSize:NonceSize], cipherPkt[:NonceSize], plain, nil)
+			binary.BigEndian.PutUint64(nonce[0:8], vVal)
+			binary.BigEndian.PutUint32(nonce[8:12], v.SessionID)
+			for k := 12; k < NonceSize; k++ { nonce[k] = 0 }
 			
-			// 2. 写入 Stream (长度 +密文)
-			lenBuf := make([]byte, 2)
-			binary.BigEndian.PutUint16(lenBuf, uint16(len(cipherPkt)))
+			// AEAD 加密
+			// Seal(dst, nonce, plaintext, additionalData)
+			// dst: 我们希望密文从 b[2+Nonce:] 开始追加。注意 Seal 是 append 语义。
+			// 所以我们需要传递 b[2+Nonce : 2+Nonce] 作为 dst 的“起始点”（利用切片 cap）。
+			// 最终数据会填在 b[2+Nonce : 2+Nonce+len(plain)+Overhead]
+			v.AEAD.Seal(b[2+NonceSize:2+NonceSize], nonce, plain, nil)
 			
-			stream.Write(lenBuf)
-			stream.Write(cipherPkt)
+			// 2. 一次性写入 Stream
+			if err := writeFull(stream, b[:totalLen]); err != nil {
+				bufPool.Put(bufPtr)
+				
+				// 发生错误，清理 activeStream 以触发重连/重置
+				v.connMx.Lock()
+				if v.activeStream == stream {
+					v.activeStream = nil
+				}
+				v.connMx.Unlock()
+				break
+			}
+			
+			bufPool.Put(bufPtr)
 		}
 	}
 }
