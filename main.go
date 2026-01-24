@@ -1,7 +1,6 @@
 package main
 
 import (
-	"container/heap"
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
@@ -122,8 +121,8 @@ type VPNInstance struct {
 	TxSeq     uint32
 
 	WGNat sync.Map // Map[string]*net.UDPConn (NAT for wg-raw server)
-
-	Reorderer *PacketReorderer
+	
+	ReplayFilter *AntiReplay
 }
 
 type PeerRoute struct {
@@ -153,9 +152,10 @@ func NewVPNInstance(cfg Config) *VPNInstance {
 	rand.Read(b)
 	v.SessionID = binary.BigEndian.Uint32(b)
 
-	v.Reorderer = NewReorderer()
-	v.Reorderer.LogFunc = v.logDebug
-
+	v.SessionID = binary.BigEndian.Uint32(b)
+	
+	v.ReplayFilter = NewAntiReplay(2048)
+	
 	return v
 }
 
@@ -172,7 +172,8 @@ func (v *VPNInstance) Start() {
 	}
 
 	v.InitTUN()
-	v.Reorderer.WriteFunc = v.IfaceWrite
+	v.InitTUN()
+	// v.Reorderer.WriteFunc = v.IfaceWrite // Removed, direct call now
 
 	v.InitNetwork()
 
@@ -591,7 +592,13 @@ func (v *VPNInstance) ProcessPacket(encrypted []byte, srcAddr net.Addr, conn net
 
 	dataCopy := make([]byte, len(ipPacket))
 	copy(dataCopy, ipPacket)
-	v.Reorderer.Push(sessionID, seq, dataCopy)
+	
+	if v.ReplayFilter.Check(sessionID, seq) {
+		v.IfaceWrite(dataCopy)
+	} else {
+		// Log duplicate or old packet?
+		// v.logDebug("AntiReplay: Drop S:%d Seq:%d", sessionID, seq)
+	}
 }
 
 func (v *VPNInstance) TUNReaderLoop() {
@@ -818,104 +825,125 @@ func (v *VPNInstance) KeepaliveLoop() {
 	}
 }
 
-// --- Reorderer ---
+// --- Anti-Replay (Sliding Window) ---
 
-type SeqPacket struct {
-	Seq  uint32
-	Data []byte
-	T    time.Time
-}
-type PacketHeap []SeqPacket
-func (h PacketHeap) Len() int           { return len(h) }
-func (h PacketHeap) Less(i, j int) bool { return h[i].Seq < h[j].Seq }
-func (h PacketHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-func (h *PacketHeap) Push(x interface{}) { *h = append(*h, x.(SeqPacket)) }
-func (h *PacketHeap) Pop() interface{} {
-	old := *h
-	n := len(old)
-	x := old[n-1]
-	*h = old[0 : n-1]
-	return x
-}
-
-type PacketReorderer struct {
-	mu          sync.Mutex
-	nextSeq     uint32
-	buffer      PacketHeap
+type AntiReplay struct {
+	mutex       sync.Mutex
 	lastSession uint32
-	WriteFunc   func([]byte)
-	LogFunc     func(string, ...interface{})
+	lastSeq     uint32
+	bitmap      []uint64
+	windowSize  uint32
+	sizeBlocks  uint32
 }
 
-func NewReorderer() *PacketReorderer {
-	r := &PacketReorderer{buffer: make(PacketHeap, 0)}
-	heap.Init(&r.buffer)
-	go r.watchdog()
-	return r
-}
-
-func (pr *PacketReorderer) log(format string, v ...interface{}) {
-	if pr.LogFunc != nil {
-		pr.LogFunc(format, v...)
+func NewAntiReplay(windowSize uint32) *AntiReplay {
+	blocks := windowSize / 64
+	if windowSize%64 != 0 {
+		blocks++
+	}
+	return &AntiReplay{
+		bitmap:     make([]uint64, blocks),
+		windowSize: windowSize,
+		sizeBlocks: blocks,
 	}
 }
 
-func (pr *PacketReorderer) Push(sess uint32, seq uint32, data []byte) {
-	pr.mu.Lock()
-	defer pr.mu.Unlock()
-	if sess != pr.lastSession {
-		pr.log("Reorderer: Session reset %v -> %v", pr.lastSession, sess)
-		pr.lastSession = sess
-		pr.nextSeq = seq
-		pr.buffer = pr.buffer[:0]
-	}
-	diff := int32(seq - pr.nextSeq)
-	if diff < 0 { return }
-	if seq == pr.nextSeq {
-		if pr.WriteFunc != nil { pr.WriteFunc(data) }
-		pr.nextSeq++
-		pr.drain()
-		return
-	}
-	if pr.buffer.Len() > MaxReorderBuffer {
-		min := heap.Pop(&pr.buffer).(SeqPacket)
-		pr.nextSeq = min.Seq
-		if pr.WriteFunc != nil { pr.WriteFunc(min.Data) }
-		pr.nextSeq++
-		pr.drain()
-	}
-	heap.Push(&pr.buffer, SeqPacket{Seq: seq, Data: data, T: time.Now()})
-}
+func (a *AntiReplay) Check(session uint32, seq uint32) bool {
+	a.mutex.Lock()
+	defer a.mutex.Unlock()
 
-func (pr *PacketReorderer) drain() {
-	for pr.buffer.Len() > 0 {
-		min := pr.buffer[0]
-		if min.Seq == pr.nextSeq {
-			heap.Pop(&pr.buffer)
-			if pr.WriteFunc != nil { pr.WriteFunc(min.Data) }
-			pr.nextSeq++
-		} else { break }
+	// Session Reset
+	if session != a.lastSession {
+		a.lastSession = session
+		a.lastSeq = seq
+		a.resetBitmap()
+		// First packet of new session is accepted
+		return true
 	}
-}
 
-func (pr *PacketReorderer) watchdog() {
-	tick := time.NewTicker(20 * time.Millisecond)
-	for range tick.C {
-		pr.mu.Lock()
-		if pr.buffer.Len() > 0 {
-			head := pr.buffer[0]
-			if time.Since(head.T) > 10*time.Millisecond {
-				if debugMode {
-					pr.log("Reorderer: Force jump Seq %v -> %v (Timeout > 10ms)", pr.nextSeq, head.Seq)
-				}
-				pr.nextSeq = head.Seq
-				heap.Pop(&pr.buffer)
-				if pr.WriteFunc != nil { pr.WriteFunc(head.Data) }
-				pr.nextSeq++
-				pr.drain()
-			}
+	diff := int64(seq) - int64(a.lastSeq)
+
+	if diff > 0 {
+		// New largest sequence
+		// Shift window by diff
+		if diff >= int64(a.windowSize) {
+			a.resetBitmap()
+		} else {
+			a.shift(uint32(diff))
 		}
-		pr.mu.Unlock()
+		a.lastSeq = seq
+		// Set bit 0 (representing lastSeq)
+		a.bitmap[0] |= 1
+		return true
+	}
+
+	// Old sequence (diff <= 0)
+	diffAbs := -diff
+	if diffAbs >= int64(a.windowSize) {
+		return false // Too old
+	}
+
+	// Check duplicates
+	block := diffAbs / 64
+	bit := diffAbs % 64
+	mask := uint64(1) << bit
+
+	if (a.bitmap[block] & mask) != 0 {
+		return false // Duplicate
+	}
+
+	// Mark and accept
+	a.bitmap[block] |= mask
+	return true
+}
+
+func (a *AntiReplay) resetBitmap() {
+	for i := range a.bitmap {
+		a.bitmap[i] = 0
+	}
+	// Implicitly marks nothing seen. 
+	// The caller usually sets the current bit immediately after reset if it's a new max.
+}
+
+func (a *AntiReplay) shift(n uint32) {
+	// Shift bitmap left by n bits
+	// Since bitmap[0] is high end (lastSeq), bitmap[1] is older...
+	// We need to implement bit shift across uint64 array.
+	// Simpler: iterate.
+	
+	// Fast path for large shifts handled by reset logic above.
+	
+	// We implementing "Right Shift" logic conceptually if index 0 is newest.
+	// Let's say index 0 bit 0 is lastSeq. index 0 bit 1 is lastSeq-1.
+	// When we move lastSeq by +n, the old lastSeq becomes bit n.
+	// So we need to shift all bits "Left" (towards higher index/bit value) by n.
+	
+	// Implementation:
+	// Go doesn't natively shift arrays.
+	// But 2048 window is just 32 uint64s.
+	
+	shiftBlocks := n / 64
+	shiftBits := n % 64
+
+	// 1. Shift blocks
+	if shiftBlocks > 0 {
+		for i := int(a.sizeBlocks) - 1; i >= int(shiftBlocks); i-- {
+			a.bitmap[i] = a.bitmap[i-int(shiftBlocks)]
+		}
+		for i := 0; i < int(shiftBlocks); i++ {
+			a.bitmap[i] = 0
+		}
+	}
+
+	// 2. Shift bits
+	if shiftBits > 0 {
+		carry := uint64(0)
+		for i := 0; i < int(a.sizeBlocks); i++ {
+			val := a.bitmap[i]
+			newVal := (val << shiftBits) | carry
+			carry = val >> (64 - shiftBits)
+			a.bitmap[i] = newVal
+		}
 	}
 }
 
