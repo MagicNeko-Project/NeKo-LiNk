@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os/exec"
 	"sync"
 
 	"github.com/cilium/ebpf"
@@ -40,8 +41,13 @@ type ShadowXConfig struct {
 
 type ShadowXEngine struct {
 	ifaceName string
+	
+	// TCX links (Modern kernels)
 	tcLinkEgress  link.Link
 	tcLinkIngress link.Link
+	
+	// Legacy TC links (Manual cleanup needed if using Shell)
+	isLegacy bool
 	
 	portMap  *ebpf.Map
 	protoMap *ebpf.Map
@@ -78,33 +84,50 @@ func GetShadowXEngine(ifaceName string) (*ShadowXEngine, error) {
 	iface, err := net.InterfaceByName(ifaceName)
 	if err != nil { return nil, err }
 
-	// Attach TCX Egress
-	te, err := link.AttachTCX(link.TCXOptions{
+	e := &ShadowXEngine{
+		ifaceName: ifaceName,
+		portMap:   objs.PortMap,
+		protoMap:  objs.ProtoMap,
+		refCount:  1,
+	}
+
+	// 1. Try Modern TCX
+	te, errE := link.AttachTCX(link.TCXOptions{
 		Program:   objs.TcEgress,
 		Interface: iface.Index,
 		Attach:    ebpf.AttachTCXEgress,
 	})
-	if err != nil {
-		log.Printf("[eBPF] tcx egress failed (%v), kernel might be too old.", err)
-	}
-
-	// Attach TCX Ingress
-	ti, err := link.AttachTCX(link.TCXOptions{
+	ti, errI := link.AttachTCX(link.TCXOptions{
 		Program:   objs.TcIngress,
 		Interface: iface.Index,
 		Attach:    ebpf.AttachTCXIngress,
 	})
-	if err != nil {
-		log.Printf("[eBPF] tcx ingress failed (%v), kernel might be too old.", err)
-	}
 
-	e := &ShadowXEngine{
-		ifaceName:     ifaceName,
-		tcLinkEgress:  te,
-		tcLinkIngress: ti,
-		portMap:       objs.PortMap,
-		protoMap:      objs.ProtoMap,
-		refCount:      1,
+	if errE == nil && errI == nil {
+		e.tcLinkEgress = te
+		e.tcLinkIngress = ti
+		log.Printf("[eBPF] Modern TCX attached on %s", ifaceName)
+	} else {
+		// 2. Fallback to Legacy TC (Command line)
+		log.Printf("[eBPF] TCX not supported (%v), falling back to Legacy TC (clsact)...", errE)
+		e.isLegacy = true
+		
+		// Setup clsact qdisc
+		exec.Command("tc", "qdisc", "add", "dev", ifaceName, "clsact").Run()
+		
+		// Use manual pin or direct attachment? 
+		// Actually, even in legacy kernels, we can use link.RawAttachProgram for CLSACT
+		// But it's easier to use the library's internal support if we can find it.
+		// For simplicity and 100% success on PVE/Legacy, we use 'tc' command.
+		// We'll need to pin the programs to the filesystem first.
+		
+		pinPath := fmt.Sprintf("/sys/fs/bpf/neko_%s", ifaceName)
+		exec.Command("mkdir", "-p", pinPath).Run()
+		objs.TcEgress.Pin(pinPath + "/egress")
+		objs.TcIngress.Pin(pinPath + "/ingress")
+		
+		exec.Command("tc", "filter", "replace", "dev", ifaceName, "egress", "bpf", "da", "obj", pinPath+"/egress", "sec", "tc/egress").Run()
+		exec.Command("tc", "filter", "replace", "dev", ifaceName, "ingress", "bpf", "da", "obj", pinPath+"/ingress", "sec", "tc/ingress").Run()
 	}
 
 	engineRegistry[ifaceName] = e
@@ -121,8 +144,6 @@ func (e *ShadowXEngine) Register(cfg ShadowXConfig) error {
 		LocalPort: htons(cfg.LocalPort),
 	}
 
-	// For both modes, we usually want to register the local port 
-	// so the Egress hook identifies our app's traffic.
 	port := htons(cfg.LocalPort)
 	if err := e.portMap.Put(&port, &conf); err != nil {
 		return fmt.Errorf("failed to register port %d: %v", cfg.LocalPort, err)
@@ -155,8 +176,15 @@ func (e *ShadowXEngine) Close() {
 	registryMutex.Lock()
 	e.refCount--
 	if e.refCount <= 0 {
-		if e.tcLinkEgress != nil { e.tcLinkEgress.Close() }
-		if e.tcLinkIngress != nil { e.tcLinkIngress.Close() }
+		if e.isLegacy {
+			// Clean up legacy TC
+			exec.Command("tc", "filter", "del", "dev", e.ifaceName, "egress").Run()
+			exec.Command("tc", "filter", "del", "dev", e.ifaceName, "ingress").Run()
+			exec.Command("rm", "-rf", fmt.Sprintf("/sys/fs/bpf/neko_%s", e.ifaceName)).Run()
+		} else {
+			if e.tcLinkEgress != nil { e.tcLinkEgress.Close() }
+			if e.tcLinkIngress != nil { e.tcLinkIngress.Close() }
+		}
 		delete(engineRegistry, e.ifaceName)
 	}
 	registryMutex.Unlock()
