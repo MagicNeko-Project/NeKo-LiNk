@@ -114,6 +114,8 @@ type VPNInstance struct {
 	ConnRaw     *net.IPConn
 	TCPMutex    sync.Mutex
 
+	PeerMap sync.Map // Stores IP(uint32) -> PeerRoute
+
 	ClientRemoteUDP []*net.UDPAddr
 	ClientRemoteIP  *net.IPAddr
 
