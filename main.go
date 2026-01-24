@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -74,11 +75,11 @@ func (c *Config) ParseLegacy() {
 // --- 常量 ---
 
 const (
-	NonceSize  = chacha20poly1305.NonceSizeX
-	Overhead   = chacha20poly1305.Overhead
-	TunOffset  = 16
-	BufSize    = 65536
-	BatchSize  = 16 // 批处理大小
+	NonceSize = chacha20poly1305.NonceSizeX
+	Overhead  = chacha20poly1305.Overhead
+	TunOffset = 16
+	BufSize   = 65536
+	BatchSize = 16
 )
 
 // --- 内存池 ---
@@ -104,10 +105,11 @@ type VPNInstance struct {
 	ClientRemoteUDP *net.UDPAddr
 	ServerPeerAddr  *net.UDPAddr
 
-	// Raw 模式
-	ConnRaw        *net.IPConn
+	// Raw 模式 (多连接并发)
+	ConnRaw        []*net.IPConn
 	ClientRemoteIP *net.IPAddr
 	ServerPeerIP   *net.IPAddr
+	rawSendIdx     uint32 // 轮询发送索引
 
 	// 性能优化
 	nonceCounter uint64
@@ -135,7 +137,7 @@ func (v *VPNInstance) Start() {
 		debugMode = true
 	}
 
-	log.Printf("[%s] NekoLink v5.2 (批处理版) 启动中 - 模式: %s, 协议: %s",
+	log.Printf("[%s] NekoLink v5.3 (Raw优化版) 启动中 - 模式: %s, 协议: %s",
 		v.Cfg.InterfaceName, v.Cfg.Mode, v.Cfg.Protocol)
 
 	v.InitTUN()
@@ -196,7 +198,7 @@ func (v *VPNInstance) initUDP() {
 	conn.SetReadBuffer(16 << 20)
 	conn.SetWriteBuffer(16 << 20)
 	v.ConnUDP = conn
-	v.ConnBatch = ipv4.NewPacketConn(conn) // 批处理连接
+	v.ConnBatch = ipv4.NewPacketConn(conn)
 
 	if v.Cfg.Mode == "client" {
 		rAddr, _ := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", v.Cfg.RemoteIP, v.Cfg.RemotePort))
@@ -212,31 +214,44 @@ func (v *VPNInstance) initUDP() {
 func (v *VPNInstance) initRaw() {
 	protoStr := fmt.Sprintf("ip4:%d", v.Cfg.IPProtocolNum)
 
-	var lAddr *net.IPAddr
-	if v.Cfg.Mode == "server" && v.Cfg.ServerBindAddr != "0.0.0.0" {
-		lAddr, _ = net.ResolveIPAddr("ip", v.Cfg.ServerBindAddr)
+	// 多连接并发 - 提升吞吐量
+	numConns := runtime.NumCPU()
+	if numConns > 4 {
+		numConns = 4 // 最多 4 个并发连接
 	}
 
-	conn, err := net.ListenIP(protoStr, lAddr)
-	if err != nil {
-		log.Fatalf("Raw Socket 监听失败: %v", err)
-	}
+	v.ConnRaw = make([]*net.IPConn, numConns)
 
-	conn.SetReadBuffer(16 << 20)
-	conn.SetWriteBuffer(16 << 20)
-	v.ConnRaw = conn
+	for i := 0; i < numConns; i++ {
+		var lAddr *net.IPAddr
+		if v.Cfg.Mode == "server" && v.Cfg.ServerBindAddr != "0.0.0.0" {
+			lAddr, _ = net.ResolveIPAddr("ip", v.Cfg.ServerBindAddr)
+		}
+
+		conn, err := net.ListenIP(protoStr, lAddr)
+		if err != nil {
+			log.Fatalf("Raw Socket 监听失败: %v", err)
+		}
+
+		conn.SetReadBuffer(16 << 20)
+		conn.SetWriteBuffer(16 << 20)
+		v.ConnRaw[i] = conn
+
+		// 启动读取循环
+		go v.rawReaderLoop(i)
+	}
 
 	if v.Cfg.Mode == "client" {
 		v.ClientRemoteIP, _ = net.ResolveIPAddr("ip", v.Cfg.RemoteIP)
-		log.Printf("[RAW] 客户端模式 -> %s (Proto: %d)", v.ClientRemoteIP, v.Cfg.IPProtocolNum)
+		log.Printf("[RAW] 客户端模式 -> %s (Proto: %d, 并发: %d)",
+			v.ClientRemoteIP, v.Cfg.IPProtocolNum, numConns)
 	} else {
-		log.Printf("[RAW] 服务端监听 (Proto: %d)", v.Cfg.IPProtocolNum)
+		log.Printf("[RAW] 服务端监听 (Proto: %d, 并发: %d)",
+			v.Cfg.IPProtocolNum, numConns)
 	}
-
-	go v.rawReaderLoop()
 }
 
-// --- 网络读取循环 (批处理) ---
+// --- 网络读取循环 ---
 
 func (v *VPNInstance) udpReaderLoop() {
 	msgs := make([]ipv4.Message, BatchSize)
@@ -257,7 +272,6 @@ func (v *VPNInstance) udpReaderLoop() {
 				continue
 			}
 
-			// 服务端记录对端地址
 			if v.Cfg.Mode == "server" {
 				if udpAddr, ok := msg.Addr.(*net.UDPAddr); ok {
 					v.ServerPeerAddr = udpAddr
@@ -269,16 +283,19 @@ func (v *VPNInstance) udpReaderLoop() {
 	}
 }
 
-func (v *VPNInstance) rawReaderLoop() {
+func (v *VPNInstance) rawReaderLoop(idx int) {
+	conn := v.ConnRaw[idx]
 	buf := make([]byte, BufSize)
+
 	for {
-		n, addr, err := v.ConnRaw.ReadFromIP(buf)
+		n, addr, err := conn.ReadFromIP(buf)
 		if err != nil {
-			log.Printf("Raw 读取错误: %v", err)
+			log.Printf("Raw[%d] 读取错误: %v", idx, err)
 			continue
 		}
 
-		if n < 4 {
+		// Raw 协议直接传输加密数据，无额外头部
+		if n < NonceSize+Overhead {
 			continue
 		}
 
@@ -286,7 +303,7 @@ func (v *VPNInstance) rawReaderLoop() {
 			v.ServerPeerIP = addr
 		}
 
-		v.handleIncomingPacket(buf[4:n])
+		v.handleIncomingPacket(buf[:n])
 	}
 }
 
@@ -313,7 +330,7 @@ func (v *VPNInstance) TUNReaderLoop() {
 		}
 
 		if v.Cfg.Protocol == "udp" {
-			// 批处理模式
+			// UDP 批处理模式
 			sendMsgs = sendMsgs[:0]
 			for i := 0; i < n; i++ {
 				if sizes[i] == 0 {
@@ -340,13 +357,13 @@ func (v *VPNInstance) TUNReaderLoop() {
 				v.ConnBatch.WriteBatch(sendMsgs, 0)
 			}
 		} else {
-			// Raw 模式逐包发送
+			// Raw 模式 - 并发发送
 			for i := 0; i < n; i++ {
 				if sizes[i] == 0 {
 					continue
 				}
 				data := buffs[i][TunOffset : TunOffset+sizes[i]]
-				v.handleOutgoingPacketRaw(data)
+				v.sendRawPacket(data)
 			}
 		}
 	}
@@ -381,7 +398,7 @@ func (v *VPNInstance) encryptPacket(ipPacket []byte) []byte {
 	dstPtr := bufPool.Get().(*[]byte)
 	dst := (*dstPtr)[:NonceSize+len(ipPacket)+Overhead]
 
-	// Nonce
+	// Nonce (计数器模式)
 	nonce := dst[:NonceSize]
 	nonceVal := atomic.AddUint64(&v.nonceCounter, 1)
 	binary.BigEndian.PutUint64(nonce[0:8], nonceVal)
@@ -392,7 +409,7 @@ func (v *VPNInstance) encryptPacket(ipPacket []byte) []byte {
 
 	v.AEAD.Seal(dst[NonceSize:NonceSize], nonce, ipPacket, nil)
 
-	// 返回加密后的数据（需要拷贝因为池会复用）
+	// 拷贝结果（因为池会复用）
 	result := make([]byte, len(dst))
 	copy(result, dst)
 	bufPool.Put(dstPtr)
@@ -400,7 +417,7 @@ func (v *VPNInstance) encryptPacket(ipPacket []byte) []byte {
 	return result
 }
 
-func (v *VPNInstance) handleOutgoingPacketRaw(ipPacket []byte) {
+func (v *VPNInstance) sendRawPacket(ipPacket []byte) {
 	if len(ipPacket) == 0 {
 		return
 	}
@@ -409,9 +426,6 @@ func (v *VPNInstance) handleOutgoingPacketRaw(ipPacket []byte) {
 	if encrypted == nil {
 		return
 	}
-
-	payload := make([]byte, 4+len(encrypted))
-	copy(payload[4:], encrypted)
 
 	var addr *net.IPAddr
 	if v.Cfg.Mode == "client" {
@@ -423,7 +437,9 @@ func (v *VPNInstance) handleOutgoingPacketRaw(ipPacket []byte) {
 		return
 	}
 
-	v.ConnRaw.WriteToIP(payload, addr)
+	// 轮询选择连接发送 (负载均衡)
+	idx := atomic.AddUint32(&v.rawSendIdx, 1) % uint32(len(v.ConnRaw))
+	v.ConnRaw[idx].WriteToIP(encrypted, addr)
 }
 
 func (v *VPNInstance) writeTUN(data []byte) {
