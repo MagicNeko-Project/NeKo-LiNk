@@ -11,14 +11,16 @@
 // --- Configuration Struct ---
 
 struct shadow_config {
-    __u32 mode;       // 1=Raw-IP (Custom Proto), 2=Fake-TCP
-    __u32 proto_num;  // Only used for Mode 1
+    __u32 mode;       // 1=Raw-IP, 2=Fake-TCP
+    __u32 proto_num;  // Protocol number for Raw-IP
     __u16 local_port; // Port the app is listening on (Big Endian)
-    __u16 reserved;   
+    __u16 reserved;
 };
 
 // --- Maps ---
 
+// Map 1: Port-based (For Egress & Fake-TCP Ingress)
+// Key: Port (u16, Big Endian) -> Value: Config
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(key_size, sizeof(__u16));
@@ -26,6 +28,8 @@ struct {
     __uint(max_entries, 128);
 } port_shadow_map SEC(".maps");
 
+// Map 2: Protocol-based (Only for Raw-IP Ingress)
+// Key: Protocol (u8) -> Value: Config
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(key_size, sizeof(__u8));
@@ -50,7 +54,7 @@ static __always_inline void full_ip_recompute(struct iphdr *ip) {
     ip->check = ~(__u16)csum;
 }
 
-// --- Ingress: TC (Restore Context) ---
+// --- Ingress: TC (Restore) ---
 
 SEC("tc/ingress")
 int tc_shadow_ingress(struct __sk_buff *skb) {
@@ -64,11 +68,13 @@ int tc_shadow_ingress(struct __sk_buff *skb) {
     struct iphdr *ip = (struct iphdr *)((void *)eth + sizeof(*eth));
     if ((void *)ip + sizeof(*ip) > data_end) return TC_ACT_OK;
 
-    // --- Mode 1: Restore Raw-IP (Add UDP Head) ---
+    // --- Mode 1: Proto-based Lookup (Raw-IP) ---
+    // Key logical change: In Raw-IP ingress, we don't know the port yet (it's stripped).
+    // We strictly rely on the Protocol Number to identify the tunnel.
+    // Ensure every tunnel on the same machine uses a unique Protocol Number!
+    
     struct shadow_config *cfg = bpf_map_lookup_elem(&proto_shadow_map, &ip->protocol);
     if (cfg && cfg->mode == 1) {
-        // bpf_printk("[eBPF] Ingress Mode 1: Restoration triggered (proto %d)\n", ip->protocol);
-
         if (bpf_skb_adjust_room(skb, 8, BPF_ADJ_ROOM_NET, 0) < 0) return TC_ACT_OK;
         
         data = (void *)(long)skb->data;
@@ -80,7 +86,8 @@ int tc_shadow_ingress(struct __sk_buff *skb) {
         struct udphdr *udp = (struct udphdr *)((void *)ip + (ip->ihl * 4));
         if ((void *)udp + sizeof(*udp) > data_end) return TC_ACT_OK;
 
-        udp->dest = cfg->local_port;
+        // Restore using the registered local port from the Config
+        udp->dest = cfg->local_port; 
         udp->source = bpf_htons(12345);
         udp->len = bpf_htons(bpf_ntohs(ip->tot_len) + 8 - (ip->ihl * 4));
         udp->check = 0;
@@ -92,7 +99,8 @@ int tc_shadow_ingress(struct __sk_buff *skb) {
         return TC_ACT_OK;
     }
 
-    // --- Mode 2: Restore Fake-TCP (TCP 20 -> UDP 8) ---
+    // --- Mode 2: Port-based Lookup (Fake-TCP) ---
+    // Fake-TCP has ports in the TCP header, so we use them to identify the tunnel.
     if (ip->protocol == IPPROTO_TCP) {
         struct tcphdr *tcp = (struct tcphdr *)((void *)ip + (ip->ihl * 4));
         if ((void *)tcp + sizeof(*tcp) > data_end) return TC_ACT_OK;
@@ -126,7 +134,7 @@ int tc_shadow_ingress(struct __sk_buff *skb) {
     return TC_ACT_OK;
 }
 
-// --- Egress: TC (Apply Transformation) ---
+// --- Egress: TC (Apply) ---
 
 SEC("tc/egress")
 int tc_shadow_egress(struct __sk_buff *skb) {
