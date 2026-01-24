@@ -149,7 +149,7 @@ func (v *VPNInstance) Start() {
 		debugMode = true
 	}
 
-	log.Printf("[%s] NekoLink v5.22 (融合保序版) 启动中 - 核心: %d, MTU: %d",
+	log.Printf("[%s] NekoLink v5.23 (接收端火力全开版) 启动中 - 核心: %d, MTU: %d",
 		v.Cfg.InterfaceName, v.numWorkers, v.Cfg.MTU)
 
 	v.InitTUN()
@@ -370,23 +370,166 @@ func (v *VPNInstance) udpReaderLoopV6() {
 	}
 }
 
-// --- UDP 接收端保序流水线 (v5.19 绝杀) ---
+// --- UDP 接收端保序流水线 (v5.23 对称升级版) ---
 func (v *VPNInstance) udpReaderLoop_Ordered() {
-	buf := make([]byte, BufSize)
+	if v.IsIPv6 {
+		v.udpReaderLoopV6_Batch()
+	} else {
+		v.udpReaderLoopV4_Batch()
+	}
+}
+
+func (v *VPNInstance) udpReaderLoopV4_Batch() {
+	// 1. 准备 Batch Read 容器
+	msgs := make([]ipv4.Message, BatchSize)
+	for i := range msgs {
+		msgs[i].Buffers = [][]byte{make([]byte, BufSize)}
+	}
+	
+	// 2. 准备解密结果容器
+	decryptedBuffs := make([][]byte, BatchSize)
+	ptrs := make([]*[]byte, BatchSize)
+
 	for {
-		// 单协程读取 Socket，内核保证这里出来的包一定是按网络到达顺序的
-		n, addr, err := v.ConnUDP.ReadFromUDP(buf)
-		if err != nil || n < NonceSize+Overhead {
+		// 3. Batch Read: 一次性吸入大量包，防止 Socket 缓冲区溢出
+		n, err := v.ConnBatchV4.ReadBatch(msgs, 0)
+		if err != nil {
 			continue
 		}
-		if v.Cfg.Mode == "server" {
-			v.ServerPeerAddr.Store(addr)
+		if n == 0 {
+			continue
 		}
 
-		// 拷贝数据并启动解密处理。虽然解密可以异步，但我们通过本协程顺序处理或
-		// 利用 handleIncomingPacket。为了最稳，这里目前采用单线程同步解密。
-		// 如果需要提升性能，此处可改为解密池，但目前单线程 handle 已足够跑满 300M+
-		v.handleIncomingPacket(buf[:n])
+		// 4. 并行解密 (Fork-Join)
+		var wg sync.WaitGroup
+		wg.Add(n)
+		for i := 0; i < n; i++ {
+			go func(idx int) {
+				defer wg.Done()
+				nLen := msgs[idx].N
+				if nLen < NonceSize+Overhead {
+					return
+				}
+				
+				// Server 模式下更新 Peer 地址 (仅取第一个或每个都更？通常第一个够了，但为了严谨...)
+				// 注意：高并发下 Store 可能有性能损耗，但 atomic 很快。
+				// 为了性能，我们可以在主线程 Loop 里做，或者这里不做（假设 Session 已建立）
+				// 这里为了简单，暂不频繁 Store，或者仅在 idx==0 时 Store
+				
+				enc := msgs[idx].Buffers[0][:nLen]
+				
+				// 申请内存用于 TUN Write
+				// TUN 需要头部预留 TunOffset
+				dstPtr := bufPool.Get().(*[]byte)
+				ptrs[idx] = dstPtr
+				
+				// 解密直接写入偏移后的位置
+				buf := *dstPtr
+				plain, err := v.aeadPool[idx%16].Open(buf[TunOffset:TunOffset], enc[:NonceSize], enc[NonceSize:], nil)
+				if err == nil {
+					decryptedBuffs[idx] = plain // slice pointing to dstPtr/buf
+				}
+			}(i)
+		}
+		wg.Wait()
+
+		// 5. Server 模式更新 Peer (取第一个包的地址)
+		if v.Cfg.Mode == "server" && n > 0 {
+			if addr, ok := msgs[0].Addr.(*net.UDPAddr); ok {
+				v.ServerPeerAddr.Store(addr)
+			}
+		}
+
+		// 6. 批量写入 TUN
+		// TUN Write 需要 [][]byte，其中每个包前要有 TunOffset 空间
+		// 我们在解密时已经留好了。
+		var tunBatch [][]byte
+		for i := 0; i < n; i++ {
+			if decryptedBuffs[i] != nil {
+				// decryptedBuffs[i] 是 plain slice，它底层指向 ptrs[i] + TunOffset
+				// 我们需要传入包含 TunOffset 头的完整 buffer slice
+				// 重构一下：v.TunDev.Write 需要的是包含头部的 buf
+				// Open 的 dst 参数我们传的是 buf[TunOffset:TunOffset]，Open 会 append 到这里
+				// 所以 decryptedBuffs[i] 现在的长度是 plain len，容量是 buf cap - Offset
+				// 我们需要还原出由于 append 增长的 slice，还是说 Open 返回的是 payload?
+				// Open(dst, nonce, ciphertext, ad) appends decrypted to dst and returns parallel slice
+				
+				// 修正：TUN Write 需要整个 buffer 包含 TunOffset
+				// 指针是 ptrs[i]
+				fullBuf := (*ptrs[i])[:TunOffset+len(decryptedBuffs[i])]
+				tunBatch = append(tunBatch, fullBuf)
+			}
+		}
+
+		if len(tunBatch) > 0 {
+			v.TunDev.Write(tunBatch, TunOffset)
+		}
+
+		// 7. 清理回收
+		for i := 0; i < n; i++ {
+			if ptrs[i] != nil {
+				bufPool.Put(ptrs[i])
+				ptrs[i] = nil
+			}
+			decryptedBuffs[i] = nil
+		}
+	}
+}
+
+func (v *VPNInstance) udpReaderLoopV6_Batch() {
+	// IPv6 对应实现... 为节省篇幅暂略，逻辑相同，除非用户明确需要
+	// 鉴于用户使用的是 100.64.x.x (IPv4 CGNAT)，重点保 v4
+	// 但为了完整性，这里放一个简单的占位或复制 v4 逻辑改类型
+	msgs := make([]ipv6.Message, BatchSize)
+	for i := range msgs {
+		msgs[i].Buffers = [][]byte{make([]byte, BufSize)}
+	}
+	decryptedBuffs := make([][]byte, BatchSize)
+	ptrs := make([]*[]byte, BatchSize)
+
+	for {
+		n, err := v.ConnBatchV6.ReadBatch(msgs, 0)
+		if err != nil { continue }
+		if n == 0 { continue }
+
+		var wg sync.WaitGroup
+		wg.Add(n)
+		for i := 0; i < n; i++ {
+			go func(idx int) {
+				defer wg.Done()
+				nLen := msgs[idx].N
+				if nLen < NonceSize+Overhead { return }
+				enc := msgs[idx].Buffers[0][:nLen]
+				dstPtr := bufPool.Get().(*[]byte)
+				ptrs[idx] = dstPtr
+				buf := *dstPtr
+				plain, err := v.aeadPool[idx%16].Open(buf[TunOffset:TunOffset], enc[:NonceSize], enc[NonceSize:], nil)
+				if err == nil { decryptedBuffs[idx] = plain }
+			}(i)
+		}
+		wg.Wait()
+
+		if v.Cfg.Mode == "server" && n > 0 {
+			if addr, ok := msgs[0].Addr.(*net.UDPAddr); ok { v.ServerPeerAddr.Store(addr) }
+		}
+
+		var tunBatch [][]byte
+		for i := 0; i < n; i++ {
+			if decryptedBuffs[i] != nil {
+				fullBuf := (*ptrs[i])[:TunOffset+len(decryptedBuffs[i])]
+				tunBatch = append(tunBatch, fullBuf)
+			}
+		}
+		if len(tunBatch) > 0 {
+			v.TunDev.Write(tunBatch, TunOffset)
+		}
+		for i := 0; i < n; i++ {
+			if ptrs[i] != nil {
+				bufPool.Put(ptrs[i])
+				ptrs[i] = nil
+			}
+			decryptedBuffs[i] = nil
+		}
 	}
 }
 
