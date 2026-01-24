@@ -112,7 +112,7 @@ type VPNInstance struct {
 	ConnRaw     *net.IPConn
 	TCPMutex    sync.Mutex
 
-	PeerMap sync.Map
+	PeerMap sync.Map // Stores IP(uint32) -> PeerRoute
 
 	ClientRemoteUDP []*net.UDPAddr
 	ClientRemoteIP  *net.IPAddr
@@ -120,7 +120,13 @@ type VPNInstance struct {
 	SessionID uint32
 	TxSeq     uint32
 
+
 	Reorderer *PacketReorderer
+}
+
+type PeerRoute struct {
+	Addr     net.Addr
+	LocalIdx int
 }
 
 func NewVPNInstance(cfg Config) *VPNInstance {
@@ -434,7 +440,7 @@ func (v *VPNInstance) ProcessPacket(encrypted []byte, srcAddr net.Addr, idx int)
 		if version == 4 {
 			srcIP := binary.BigEndian.Uint32(ipPacket[12:16])
 			if srcIP != 0 {
-				v.PeerMap.Store(srcIP, srcAddr)
+				v.PeerMap.Store(srcIP, PeerRoute{Addr: srcAddr, LocalIdx: idx})
 			}
 		}
 	}
@@ -490,7 +496,11 @@ func (v *VPNInstance) handleOutgoingPacket(ipPacket []byte) {
 			if version == 4 {
 				dstIP := binary.BigEndian.Uint32(ipPacket[16:20])
 				if val, ok := v.PeerMap.Load(dstIP); ok {
-					destAddr = val.(net.Addr)
+					route := val.(PeerRoute)
+					destAddr = route.Addr
+					// Use the same port that received traffic from this peer (Sticky Port)
+					// This is critical for NAT traversal with multiple ports.
+					idx = route.LocalIdx
 				} else if debugMode {
 					logDebug("ROUTING: No peer for %d.%d.%d.%d, dropping...", ipPacket[16], ipPacket[17], ipPacket[18], ipPacket[19])
 				}
