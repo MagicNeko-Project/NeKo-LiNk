@@ -56,6 +56,7 @@ type Config struct {
 	UseXDP        bool `json:"use_xdp"`
 	Debug         bool `json:"debug"`
 
+	TargetAddr string `json:"target_addr"` // For wg-raw mode (Server forward target)
 	SocksBind string `json:"socks_bind"`
 }
 
@@ -113,14 +114,13 @@ type VPNInstance struct {
 	ConnRaw     *net.IPConn
 	TCPMutex    sync.Mutex
 
-	PeerMap sync.Map // Stores IP(uint32) -> PeerRoute
-
 	ClientRemoteUDP []*net.UDPAddr
 	ClientRemoteIP  *net.IPAddr
 
 	SessionID uint32
 	TxSeq     uint32
 
+	WGNat sync.Map // Map[string]*net.UDPConn (NAT for wg-raw server)
 
 	Reorderer *PacketReorderer
 }
@@ -155,6 +155,13 @@ func (v *VPNInstance) Start() {
 		debugMode = true
 	}
 	log.Printf("[%s] Starting L3 Engine v4.2 in %s mode on %s...", v.Cfg.InterfaceName, v.Cfg.Mode, v.Cfg.LocalAddr)
+
+	if v.Cfg.Protocol == "wg-raw" {
+		log.Printf("[%s] Running in WireGuard-Raw Forwarding Mode", v.Cfg.InterfaceName)
+		v.InitNetwork() // Setup Raw/UDP sockets
+		return
+	}
+
 	v.InitTUN()
 	v.Reorderer.WriteFunc = v.IfaceWrite
 
@@ -324,11 +331,13 @@ func (v *VPNInstance) InitNetwork() {
 		return
 	}
 
-	if v.Cfg.Protocol == "raw" {
+	if v.Cfg.Protocol == "raw" || v.Cfg.Protocol == "wg-raw" {
 		protoStr := fmt.Sprintf("ip4:%d", v.Cfg.IPProtocolNum)
 		var lAddr *net.IPAddr
-		if v.Cfg.Mode == "server" && v.Cfg.ServerBindAddr != "0.0.0.0" {
-			lAddr, _ = net.ResolveIPAddr("ip", v.Cfg.ServerBindAddr)
+		if (v.Cfg.Mode == "server" || v.Cfg.Mode == "client") && v.Cfg.ServerBindAddr != "0.0.0.0" {
+             // Bind to specific if needed, usually 0.0.0.0 is fine for raw
+             // Go ListenIP usually takes nil/all or specifc.
+             if v.Cfg.ServerBindAddr != "" { lAddr, _ = net.ResolveIPAddr("ip", v.Cfg.ServerBindAddr) }
 		}
 		c, err := net.ListenIP(protoStr, lAddr)
 		if err != nil { log.Fatal(err) }
@@ -337,9 +346,34 @@ func (v *VPNInstance) InitNetwork() {
 		v.ConnRaw = c
 		if v.Cfg.Mode == "client" {
 			v.ClientRemoteIP, _ = net.ResolveIPAddr("ip", v.Cfg.RemoteIP)
+            // Start UDP Listener for Local WG
+            go v.WGRawClientStart()
 		}
 		go v.RawListenerLoop(c)
 	}
+}
+
+func (v *VPNInstance) WGRawClientStart() {
+    lAddr, _ := net.ResolveUDPAddr("udp", fmt.Sprintf(":%d", v.Cfg.BasePort))
+    c, err := net.ListenUDP("udp", lAddr)
+    if err != nil { log.Fatalf("WG-Raw Client UDP Bind Fail: %v", err) }
+    log.Printf("[%s] WG-Raw Client Listening UDP %s", v.Cfg.InterfaceName, lAddr)
+
+    // Store Conn for RawListenerLoop to use for Replies
+    v.ConnUDP = make([]*net.UDPConn, 1)
+    v.ConnUDP[0] = c
+    
+    buf := make([]byte, 2000)
+    for {
+        n, addr, err := c.ReadFromUDP(buf)
+        if err != nil { continue }
+        // Store the local WG addr to reply to later
+        v.WGNat.Store("local_wg", addr)
+        
+        // Wrap & Send Raw
+        // No headers, just payload
+        v.ConnRaw.WriteToIP(buf[:n], v.ClientRemoteIP)
+    }
 }
 
 func (v *VPNInstance) UDPListenerLoop(idx int, pc *ipv4.PacketConn) {
@@ -382,6 +416,70 @@ func (v *VPNInstance) copyAddr(addr net.Addr) net.Addr {
 }
 
 func (v *VPNInstance) RawListenerLoop(c *net.IPConn) {
+    // WG-Raw Handling
+    if v.Cfg.Protocol == "wg-raw" {
+        buf := make([]byte, 65536) // Dedicated buffer for this loop
+        for {
+            n, src, err := c.ReadFromIP(buf)
+            if err != nil { return }
+            if n < 1 { continue }
+            payload := buf[:n] // In wg-raw, payload starts at 0 (IP header stripped by kernel)
+
+            if v.Cfg.Mode == "client" {
+                // Received Raw from Server -> Forward to Local WG UDP
+                if val, ok := v.WGNat.Load("local_wg"); ok {
+                    addr := val.(*net.UDPAddr)
+                    // We need the UDP conn. It's not stored globally?
+                    // Issue: WGRawClientStart created the conn but didn't save it.
+                    // Fix: Save it in v.ConnUDP[0] or similar.
+                    // Let's use v.ConnUDP for convenience (it makes slice).
+                    if v.ConnUDP != nil && len(v.ConnUDP) > 0 {
+                         v.ConnUDP[0].WriteToUDP(payload, addr)
+                    } else {
+                        // Re-find logic.
+                        // Better: InitNetwork should save the UDP conn.
+                    }
+                }
+            } else {
+                // Server Mode: Received Raw from Client -> Forward to Target WG
+                // Check Session
+                srcIP := src.String()
+                var udpConn *net.UDPConn
+                if val, ok := v.WGNat.Load(srcIP); ok {
+                    udpConn = val.(*net.UDPConn)
+                } else {
+                    // Create new Session
+                    rAddr, _ := net.ResolveUDPAddr("udp", v.Cfg.TargetAddr)
+                    u, err := net.DialUDP("udp", nil, rAddr)
+                    if err != nil {
+                        logDebug("WG-Raw Dial Target Fail: %v", err)
+                        continue
+                    }
+                    udpConn = u
+                    v.WGNat.Store(srcIP, udpConn)
+                    log.Printf("WG-Raw: New Session %s -> %s", srcIP, v.Cfg.TargetAddr)
+
+                    // Start Return Loop
+                    go func(uc *net.UDPConn, targetSrc *net.IPAddr) {
+                        b := make([]byte, 2000)
+                        defer uc.Close()
+                        for {
+                            rn, _, err := uc.ReadFromUDP(b)
+                            if err != nil { 
+                                v.WGNat.Delete(srcIP)
+                                return 
+                            }
+                            v.ConnRaw.WriteToIP(b[:rn], targetSrc)
+                        }
+                    }(u, src)
+                }
+                udpConn.Write(payload)
+            }
+        }
+        return
+    }
+
+    // Standard Raw Mode
 	for {
 		bufPtr := bufPool.Get().(*[]byte)
 		buf := *bufPtr

@@ -146,9 +146,45 @@ NekoLink 的 TCP 模式已针对隧道场景进行了深度优化：
 "base_port": 443  // 伪装成 HTTPS 流量效果更佳
 ```
 
-### 9. 高阶用法 (Advanced Usage)
+### 9. WireGuard Raw 模式 (wg-raw)
+这是一个特殊模式，用于将现有的 WireGuard UDP 流量封装在 Raw IP (协议号) 中传输，以绕过针对 UDP 的 QoS 或封锁，同时不造成双重加密的性能损耗。
 
-#### 9.1 多实例运行 (Multi-Instance)
+**原理**: WireGuard(UDP) <-> NekoLink(Raw) <-> Internet <-> NekoLink(Raw) <-> WireGuard(UDP)
+
+#### 9.1 服务端配置 (Server)
+假设您的 WireGuard 服务端监听在 `51820` 端口。
+
+```json
+{
+  "mode": "server",
+  "protocol": "wg-raw",
+  "server_addr": "0.0.0.0",       // 监听 Raw IP
+  "target_addr": "127.0.0.1:51820", // 转发给本地 WireGuard
+  "ip_protocol_num": 233,
+  "interface_name": "neko_wg"
+}
+```
+
+#### 9.2 客户端配置 (Client)
+NekoLink 将在本地启动一个 UDP 端口（如 1080），您的 WireGuard 客户端应该连接这个端口。
+
+```json
+{
+  "mode": "client",
+  "protocol": "wg-raw",
+  "remote_ip": "1.2.3.4",        // NekoLink 服务端 IP
+  "base_port": 1080,             // 本地监听 UDP 端口
+  "ip_protocol_num": 233,
+  "interface_name": "neko_wg"
+}
+```
+
+**WireGuard 客户端设置**:
+*   **Endpoint**: `127.0.0.1:1080` (而不是直接填服务端 IP)
+
+### 10. 高阶用法 (Advanced Usage)
+
+#### 10.1 多实例运行 (Multi-Instance)
 NekoLink 支持在一个进程中同时运行多个 VPN 实例（混合 Client 和 Server 均可）。
 只需将 `config.json` 的内容改为 **数组 `[]`** 格式即可：
 
