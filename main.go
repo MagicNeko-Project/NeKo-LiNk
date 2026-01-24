@@ -122,6 +122,11 @@ type VPNInstance struct {
 	nonceCounter uint64
 	SessionID    uint32
 	numWorkers   int
+	
+	// Pipeline Channels
+	jobsChan       chan Job
+	resultsChanTUN chan Result
+	resultsChanUDP chan Result
 }
 
 func NewVPNInstance(cfg Config) *VPNInstance {
@@ -140,8 +145,141 @@ func NewVPNInstance(cfg Config) *VPNInstance {
 	if v.numWorkers > 8 {
 		v.numWorkers = 8
 	}
+	
+	// 初始化流水线 Channels
+	v.jobsChan = make(chan Job, BatchSize*4) // 加大 Job 缓冲
+	v.resultsChanTUN = make(chan Result, BatchSize*4) // 加密结果 -> Net
+	v.resultsChanUDP = make(chan Result, BatchSize*4) // 解密结果 -> TUN
+	
 	v.SessionID = uint32(os.Getpid()) ^ uint32(keyHash[0])<<24
 	return v
+}
+
+func (v *VPNInstance) StartWorkerPool() {
+	for i := 0; i < v.numWorkers; i++ {
+		go v.workerLoop(i)
+	}
+}
+
+func (v *VPNInstance) workerLoop(id int) {
+	// 每个 Worker 绑定一个 AEAD
+	aead := v.aeadPool[id%len(v.aeadPool)]
+	
+	for job := range v.jobsChan {
+		res := Result{ID: job.ID, Addr: job.Addr}
+		
+		// 从 pool 获取内存
+		dstPtr := bufPool.Get().(*[]byte)
+		res.RecyclePtr = dstPtr
+		
+		if job.Type == 0 { // Encrypt: TUN -> Net
+			// encryptInto 会自己处理 dst
+			encrypted := v.encryptInto(job.Plain, aead, *dstPtr)
+			if encrypted != nil {
+				res.Data = encrypted
+			} else {
+				// Encrypt failed, logic below will handle Recycle via consumer or here?
+				// If we send error, Consumer handles recycle.
+				res.Err = fmt.Errorf("encrypt failed")
+			}
+			v.resultsChanTUN <- res
+			
+		} else { // Decrypt: Net -> TUN
+			// 解密逻辑
+			buf := *dstPtr
+			plain, err := aead.Open(buf[TunOffset:TunOffset], job.Nonce, job.Enc, nil)
+			if err == nil {
+				res.Data = plain 
+			} else {
+				res.Err = err
+			}
+			v.resultsChanUDP <- res
+		}
+		
+		// 原始数据的回收?
+		// Job.Plain 是从 TUN Batch Read 来的 buffer slice。
+		// 如果是 TUN Read，buffer 是 reusing 的 吗？
+		// TUNReaderLoopUDP_Pipeline 里我们会看到。
+		// 如果是 new buffer，需要回收。
+		// 但 Job 结构体没带 RecyclePtr。
+		// 为了简单，我们假设 Reader 负责 Job 的内存管理？
+		// 不，Channel 传递所有权。Worker 用完 Job.Plain/Enc 后，需要回收吗？
+		// Job.Plain/Enc 通常是 slice。
+		// 让我们在 Producer 侧看。
+	}
+}
+
+// --- Producer: TUN -> Pipeline ---
+func (v *VPNInstance) TUNReaderLoopUDP_Pipeline() {
+	// 准备 Batch Read 容器
+	// 为了避免频繁分配 Job struct，我们可以 reusing?
+	// 简单起见，先正常分配。
+	
+	// 我们需要维护 buffer pool 吗？
+	// TUN Read 需要 slice。
+	
+	jobID := 0
+	
+	// Batch buffers
+	buffs := make([][]byte, BatchSize)
+	for i := range buffs {
+		buffs[i] = make([]byte, BufSize)
+	}
+	sizes := make([]int, BatchSize)
+	
+	for {
+		// Batch Read
+		n, err := v.TunDev.Read(buffs, sizes, TunOffset)
+		if err != nil {
+			continue
+		}
+		if n == 0 {
+			// Backoff?
+			continue
+		}
+		
+		// 远端地址
+		addr := v.ClientRemoteUDP
+		if v.Cfg.Mode == "server" {
+			addr = v.ServerPeerAddr.Load()
+		}
+		
+		if addr == nil {
+			continue
+		}
+
+		for i := 0; i < n; i++ {
+			if sizes[i] == 0 { continue }
+			
+			// 必须 copy 数据！因为 buffs 是复用的，而 Job 会被 Worker 异步持有。
+			// 如果不 copy，下一次 Read 会覆盖正在处理的数据。
+			// 这就是 Pipeline 模式的代价：额外的 Memory Copy。
+			// 除非我们由 Pool 分配 buffs，并把 ownership 转给 Job，然后 Reader 拿新 buffer。
+			
+			// 优化方案：从 Pool 拿 buffer 给 TUN Read。
+			// 但 TUN Read 接口需要 [][]byte。
+			// 我们可以在这里 copy。300Mbps copy 开销不大。
+			// 或者，我们维护一个 Buffer Ring？
+			// 简单起见：Copy。
+			
+			plain := make([]byte, sizes[i] + TunOffset) 
+			copy(plain, buffs[i][TunOffset:TunOffset+sizes[i]]) 
+			// Wait, encryptInto 不依赖 TunOffset (它只读 payload)。
+			// encryptInto(plain, ...)
+			// 我们只需要 Payload。
+			
+			payload := make([]byte, sizes[i])
+			copy(payload, buffs[i][TunOffset:TunOffset+sizes[i]])
+			
+			v.jobsChan <- Job{
+				ID:    jobID,
+				Plain: payload, // 纯 payload
+				Addr:  addr,
+				Type:  0, // Encrypt
+			}
+			jobID++
+		}
+	}
 }
 
 func (v *VPNInstance) Start() {
@@ -149,16 +287,22 @@ func (v *VPNInstance) Start() {
 		debugMode = true
 	}
 
-	log.Printf("[%s] NekoLink v5.24 (全量修复版) 启动中 - 核心: %d, MTU: %d",
+	log.Printf("[%s] NekoLink v5.26 (Stable Pipeline 工业版) 启动中 - 核心: %d, MTU: %d",
 		v.Cfg.InterfaceName, v.numWorkers, v.Cfg.MTU)
 
 	v.InitTUN()
 	v.InitNetwork()
+	
+	v.StartWorkerPool()
+	// 启动双向结果处理协程 (Consumers)
+	go v.orderedOutputLoopTUN()
+	go v.orderedOutputLoopUDP()
 
-	// v5.19 最后定鼎：UDP 接收/发送全部收束为保序架构，Raw 模式保持暴力
+	// v5.26 全新保序流水线架构
+	// ... (Reader 启动逻辑同上)
 	if v.Cfg.Protocol == "udp" {
-		go v.TUNReaderLoopUDP_Ordered() // 发送端保序
-		go v.udpReaderLoop_Ordered()    // 接收端保序 (v5.19 核心修复)
+		go v.TUNReaderLoopUDP_Pipeline() // TUN -> Pipeline -> resultsChanUDP -> UDP
+		go v.udpReaderLoop_Pipeline()    // UDP -> Pipeline -> resultsChanTUN -> TUN
 	} else {
 		// Raw 模式：TUN 读取使用 numWorkers (8)，网络读取使用 ConnRaw 的实际数量 (4)
 		for i := 0; i < v.numWorkers; i++ {
@@ -167,6 +311,183 @@ func (v *VPNInstance) Start() {
 		for i := 0; i < len(v.ConnRaw); i++ {
 			go v.rawReaderLoop(i)
 		}
+	}
+}
+
+// --- Producer: UDP (Net) -> Pipeline ---
+func (v *VPNInstance) udpReaderLoop_Pipeline() {
+	if v.IsIPv6 {
+		v.udpReaderLoopV6_Pipeline()
+	} else {
+		v.udpReaderLoopV4_Pipeline()
+	}
+}
+
+func (v *VPNInstance) udpReaderLoopV4_Pipeline() {
+	jobID := 0
+	msgs := make([]ipv4.Message, BatchSize)
+	for i := range msgs {
+		msgs[i].Buffers = [][]byte{make([]byte, BufSize)}
+	}
+	
+	for {
+		n, err := v.ConnBatchV4.ReadBatch(msgs, 0)
+		if err != nil || n == 0 {
+			continue
+		}
+		
+		// Server 模式 Peer 更新 (仅首包)
+		if v.Cfg.Mode == "server" {
+			if addr, ok := msgs[0].Addr.(*net.UDPAddr); ok {
+				v.ServerPeerAddr.Store(addr)
+			}
+		}
+
+		for i := 0; i < n; i++ {
+			nLen := msgs[i].N
+			if nLen < NonceSize+Overhead { continue }
+			
+			// Copy Encrypted Data
+			enc := make([]byte, nLen)
+			copy(enc, msgs[i].Buffers[0][:nLen])
+			
+			v.jobsChan <- Job{
+				ID:    jobID,
+				Enc:   enc,
+				Type:  1, // Decrypt
+				// Addr 在解密后通常不需要，但 Result 可能需要它来路由？
+				// 对于 Decrypt (Net->TUN)，Addr 是 Source Addr。TUN Write 不需要 Addr。
+				// 但为了保持接口一致，或者如果有需要的话。这里暂不设 Addr。
+				// Wait, Worker Loop 中：
+				// res.Addr = job.Addr
+				// 如果 TUN Write 不需要 Addr，那没关系。
+			}
+			jobID++
+		}
+	}
+}
+
+func (v *VPNInstance) udpReaderLoopV6_Pipeline() {
+	// 类似 V4，结构占位，逻辑相同
+	jobID := 0
+	msgs := make([]ipv6.Message, BatchSize)
+	for i := range msgs {
+		msgs[i].Buffers = [][]byte{make([]byte, BufSize)}
+	}
+	for {
+		n, err := v.ConnBatchV6.ReadBatch(msgs, 0)
+		if err != nil || n == 0 { continue }
+		
+		if v.Cfg.Mode == "server" {
+			if addr, ok := msgs[0].Addr.(*net.UDPAddr); ok { v.ServerPeerAddr.Store(addr) }
+		}
+		
+		for i := 0; i < n; i++ {
+			nLen := msgs[i].N
+			if nLen < NonceSize+Overhead { continue }
+			enc := make([]byte, nLen)
+			copy(enc, msgs[i].Buffers[0][:nLen])
+			v.jobsChan <- Job{
+				ID: jobID, Enc: enc, Type: 1,
+			}
+			jobID++
+		}
+	}
+}
+
+// --- Consumer: Pipeline -> UDP (TUN->Net Encrypted) ---
+func (v *VPNInstance) orderedOutputLoopUDP() {
+	pending := make(map[int]Result)
+	expID := 0
+	
+	for res := range v.resultsChanTUN {
+		if res.ID == expID {
+			// Fast path: 刚好是下一个
+			v.sendResultUDP(res)
+			expID++
+			// 检查 backlog
+			for {
+				if next, ok := pending[expID]; ok {
+					delete(pending, expID)
+					v.sendResultUDP(next)
+					expID++
+				} else {
+					break
+				}
+			}
+		} else {
+			// Out of order
+			pending[res.ID] = res
+		}
+	}
+}
+
+func (v *VPNInstance) sendResultUDP(res Result) {
+	if res.Err == nil && res.Data != nil && res.Addr != nil {
+		if addr, ok := res.Addr.(*net.UDPAddr); ok {
+			v.ConnUDP.WriteToUDP(res.Data, addr)
+		}
+	}
+	// Recycle
+	if res.RecyclePtr != nil {
+		bufPool.Put(res.RecyclePtr)
+	}
+}
+
+// --- Consumer: Pipeline -> TUN (Net->TUN Decrypted) ---
+func (v *VPNInstance) orderedOutputLoopTUN() {
+	pending := make(map[int]Result)
+	expID := 0
+	
+	// 为了平滑写入 TUN，我们是否需要 batch write? 
+	// TunDev.Write 支持 [][]byte。
+	// 为了降低系统调用，我们可以小批量聚合 (e.g. 连续 seq 的包)。
+	// 但这会增加复杂性。先单包写入 (size=1 batch) 验证功能。
+	
+	for res := range v.resultsChanUDP {
+		if res.ID == expID {
+			v.sendResultTUN(res)
+			expID++
+			for {
+				if next, ok := pending[expID]; ok {
+					delete(pending, expID)
+					v.sendResultTUN(next)
+					expID++
+				} else {
+					break
+				}
+			}
+		} else {
+			pending[res.ID] = res
+		}
+	}
+}
+
+func (v *VPNInstance) sendResultTUN(res Result) {
+	if res.Err == nil && res.Data != nil {
+		// Data 是 plain payload。TUN 需要 Packet with Offset。
+		// 在 Worker 中，我们使用的 buf 是从 bufPool 获取的，包含 Offset。
+		// Worker: res.Data = plain (slice of dstPtr)
+		// Worker Decrypt: plain starts at TunOffset.
+		// 所以 res.Data 实际上是 buf[TunOffset:]
+		// 我们需要还原完整的 buf [:TunOffset+len(data)]
+		// 基于 RecyclePtr，它是 *[]byte -> buf
+		
+		if res.RecyclePtr != nil {
+			buf := *res.RecyclePtr
+			// Reconstruct packet with offset
+			// data len = plain len
+			packetLen := TunOffset + len(res.Data)
+			packet := buf[:packetLen]
+			
+			// 单包写入 TUN
+			// 虽然 Write 接受 [][]byte，我们传一个
+			v.TunDev.Write([][]byte{packet}, TunOffset)
+		}
+	}
+	// Recycle
+	if res.RecyclePtr != nil {
+		bufPool.Put(res.RecyclePtr)
 	}
 }
 
