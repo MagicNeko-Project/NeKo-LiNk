@@ -330,6 +330,11 @@ func (v *VPNInstance) TUNReaderLoop() {
 		}
 
 		if v.Cfg.Protocol == "udp" {
+			// 服务端模式下，先检查是否有客户端连接
+			if v.Cfg.Mode == "server" && v.ServerPeerAddr == nil {
+				continue // 尚无客户端，跳过
+			}
+
 			// UDP 批处理模式
 			sendMsgs = sendMsgs[:0]
 			for i := 0; i < n; i++ {
