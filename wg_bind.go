@@ -50,6 +50,7 @@ type RawBind struct {
 	handshakeCb  func(data []byte, remote netip.AddrPort) bool
 	
 	ebpfEngine   *xdp.ShadowXEngine
+	ebpfCfg      xdp.ShadowXConfig
 
 	// For Client mode fix: optionally force a remote address if set
 	clientRemote netip.Addr
@@ -85,18 +86,26 @@ func (b *RawBind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
 			mode = 1 // Raw-IP
 		}
 
-		engine, err := xdp.NewShadowXEngine(xdp.ShadowXConfig{
+		ebpfCfg := xdp.ShadowXConfig{
 			InterfaceName: b.ifaceName,
 			Mode:          mode,
 			LocalPort:     uint16(b.nattLocalPort),
 			RawProto:      uint8(b.protoNum),
-		})
+		}
+
+		engine, err := xdp.GetShadowXEngine(b.ifaceName)
 		if err != nil {
-			log.Printf("[eBPF] Failed to load Shadow X Engine: %v. Falling back to User-space Raw Socket.", err)
+			log.Printf("[eBPF] Failed to load Shared Shadow X Engine: %v. Falling back to User-space Raw Socket.", err)
 			b.useEBPF = false
 		} else {
-			b.ebpfEngine = engine
-			// Under eBPF, we just use a standard UDP socket.
+			if err := engine.Register(ebpfCfg); err != nil {
+				log.Printf("[eBPF] Failed to register config: %v. Falling back.", err)
+				engine.Close()
+				b.useEBPF = false
+			} else {
+				b.ebpfEngine = engine
+				b.ebpfCfg = ebpfCfg
+				// Under eBPF, we just use a standard UDP socket.
 			// The eBPF kernel hooks (XDP/TC) will handle the Fake-TCP/Raw transformation.
 			addr := &net.UDPAddr{IP: net.IPv4zero, Port: b.nattLocalPort}
 			c, err := net.ListenUDP("udp", addr)
@@ -109,6 +118,7 @@ func (b *RawBind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
 			return []conn.ReceiveFunc{b.receiveUDP}, uint16(b.nattLocalPort), nil
 		}
 	}
+}
 
 	if b.useNATT {
 		// Use UDP for NAT-T
@@ -415,7 +425,10 @@ func (b *RawBind) SendRaw(data []byte, remote netip.AddrPort) error {
 }
 
 func (b *RawBind) Close() error {
-	if b.ebpfEngine != nil { b.ebpfEngine.Close() }
+	if b.ebpfEngine != nil { 
+		b.ebpfEngine.Unregister(b.ebpfCfg)
+		b.ebpfEngine.Close() 
+	}
 	if b.ipv4 != nil { b.ipv4.Close() }
 	if b.ipv6 != nil { b.ipv6.Close() }
 	if b.udpConn != nil { b.udpConn.Close() }

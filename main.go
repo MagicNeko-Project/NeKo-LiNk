@@ -236,6 +236,7 @@ type VPNInstance struct {
 	
 	// WG Device Ref
 	wgDevice *device.Device
+	ebpfRawCfg xdp.ShadowXConfig
 }
 
 func NewVPNInstance(cfg Config) *VPNInstance {
@@ -412,11 +413,11 @@ func (v *VPNInstance) Start() {
 	v.InitNetwork()
 	
 	if v.Cfg.Protocol == "wg-raw" {
-		log.Printf("[Init] 启动 wg-raw 模式 (Embedded WireGuard over Raw Socket)")
+		log.Printf("[%s] 启动 wg-raw 模式 (Embedded WireGuard over Raw Socket)", v.Cfg.InterfaceName)
 		go v.startWireGuardRaw()
 	} else {
 		// Legacy Raw 模式 (保留)
-		log.Printf("[Init] 启动 Raw 模式 (High Performance Encrypted IP)")
+		log.Printf("[%s] 启动 Raw 模式 (High Performance Encrypted IP)", v.Cfg.InterfaceName)
 		for i := 0; i < v.numWorkers; i++ {
 			go v.TUNReaderLoopRaw(i)
 		}
@@ -425,6 +426,14 @@ func (v *VPNInstance) Start() {
 			go v.rawReaderLoop(0)
 		}
 	}
+}
+
+func (v *VPNInstance) Stop() {
+	if v.ebpfRawEngine != nil {
+		v.ebpfRawEngine.Unregister(v.ebpfRawCfg)
+		v.ebpfRawEngine.Close()
+	}
+	// Note: We could also close TunDev and ConnRaw here if needed.
 }
 
 // --- Producer: UDP (Net) -> Pipeline ---
@@ -541,17 +550,26 @@ func (v *VPNInstance) initRaw() {
 		mode := uint32(1) // Mode 1: Raw-IP
 		if v.Cfg.UseTCP { mode = 2 } // Mode 2: Fake-TCP (if ever used in Raw mode)
 
-		engine, err := xdp.NewShadowXEngine(xdp.ShadowXConfig{
+		ebpfCfg := xdp.ShadowXConfig{
 			InterfaceName: v.Cfg.EBPFDevice,
 			Mode:          mode,
 			LocalPort:     uint16(v.Cfg.ListenPort),
 			RawProto:      uint8(v.Cfg.IPProtocolNum),
-		})
+		}
+
+		engine, err := xdp.GetShadowXEngine(v.Cfg.EBPFDevice)
 		if err != nil {
 			log.Printf("[EBPF] 核心加载失败: %v. 回退到纯用户态 Raw Socket.", err)
 			v.Cfg.UseEBPF = false
 		} else {
-			v.ebpfRawEngine = engine
+			if err := engine.Register(ebpfCfg); err != nil {
+				log.Printf("[EBPF] 注册失败: %v. 回退.", err)
+				engine.Close()
+				v.Cfg.UseEBPF = false
+			} else {
+				v.ebpfRawEngine = engine
+				v.ebpfRawCfg = ebpfCfg
+			}
 		}
 	}
 
@@ -735,12 +753,21 @@ func main() {
 		os.Exit(0)
 	}
 
+	var instances []*VPNInstance
 	for _, cfg := range configs {
-		NewVPNInstance(cfg).Start()
+		v := NewVPNInstance(cfg)
+		v.Start()
+		instances = append(instances, v)
 	}
+
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
 	<-c
+	
+	log.Printf(">>> 正在停止所有实例...")
+	for _, v := range instances {
+		v.Stop()
+	}
 }
 
 func runCmd(name string, args ...string) {
