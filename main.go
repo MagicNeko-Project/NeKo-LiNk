@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"sync"
 	"sync/atomic"
 	"syscall"
 
@@ -82,7 +83,17 @@ const (
 	NonceSize = chacha20poly1305.NonceSizeX // 24 bytes
 	Overhead  = chacha20poly1305.Overhead   // 16 bytes
 	TunOffset = 16                          // wireguard-go TUN offset
+	BufSize   = 65536
 )
+
+// --- 内存池 (性能优化) ---
+
+var bufPool = sync.Pool{
+	New: func() interface{} {
+		b := make([]byte, BufSize)
+		return &b
+	},
+}
 
 // --- VPN 实例 ---
 
@@ -105,6 +116,9 @@ type VPNInstance struct {
 	// Nonce 计数器 (性能优化)
 	nonceCounter uint64
 	SessionID    uint32
+
+	// 预分配的 Nonce 缓冲区 (避免每包分配)
+	nonceBuf [NonceSize]byte
 }
 
 func NewVPNInstance(cfg Config) *VPNInstance {
@@ -130,7 +144,7 @@ func (v *VPNInstance) Start() {
 		debugMode = true
 	}
 
-	log.Printf("[%s] NekoLink v5.0 (简洁版) 启动中 - 模式: %s, 协议: %s",
+	log.Printf("[%s] NekoLink v5.1 (高性能版) 启动中 - 模式: %s, 协议: %s",
 		v.Cfg.InterfaceName, v.Cfg.Mode, v.Cfg.Protocol)
 
 	v.InitTUN()
@@ -190,9 +204,9 @@ func (v *VPNInstance) initUDP() {
 		log.Fatalf("UDP 监听失败: %v", err)
 	}
 
-	// 设置缓冲区
-	conn.SetReadBuffer(8 << 20)  // 8MB
-	conn.SetWriteBuffer(8 << 20) // 8MB
+	// 大缓冲区减少丢包
+	conn.SetReadBuffer(16 << 20)  // 16MB
+	conn.SetWriteBuffer(16 << 20) // 16MB
 	v.ConnUDP = conn
 
 	if v.Cfg.Mode == "client" {
@@ -219,8 +233,8 @@ func (v *VPNInstance) initRaw() {
 		log.Fatalf("Raw Socket 监听失败: %v", err)
 	}
 
-	conn.SetReadBuffer(8 << 20)
-	conn.SetWriteBuffer(8 << 20)
+	conn.SetReadBuffer(16 << 20)
+	conn.SetWriteBuffer(16 << 20)
 	v.ConnRaw = conn
 
 	if v.Cfg.Mode == "client" {
@@ -236,7 +250,8 @@ func (v *VPNInstance) initRaw() {
 // --- 网络读取循环 ---
 
 func (v *VPNInstance) udpReaderLoop() {
-	buf := make([]byte, 65536)
+	bufPtr := bufPool.Get().(*[]byte)
+	buf := *bufPtr
 	for {
 		n, addr, err := v.ConnUDP.ReadFromUDP(buf)
 		if err != nil {
@@ -255,7 +270,8 @@ func (v *VPNInstance) udpReaderLoop() {
 }
 
 func (v *VPNInstance) rawReaderLoop() {
-	buf := make([]byte, 65536)
+	bufPtr := bufPool.Get().(*[]byte)
+	buf := *bufPtr
 	for {
 		n, addr, err := v.ConnRaw.ReadFromIP(buf)
 		if err != nil {
@@ -285,7 +301,7 @@ func (v *VPNInstance) TUNReaderLoop() {
 	const batchSize = 16
 	buffs := make([][]byte, batchSize)
 	for i := range buffs {
-		buffs[i] = make([]byte, 65536)
+		buffs[i] = make([]byte, BufSize)
 	}
 	sizes := make([]int, batchSize)
 
@@ -293,7 +309,7 @@ func (v *VPNInstance) TUNReaderLoop() {
 		n, err := v.TunDev.Read(buffs, sizes, TunOffset)
 		if err != nil {
 			log.Printf("TUN 读取错误: %v", err)
-			continue // 不要 break，继续尝试读取
+			continue
 		}
 
 		for i := 0; i < n; i++ {
@@ -319,7 +335,7 @@ func (v *VPNInstance) handleIncomingPacket(encrypted []byte) {
 	nonce := encrypted[:NonceSize]
 	ciphertext := encrypted[NonceSize:]
 
-	// 解密
+	// 解密 (原地解密，避免分配)
 	plaintext, err := v.AEAD.Open(ciphertext[:0], nonce, ciphertext, nil)
 	if err != nil {
 		logDebug("解密失败: %v", err)
@@ -337,30 +353,42 @@ func (v *VPNInstance) handleOutgoingPacket(ipPacket []byte) {
 		return
 	}
 
-	// 生成 Nonce (计数器模式)
-	nonce := make([]byte, NonceSize)
+	// 从池获取缓冲区
+	dstPtr := bufPool.Get().(*[]byte)
+	dst := (*dstPtr)[:NonceSize+len(ipPacket)+Overhead]
+
+	// 生成 Nonce (计数器模式，使用预分配缓冲区)
+	nonce := dst[:NonceSize]
 	nonceVal := atomic.AddUint64(&v.nonceCounter, 1)
 	binary.BigEndian.PutUint64(nonce[0:8], nonceVal)
 	binary.BigEndian.PutUint32(nonce[8:12], v.SessionID)
+	// 清零剩余部分
+	for i := 12; i < NonceSize; i++ {
+		nonce[i] = 0
+	}
 
-	// 加密
-	dst := make([]byte, NonceSize+len(ipPacket)+Overhead)
-	copy(dst[:NonceSize], nonce)
+	// 加密到 dst[NonceSize:]
 	v.AEAD.Seal(dst[NonceSize:NonceSize], nonce, ipPacket, nil)
 
 	// 发送
 	v.sendPacket(dst)
+
+	// 归还缓冲区
+	bufPool.Put(dstPtr)
 }
 
 func (v *VPNInstance) writeTUN(data []byte) {
-	// 构造带 offset 的缓冲区
-	buf := make([]byte, TunOffset+len(data))
+	// 从池获取缓冲区
+	bufPtr := bufPool.Get().(*[]byte)
+	buf := (*bufPtr)[:TunOffset+len(data)]
 	copy(buf[TunOffset:], data)
 
 	_, err := v.TunDev.Write([][]byte{buf}, TunOffset)
 	if err != nil {
 		logDebug("TUN 写入错误: %v", err)
 	}
+
+	bufPool.Put(bufPtr)
 }
 
 func (v *VPNInstance) sendPacket(data []byte) {
@@ -382,8 +410,11 @@ func (v *VPNInstance) sendPacket(data []byte) {
 		}
 
 	case "raw":
-		// Raw 模式需要 4 字节填充头
-		payload := make([]byte, 4+len(data))
+		// 从池获取缓冲区
+		payloadPtr := bufPool.Get().(*[]byte)
+		payload := (*payloadPtr)[:4+len(data)]
+		// 清零头部
+		payload[0], payload[1], payload[2], payload[3] = 0, 0, 0, 0
 		copy(payload[4:], data)
 
 		var addr *net.IPAddr
@@ -392,6 +423,7 @@ func (v *VPNInstance) sendPacket(data []byte) {
 		} else {
 			addr = v.ServerPeerIP
 			if addr == nil {
+				bufPool.Put(payloadPtr)
 				logDebug("服务端: 尚无客户端连接，丢弃")
 				return
 			}
@@ -400,6 +432,7 @@ func (v *VPNInstance) sendPacket(data []byte) {
 		if err != nil {
 			logDebug("Raw 发送错误: %v", err)
 		}
+		bufPool.Put(payloadPtr)
 	}
 }
 
