@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"crypto/cipher"
 	"crypto/sha256"
 	"encoding/binary"
@@ -18,12 +17,16 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"io"
 	"time"
 
-	"io"
-	"github.com/quic-go/quic-go"
 	"golang.zx2c4.com/wireguard/tun"
+	"golang.zx2c4.com/wireguard/device"
+	"golang.zx2c4.com/wireguard/ipc"
 	"golang.org/x/crypto/chacha20poly1305"
+	"golang.org/x/crypto/curve25519"
+	"net/netip"
+	"crypto/rand"
 
 )
 
@@ -53,24 +56,46 @@ type Config struct {
 	RemotePort int    `json:"server_port"`
 
 	IPProtocolNum int  `json:"ip_protocol_num"`
+	UseNATT       bool `json:"use_nat_t"`
+	UDPPort       int  `json:"udp_port"`
 	Debug         bool `json:"debug"`
 }
 
 func (c *Config) ParseLegacy() {
+	// 1. 基本字段兼容
 	if c.Mode == "client" && c.RemoteIP == "" && c.ServerBindAddr != "" {
 		c.RemoteIP = c.ServerBindAddr
 	}
 	if c.Mode == "client" && c.RemotePort == 0 && c.BasePort != 0 {
 		c.RemotePort = c.BasePort
 	}
-	if c.Protocol == "" {
-		c.Protocol = "udp"
+	
+	// 2. 协议迁移 (UDP/TCP/QUIC -> wg-raw)
+	oldProto := strings.ToLower(c.Protocol)
+	if oldProto == "udp" || oldProto == "tcp" || oldProto == "quic" || oldProto == "" {
+		c.Protocol = "wg-raw"
+		log.Printf("[%s] 自动将旧版协议 %s 升级为 wg-raw", c.InterfaceName, oldProto)
 	}
+	
+	// 3. 默认值设置
 	if c.IPProtocolNum == 0 {
 		c.IPProtocolNum = 233
 	}
-	if c.MTU == 0 {
+	
+	// 4. MTU 优化 (避免分片)
+	if c.MTU == 0 || c.MTU > 1420 {
+		oldMTU := c.MTU
 		c.MTU = 1400
+		if oldMTU != 0 {
+			log.Printf("[%s] 优化 MTU: %d -> 1400", c.InterfaceName, oldMTU)
+		}
+	}
+	
+	if c.UDPPort == 0 && c.BasePort != 0 {
+		c.UDPPort = c.BasePort
+	}
+	if c.UDPPort == 0 {
+		c.UDPPort = 23333
 	}
 	if c.InterfaceName == "" {
 		c.InterfaceName = "neko0"
@@ -96,7 +121,6 @@ const (
 	TunOffset = 16
 	BufSize   = 65536
 	BatchSize = 256
-	QUICBatchSize = 32 // QUIC 模式使用更小的 Batch 以降低突发
 )
 
 // --- 内存池 ---
@@ -114,10 +138,10 @@ type VPNInstance struct {
 	Cfg Config
 	TunDev tun.Device
 
-	// --- QUIC 模式 (v6.0) ---
-	quicListener *quic.Listener   // Server Mode
-	quicConn     *quic.Conn       // Client Mode
-	activeStream *quic.Stream     // 当前活跃的加密 Stream
+	// --- QUIC 模式 (v6.0) --- (REMOVED)
+	// quicListener *quic.Listener   // Server Mode
+	// quicConn     *quic.Conn       // Client Mode
+	// activeStream *quic.Stream     // 当前活跃的加密 Stream
 	// 互斥锁保护 quicConn 重连
 	connMx       sync.RWMutex
 
@@ -136,6 +160,9 @@ type VPNInstance struct {
 	nonceCounter uint64 // 若 Raw 模式需要
 	numWorkers   int
 	IsIPv6       bool
+	
+	// WG Device Ref
+	wgDevice *device.Device
 }
 
 func NewVPNInstance(cfg Config) *VPNInstance {
@@ -149,7 +176,8 @@ func NewVPNInstance(cfg Config) *VPNInstance {
 	}
 
 	// 初始化 AEAD (XChaCha20-Poly1305)
-	// 无论是 Raw 还是 QUIC 模式，我们都使用这套加密
+	// 初始化 AEAD (XChaCha20-Poly1305)
+	// 无论是 Raw 还是 wg-raw (握手用)，我们都使用这套加密
 	keyHash := sha256.Sum256([]byte(cfg.Key))
 	v.aeadPool = make([]cipher.AEAD, 16)
 	for i := 0; i < 16; i++ {
@@ -161,182 +189,140 @@ func NewVPNInstance(cfg Config) *VPNInstance {
 	return v
 }
 
-// --- QUIC Server Logic ---
-// Server 端活跃 Session (简化版：仅支持单客户端或最后活跃客户端)
-// 生产环境需要 IP->Session 路由表
-var serverActiveConn *quic.Conn 
-var serverConnMx sync.RWMutex
 
-func (v *VPNInstance) startQuicServer() {
-	tlsConf := GenerateTLSConfig(true)
-	bindAddr := fmt.Sprintf("%s:%d", v.Cfg.ServerBindAddr, v.Cfg.BasePort)
-	listener, err := quic.ListenAddr(bindAddr, tlsConf, &quic.Config{
-		MaxIdleTimeout:      60 * time.Second,
-		EnableDatagrams:     true,
-		KeepAlivePeriod:     15 * time.Second,
-		InitialStreamReceiveWindow:     8 * 1024 * 1024,
-		InitialConnectionReceiveWindow: 16 * 1024 * 1024,
-		Allow0RTT: true,
+// --- WireGuard Auto-Config Logic ---
+
+func generateWGKey() ([]byte, []byte) {
+	var priv [32]byte
+	rand.Read(priv[:])
+	priv[0] &= 248
+	priv[31] &= 127
+	priv[31] |= 64
+	
+	var pub [32]byte
+	curve25519.ScalarBaseMult(&pub, &priv)
+	return priv[:], pub[:]
+}
+
+func (v *VPNInstance) startWireGuardRaw() {
+	// 1. Create Bind
+	bind := NewRawBind(v.Cfg.IPProtocolNum, v.Cfg.UseNATT, v.Cfg.UDPPort)
+	
+	// 2. Client Mode: Set Remote
+	if v.Cfg.Mode == "client" {
+		addr, _ := netip.ParseAddr(v.Cfg.RemoteIP)
+		bind.SetClientRemote(addr)
+	}
+	
+	// 3. Create Ephemeral Keys
+	priv, pub := generateWGKey()
+	
+	// 4. Create Device
+	logLevel := device.LogLevelSilent
+	if v.Cfg.Debug {
+		logLevel = device.LogLevelVerbose
+	}
+	logger := device.NewLogger(logLevel, fmt.Sprintf("(%s) ", v.Cfg.InterfaceName))
+	
+	dev := device.NewDevice(v.TunDev, bind, logger)
+	v.wgDevice = dev
+
+	// 5. Register Handshake Handler
+	// Packet: [0xFE] [Nonce(24)] [Cipher(Ver(1)+PubKey(32))]
+	bind.SetHandshakeCallback(func(pkt []byte, remote netip.Addr) bool {
+		// Safety check for initialized device
+		if v.wgDevice == nil { return false }
+
+		// Decrypt
+		if len(pkt) < 1+NonceSize+Overhead+33 { return false }
+		nonce := pkt[1 : 1+NonceSize]
+		cipherText := pkt[1+NonceSize:]
+		
+		plain, err := v.AEAD.Open(nil, nonce, cipherText, nil)
+		if err != nil {
+			log.Printf("[Handshake] Decrypt failed from %s", remote)
+			return false
+		}
+		
+		if len(plain) != 33 || plain[0] != 1 { return false }
+		remotePub := plain[1:]
+		
+		log.Printf("[Handshake] Received PubKey from %s", remote)
+		
+		// Configure Peer via UAPI
+		// We use 127.0.0.1:0 as endpoint to utilize our Shadow Endpoint logic
+		conf := fmt.Sprintf("public_key=%x\nendpoint=127.0.0.1:0\nallowed_ip=0.0.0.0/0\nallowed_ip=::/0\npersistent_keepalive_interval=25\n", remotePub)
+		if err := v.wgDevice.IpcSet(conf); err != nil {
+			log.Printf("Failed to configure peer: %v", err)
+		}
+		
+		// If Server, reply with our PubKey
+		if v.Cfg.Mode == "server" {
+			v.sendHandshake(bind, remote, pub)
+		}
+		
+		return true
 	})
+	
+	// 6. Init Device Config
+	initConf := fmt.Sprintf("private_key=%x\nlisten_port=%d\nreplace_peers=true\n", priv, 0)
+	dev.IpcSet(initConf)
+	dev.Up()
+	log.Printf("[WG-RAW] Device %s up using IP Protocol %d", v.Cfg.InterfaceName, v.Cfg.IPProtocolNum)
+	
+	// 7. Start UAPI Listener
+	go v.startUAPI()
+	
+	// 8. Client: Initiate Handshake
+	if v.Cfg.Mode == "client" {
+		addr, _ := netip.ParseAddr(v.Cfg.RemoteIP)
+		go func() {
+			for {
+				v.sendHandshake(bind, addr, pub)
+				time.Sleep(5 * time.Second) // Retry every 5s until connected (WG usually quiets down)
+			}
+		}()
+	}
+	
+	// Keep alive
+	select {}
+}
+
+func (v *VPNInstance) sendHandshake(bind *RawBind, remote netip.Addr, myPub []byte) {
+	// Construct [0xFE] [Nonce] [Cipher]
+	pkt := make([]byte, 1+NonceSize+33+Overhead)
+	pkt[0] = 0xFE
+	
+	// Nonce
+	nonce := pkt[1 : 1+NonceSize]
+	if _, err := rand.Read(nonce); err != nil { return }
+	
+	// Payload: [Ver(1)][PubKey] 
+	plain := make([]byte, 33)
+	plain[0] = 1
+	copy(plain[1:], myPub)
+	
+	// Encrypt
+	v.AEAD.Seal(pkt[1+NonceSize:1+NonceSize], nonce, plain, nil) // dst is slice at end of nonce
+	
+	bind.SendRaw(pkt, remote)
+	log.Printf("[Handshake] Sent to %s", remote)
+}
+
+func (v *VPNInstance) startUAPI() {
+	fileUAPI, err := ipc.UAPIOpen(v.Cfg.InterfaceName)
 	if err != nil {
-		log.Fatalf("QUIC Listen 失败: %v", err)
+		log.Printf("[WG-RAW] UAPI Listen failed: %v", err)
+		return
 	}
-	v.quicListener = listener
-	log.Printf("[QUIC] Server 监听于 %s (TLS 1.3)", bindAddr)
-
-	for {
-		conn, err := listener.Accept(context.Background())
-		if err != nil {
-			log.Printf("Accept Error: %v", err)
-			continue
-		}
-		
-		go v.handleQuicSession(conn)
-	}
-}
-
-func (v *VPNInstance) handleQuicSession(conn *quic.Conn) {
-	remoteAddr := conn.RemoteAddr().String()
-	log.Printf("[QUIC] Session 开始: %s", remoteAddr)
+	listener, err := net.FileListener(fileUAPI)
+	if err != nil { return }
+	fileUAPI.Close()
 	
-	defer func() {
-		log.Printf("[QUIC] Session 结束: %s", remoteAddr)
-		conn.CloseWithError(0, "bye")
-	}()
-
 	for {
-		stream, err := conn.AcceptStream(context.Background())
-		if err != nil {
-			return
-		}
-		
-		// 持久化当前活跃 Stream 用于发送
-		serverConnMx.Lock()
-		serverActiveConn = conn // 借用这个存放 Conn 引用 (虽然名字叫 Conn) 
-		// 我们需要一个地方存活跃 Stream。为了简单，我们让 TUN 发送逻辑直接从 Conn 打开新 Stream 或者缓存它
-		// 在 v6.1 中，我们采用：一个 Session 对应一个持久 Stream
-		serverConnMx.Unlock()
-
-		go v.handleQuicStream(stream)
-	}
-}
-
-func (v *VPNInstance) handleQuicStream(os *quic.Stream) {
-	defer (*os).Close()
-	
-	// 设置为全局发送 Stream (简化逻辑：后到者优先)
-	v.connMx.Lock()
-	v.activeStream = os
-	v.connMx.Unlock()
-
-	v.readStreamToTUN(os)
-	
-	// 清理 helper
-	v.connMx.Lock()
-	if v.activeStream == os {
-		v.activeStream = nil
-	}
-	v.connMx.Unlock()
-}
-
-func (v *VPNInstance) readStreamToTUN(s *quic.Stream) {
-	lenBuf := make([]byte, 2)
-	for {
-		// 1. 读长度
-		_, err := io.ReadFull(s, lenBuf)
-		if err != nil { return }
-		length := binary.BigEndian.Uint16(lenBuf)
-		
-		// 2. 读密文
-		cipherPkt := make([]byte, length)
-		_, err = io.ReadFull(s, cipherPkt)
-		if err != nil { return }
-		
-		// 3. 解密
-		// 我们假设总是使用 v.AEAD (Server 端解密)
-		if len(cipherPkt) < NonceSize+Overhead { continue }
-		plain, err := v.AEAD.Open(nil, cipherPkt[:NonceSize], cipherPkt[NonceSize:], nil)
+		conn, err := listener.Accept()
 		if err != nil { continue }
-		
-		// 4. 入站 Batch 写优化 (由于 Stream 本身是按序的，我们可以直接写)
-		v.writeTUN(plain)
-	}
-}
-
-// --- TUN -> QUIC Forwarder ---
-func (v *VPNInstance) TUNReaderLoopQUIC() {
-	// 使用较小的 BatchSize 降低突发
-	buffs := make([][]byte, QUICBatchSize)
-	for i := range buffs {
-		buffs[i] = make([]byte, BufSize)
-	}
-	sizes := make([]int, QUICBatchSize)
-
-	for {
-		n, err := v.TunDev.Read(buffs, sizes, TunOffset)
-		if err != nil { continue }
-		if n == 0 { continue }
-		
-		v.connMx.RLock()
-		stream := v.activeStream
-		v.connMx.RUnlock()
-		
-		if stream == nil {
-			time.Sleep(100 * time.Millisecond)
-			continue
-		}
-		
-		for i := 0; i < n; i++ {
-			if sizes[i] == 0 { continue }
-			plain := buffs[i][TunOffset : TunOffset+sizes[i]]
-			
-			// 1. 从池里拿一块 Buffer 构造 [Len(2)][Nonce(24)][Ciphertext...]
-			// 计算加密后的总长度: Len(2) + Nonce(24) + Payload + Tag(16)
-			// 注意：AEAD.Seal 的结果包含 Ciphertext + Tag
-			cipherLen := NonceSize + len(plain) + Overhead
-			totalLen := 2 + cipherLen
-			
-			bufPtr := bufPool.Get().(*[]byte)
-			b := *bufPtr
-			
-			// 确保容量足够 (通常 BufSize 64K 足够大)
-			if cap(b) < totalLen {
-				bufPool.Put(bufPtr)
-				continue
-			}
-			
-			// 构造头部
-			binary.BigEndian.PutUint16(b[0:2], uint16(cipherLen))
-			
-			// 构造 Nonce (位置: b[2 : 2+Nonce])
-			nonce := b[2 : 2+NonceSize]
-			vVal := atomic.AddUint64(&v.nonceCounter, 1)
-			binary.BigEndian.PutUint64(nonce[0:8], vVal)
-			binary.BigEndian.PutUint32(nonce[8:12], v.SessionID)
-			for k := 12; k < NonceSize; k++ { nonce[k] = 0 }
-			
-			// AEAD 加密
-			// Seal(dst, nonce, plaintext, additionalData)
-			// dst: 我们希望密文从 b[2+Nonce:] 开始追加。注意 Seal 是 append 语义。
-			// 所以我们需要传递 b[2+Nonce : 2+Nonce] 作为 dst 的“起始点”（利用切片 cap）。
-			// 最终数据会填在 b[2+Nonce : 2+Nonce+len(plain)+Overhead]
-			v.AEAD.Seal(b[2+NonceSize:2+NonceSize], nonce, plain, nil)
-			
-			// 2. 一次性写入 Stream
-			if err := writeFull(stream, b[:totalLen]); err != nil {
-				bufPool.Put(bufPtr)
-				
-				// 发生错误，清理 activeStream 以触发重连/重置
-				v.connMx.Lock()
-				if v.activeStream == stream {
-					v.activeStream = nil
-				}
-				v.connMx.Unlock()
-				break
-			}
-			
-			bufPool.Put(bufPtr)
-		}
+		go v.wgDevice.IpcHandle(conn)
 	}
 }
 
@@ -345,30 +331,18 @@ func (v *VPNInstance) Start() {
 		debugMode = true
 	}
 
-	log.Printf("[%s] NekoLink v6.0 (QUIC Revolution) 启动中 - 核心: %d, MTU: %d",
+	log.Printf("[%s] NekoLink (WireGuard Edition) 启动中 - 核心: %d, MTU: %d",
 		v.Cfg.InterfaceName, v.numWorkers, v.Cfg.MTU)
 
 	v.InitTUN()
 	v.InitNetwork()
 	
-	// 根据协议选择模式
-	// QUIC 接管 "udp" 和 "tcp" (config usually has protocol field)
-	// Raw 模式通常是 protocol="raw"
-	
-	if v.Cfg.Protocol == "udp" || v.Cfg.Protocol == "tcp" || v.Cfg.Protocol == "quic" {
-		// 1. 启动 TUN 读取 -> QUIC 发送
-		// 优化：QUIC 模式仅使用 1 个 Reader 协程，避免并发导致的过度突发
-		go v.TUNReaderLoopQUIC()
-
-		// 2. 启动 QUIC 网络栈
-		if v.Cfg.Mode == "server" {
-			go v.startQuicServer()
-		} else {
-			go v.startQuicClient()
-		}
+	if v.Cfg.Protocol == "wg-raw" {
+		log.Printf("[Init] 启动 wg-raw 模式 (Embedded WireGuard over Raw Socket)")
+		go v.startWireGuardRaw()
 	} else {
 		// Legacy Raw 模式 (保留)
-		log.Printf("[Init] 启动 Raw 模式 (High Performance IP)")
+		log.Printf("[Init] 启动 Raw 模式 (High Performance Encrypted IP)")
 		for i := 0; i < v.numWorkers; i++ {
 			go v.TUNReaderLoopRaw(i)
 		}
@@ -382,55 +356,7 @@ func (v *VPNInstance) Start() {
 
 
 // --- QUIC Client Logic ---
-func (v *VPNInstance) startQuicClient() {
-	tlsConf := GenerateTLSConfig(false)
-	
-	for {
-		log.Printf("[QUIC] 正在连接 %s:%d ...", v.Cfg.RemoteIP, v.Cfg.RemotePort)
-		addr := fmt.Sprintf("%s:%d", v.Cfg.RemoteIP, v.Cfg.RemotePort)
-		conn, err := quic.DialAddr(context.Background(), addr, tlsConf, &quic.Config{
-			MaxIdleTimeout: 60 * time.Second,
-			KeepAlivePeriod: 15 * time.Second,
-			InitialStreamReceiveWindow: 8 * 1024 * 1024,
-			InitialConnectionReceiveWindow: 16 * 1024 * 1024,
-			Allow0RTT: true,
-		})
-		
-		if err != nil {
-			log.Printf("Connect Failed: %v, retry in 3s...", err)
-			time.Sleep(3 * time.Second)
-			continue
-		}
-		
-		log.Printf("[QUIC] 连接成功！(TLS 1.3)")
-		
-		// 打开持久加密 Stream
-		stream, err := conn.OpenStreamSync(context.Background())
-		if err != nil {
-			conn.CloseWithError(0, "stream open failed")
-			continue
-		}
-		
-		v.connMx.Lock()
-		v.quicConn = conn
-		v.activeStream = stream
-		v.connMx.Unlock()
-		
-		v.readStreamToTUN(stream)
-		
-		v.connMx.Lock()
-		v.quicConn = nil
-		v.activeStream = nil
-		v.connMx.Unlock()
-		
-		log.Printf("[QUIC] 连接断开，准备重连...")
-		time.Sleep(1 * time.Second)
-	}
-}
-
-func (v *VPNInstance) handleClientSession(conn *quic.Conn) {
-	// 已经由 startQuicClient 的 readStreamToTUN 接管
-}
+// --- QUIC Client Logic Removed ---
 
 
 
@@ -491,9 +417,13 @@ func (v *VPNInstance) setupSecurityRules(iface string) {
 	runCmd("nft", "add", "rule", "inet", tableName, "input", "iifname", "lo", "accept")
 	runCmd("nft", "add", "rule", "inet", tableName, "input", "meta", "l4proto", "{ icmp, icmpv6 }", "accept")
 
-	if v.Cfg.Protocol == "raw" {
-		protoNum := v.Cfg.IPProtocolNum
-		runCmd("nft", "add", "rule", "inet", tableName, "input", "meta", "l4proto", fmt.Sprintf("%d", protoNum), "accept")
+	if v.Cfg.Protocol == "raw" || v.Cfg.Protocol == "wg-raw" {
+		if v.Cfg.Protocol == "wg-raw" && v.Cfg.UseNATT {
+			runCmd("nft", "add", "rule", "inet", tableName, "input", "udp", "dport", fmt.Sprintf("%d", v.Cfg.UDPPort), "accept")
+		} else {
+			protoNum := v.Cfg.IPProtocolNum
+			runCmd("nft", "add", "rule", "inet", tableName, "input", "meta", "l4proto", fmt.Sprintf("%d", protoNum), "accept")
+		}
 	} else {
 		port := v.Cfg.BasePort
 		runCmd("nft", "add", "rule", "inet", tableName, "input", "udp", "dport", fmt.Sprintf("%d", port), "accept")
@@ -505,13 +435,11 @@ func (v *VPNInstance) setupSecurityRules(iface string) {
 // --- 网络初始化 ---
 
 func (v *VPNInstance) InitNetwork() {
-	if v.Cfg.Protocol != "udp" && v.Cfg.Protocol != "tcp" && v.Cfg.Protocol != "quic" {
+	if v.Cfg.Protocol == "wg-raw" {
+		// wg-raw 模式不需要在此初始化 ConnRaw，由 WireGuard Device 自己管理 RawBind
+	} else {
 		// Assume Raw
 		v.initRaw()
-	} else {
-		// UDP/QUIC 模式下无需在此通过 net.ListenUDP 初始化
-		// quic.Listen 将在 Start 中进行
-		v.IsIPv6 = strings.Contains(v.Cfg.RemoteIP, ":") || strings.Contains(v.Cfg.ServerBindAddr, ":")
 	}
 }
 

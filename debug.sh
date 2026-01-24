@@ -21,7 +21,7 @@ if [ ! -f "$GO_CMD" ]; then
 fi
 
 echo ">>> [Debug] 正在重新编译 (使用 $($GO_CMD version))..."
-$GO_CMD build -o $APP_BIN .
+$GO_CMD build -o $APP_BIN main.go structs.go wg_bind.go
 if [ $? -ne 0 ]; then
     echo -e "\033[0;31m❌ 编译失败了，请检查代码喵！\033[0m"
     exit 1

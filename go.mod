@@ -4,7 +4,6 @@ go 1.24.0
 
 require (
 	github.com/cilium/ebpf v0.20.0
-	github.com/quic-go/quic-go v0.59.0
 	golang.org/x/crypto v0.47.0
 	golang.zx2c4.com/wireguard v0.0.0-20250521234502-f333402bd9cb
 )

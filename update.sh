@@ -16,8 +16,7 @@ GO="./.go/bin/go"
 if [ ! -f "$GO" ]; then GO="go"; fi
 
 echo ">>> 正在编译新版本 (使用 $($GO version))..."
-$GO mod tidy
-$GO build -o $BIN_NAME .
+$GO build -o $BIN_NAME main.go structs.go wg_bind.go
 if [ $? -ne 0 ]; then echo "编译失败"; exit 1; fi
 
 echo ">>> 停止当前服务..."

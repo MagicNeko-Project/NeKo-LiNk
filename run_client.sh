@@ -10,13 +10,13 @@ if [ ! -f "$CONFIG_FILE" ]; then
 [
   {
     "mode": "client",
-    "protocol": "tcp",
+    "protocol": "wg-raw",
     "server_ip": "1.2.3.4",
-    "server_port": 9000,
+    "ip_protocol_num": 233,
     "local_addr": "10.0.0.2/24",
-    "key": "FILL_ME",
+    "key": "PASSWORD_HERE",
     "interface_name": "neko0",
-    "socks_bind": "127.0.0.1:1080"
+    "mtu": 1400
   }
 ]
 EOF

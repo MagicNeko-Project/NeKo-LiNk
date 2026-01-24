@@ -12,12 +12,13 @@ if [ ! -f "$CONFIG_FILE" ]; then
 [
   {
     "mode": "server",
-    "protocol": "tcp",
-    "base_port": 9000,
+    "protocol": "wg-raw",
+    "ip_protocol_num": 233,
     "local_addr": "10.0.0.1/24",
     "server_addr": "0.0.0.0",
     "key": "$RAND_KEY",
-    "interface_name": "neko0"
+    "interface_name": "neko0",
+    "mtu": 1400
   }
 ]
 EOF
