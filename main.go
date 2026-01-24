@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"io"
 	"github.com/quic-go/quic-go"
 	"golang.zx2c4.com/wireguard/tun"
 	"golang.org/x/crypto/chacha20poly1305"
@@ -84,6 +85,7 @@ const (
 	TunOffset = 16
 	BufSize   = 65536
 	BatchSize = 256
+	QUICBatchSize = 32 // QUIC 模式使用更小的 Batch 以降低突发
 )
 
 // --- 内存池 ---
@@ -104,6 +106,7 @@ type VPNInstance struct {
 	// --- QUIC 模式 (v6.0) ---
 	quicListener *quic.Listener   // Server Mode
 	quicConn     *quic.Conn       // Client Mode
+	activeStream *quic.Stream     // 当前活跃的加密 Stream
 	// 互斥锁保护 quicConn 重连
 	connMx       sync.RWMutex
 
@@ -134,19 +137,15 @@ func NewVPNInstance(cfg Config) *VPNInstance {
 		v.numWorkers = 8
 	}
 
-	// 如果是 Raw 模式，我们需要初始化 AEAD Pool
-	// QUIC 模式下使用 TLS 1.3，不需要应用层 AEAD
-	// 但为了代码简单，或者如果 Raw 模式启用，我们初始化它
-	if cfg.Protocol != "udp" && cfg.Protocol != "tcp" { // "raw" or others
-		// Raw 需要 AEAD
-		keyHash := sha256.Sum256([]byte(cfg.Key))
-		v.aeadPool = make([]cipher.AEAD, 16)
-		for i := 0; i < 16; i++ {
-			v.aeadPool[i], _ = chacha20poly1305.NewX(keyHash[:])
-		}
-		v.AEAD = v.aeadPool[0]
-		v.SessionID = uint32(os.Getpid()) ^ uint32(keyHash[0])<<24
+	// 初始化 AEAD (XChaCha20-Poly1305)
+	// 无论是 Raw 还是 QUIC 模式，我们都使用这套加密
+	keyHash := sha256.Sum256([]byte(cfg.Key))
+	v.aeadPool = make([]cipher.AEAD, 16)
+	for i := 0; i < 16; i++ {
+		v.aeadPool[i], _ = chacha20poly1305.NewX(keyHash[:])
 	}
+	v.AEAD = v.aeadPool[0]
+	v.SessionID = uint32(os.Getpid()) ^ uint32(keyHash[0])<<24
 
 	return v
 }
@@ -161,11 +160,12 @@ func (v *VPNInstance) startQuicServer() {
 	tlsConf := GenerateTLSConfig(true)
 	bindAddr := fmt.Sprintf("%s:%d", v.Cfg.ServerBindAddr, v.Cfg.BasePort)
 	listener, err := quic.ListenAddr(bindAddr, tlsConf, &quic.Config{
-		MaxIdleTimeout:      30 * time.Second,
+		MaxIdleTimeout:      60 * time.Second,
 		EnableDatagrams:     true,
-		KeepAlivePeriod:     10 * time.Second,
-		InitialStreamReceiveWindow:     1024 * 1024,
-		InitialConnectionReceiveWindow: 4 * 1024 * 1024,
+		KeepAlivePeriod:     15 * time.Second,
+		InitialStreamReceiveWindow:     8 * 1024 * 1024,
+		InitialConnectionReceiveWindow: 16 * 1024 * 1024,
+		Allow0RTT: true,
 	})
 	if err != nil {
 		log.Fatalf("QUIC Listen 失败: %v", err)
@@ -180,11 +180,6 @@ func (v *VPNInstance) startQuicServer() {
 			continue
 		}
 		
-		// 注册活跃 Session
-		serverConnMx.Lock()
-		serverActiveConn = conn
-		serverConnMx.Unlock()
-		
 		go v.handleQuicSession(conn)
 	}
 }
@@ -196,74 +191,103 @@ func (v *VPNInstance) handleQuicSession(conn *quic.Conn) {
 	defer func() {
 		log.Printf("[QUIC] Session 结束: %s", remoteAddr)
 		conn.CloseWithError(0, "bye")
-		
-		serverConnMx.Lock()
-		if serverActiveConn == conn {
-			serverActiveConn = nil
-		}
-		serverConnMx.Unlock()
 	}()
-	
-	// Datagram Reader (阻塞模式，防止函数立即退出)
+
 	for {
-		data, err := conn.ReceiveDatagram(context.Background())
+		stream, err := conn.AcceptStream(context.Background())
 		if err != nil {
-			log.Printf("[QUIC] Datagram 接收停止: %v", err)
 			return
 		}
 		
-		bufPtr := bufPool.Get().(*[]byte)
-		buf := *bufPtr
+		// 持久化当前活跃 Stream 用于发送
+		serverConnMx.Lock()
+		serverActiveConn = conn // 借用这个存放 Conn 引用 (虽然名字叫 Conn) 
+		// 我们需要一个地方存活跃 Stream。为了简单，我们让 TUN 发送逻辑直接从 Conn 打开新 Stream 或者缓存它
+		// 在 v6.1 中，我们采用：一个 Session 对应一个持久 Stream
+		serverConnMx.Unlock()
+
+		go v.handleQuicStream(stream)
+	}
+}
+
+func (v *VPNInstance) handleQuicStream(os *quic.Stream) {
+	defer (*os).Close()
+	
+	// 设置为全局发送 Stream (简化逻辑：后到者优先)
+	v.connMx.Lock()
+	v.activeStream = os
+	v.connMx.Unlock()
+
+	v.readStreamToTUN(os)
+}
+
+func (v *VPNInstance) readStreamToTUN(s *quic.Stream) {
+	lenBuf := make([]byte, 2)
+	for {
+		// 1. 读长度
+		_, err := io.ReadFull(s, lenBuf)
+		if err != nil { return }
+		length := binary.BigEndian.Uint16(lenBuf)
 		
-		copy(buf[TunOffset:], data)
-		v.TunDev.Write([][]byte{buf[:TunOffset+len(data)]}, TunOffset)
+		// 2. 读密文
+		cipherPkt := make([]byte, length)
+		_, err = io.ReadFull(s, cipherPkt)
+		if err != nil { return }
 		
-		bufPool.Put(bufPtr)
+		// 3. 解密
+		// 我们假设总是使用 v.AEAD (Server 端解密)
+		if len(cipherPkt) < NonceSize+Overhead { continue }
+		plain, err := v.AEAD.Open(nil, cipherPkt[:NonceSize], cipherPkt[NonceSize:], nil)
+		if err != nil { continue }
+		
+		// 4. 入站 Batch 写优化 (由于 Stream 本身是按序的，我们可以直接写)
+		v.writeTUN(plain)
 	}
 }
 
 // --- TUN -> QUIC Forwarder ---
 func (v *VPNInstance) TUNReaderLoopQUIC() {
-	// Batch Read TUN (本地优化)
-	buffs := make([][]byte, BatchSize)
+	// 使用较小的 BatchSize 降低突发
+	buffs := make([][]byte, QUICBatchSize)
 	for i := range buffs {
 		buffs[i] = make([]byte, BufSize)
 	}
-	sizes := make([]int, BatchSize)
+	sizes := make([]int, QUICBatchSize)
 
 	for {
 		n, err := v.TunDev.Read(buffs, sizes, TunOffset)
-		if err != nil {
-			// TUN Error (Interface down?)
-			continue
-		}
+		if err != nil { continue }
 		if n == 0 { continue }
 		
-		// 获取当前的 QUIC 连接
-		var conn *quic.Conn
-		if v.Cfg.Mode == "server" {
-			serverConnMx.RLock()
-			conn = serverActiveConn
-			serverConnMx.RUnlock()
-		} else {
-			v.connMx.RLock()
-			conn = v.quicConn
-			v.connMx.RUnlock()
-		}
+		v.connMx.RLock()
+		stream := v.activeStream
+		v.connMx.RUnlock()
 		
-		if conn == nil {
+		if stream == nil {
+			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 		
 		for i := 0; i < n; i++ {
 			if sizes[i] == 0 { continue }
-			pkt := buffs[i][TunOffset : TunOffset+sizes[i]]
+			plain := buffs[i][TunOffset : TunOffset+sizes[i]]
 			
-			// 直接发送 pure IP packet
-			err := conn.SendDatagram(pkt)
-			if err != nil {
-				// CC blocking or conn closed
-			}
+			// 1. AEAD 加密
+			// 生成 Nonce (前 24 字节)
+			cipherPkt := make([]byte, NonceSize+len(plain)+Overhead)
+			vVal := atomic.AddUint64(&v.nonceCounter, 1)
+			binary.BigEndian.PutUint64(cipherPkt[0:8], vVal)
+			binary.BigEndian.PutUint32(cipherPkt[8:12], v.SessionID)
+			// 注意：这里我们简单使用 v.AEAD (pool 中的第一个)
+			// 为了绝对并发安全，可以在此处根据协程 ID 选择不同的 AEAD
+			v.AEAD.Seal(cipherPkt[NonceSize:NonceSize], cipherPkt[:NonceSize], plain, nil)
+			
+			// 2. 写入 Stream (长度 +密文)
+			lenBuf := make([]byte, 2)
+			binary.BigEndian.PutUint16(lenBuf, uint16(len(cipherPkt)))
+			
+			stream.Write(lenBuf)
+			stream.Write(cipherPkt)
 		}
 	}
 }
@@ -285,13 +309,8 @@ func (v *VPNInstance) Start() {
 	
 	if v.Cfg.Protocol == "udp" || v.Cfg.Protocol == "tcp" || v.Cfg.Protocol == "quic" {
 		// 1. 启动 TUN 读取 -> QUIC 发送
-		// 我们启动 numWorkers 个吗？ TUN Read 是 thread-safe 吗？
-		// WireGuard tun device read is thread safe.
-		// 但 SendDatagram 是 thread safe 吗？ Yes.
-		// 为了利用多核，我们可以开多个 TUN Reader。
-		for i := 0; i < v.numWorkers; i++ {
-			go v.TUNReaderLoopQUIC()
-		}
+		// 优化：QUIC 模式仅使用 1 个 Reader 协程，避免并发导致的过度突发
+		go v.TUNReaderLoopQUIC()
 
 		// 2. 启动 QUIC 网络栈
 		if v.Cfg.Mode == "server" {
@@ -318,17 +337,15 @@ func (v *VPNInstance) Start() {
 func (v *VPNInstance) startQuicClient() {
 	tlsConf := GenerateTLSConfig(false)
 	
-	// 连接 Server
-	// 支持断线重连
 	for {
 		log.Printf("[QUIC] 正在连接 %s:%d ...", v.Cfg.RemoteIP, v.Cfg.RemotePort)
 		addr := fmt.Sprintf("%s:%d", v.Cfg.RemoteIP, v.Cfg.RemotePort)
 		conn, err := quic.DialAddr(context.Background(), addr, tlsConf, &quic.Config{
-			MaxIdleTimeout: 30 * time.Second,
-			EnableDatagrams: true,
-			KeepAlivePeriod: 10 * time.Second,
-			InitialStreamReceiveWindow: 1024 * 1024,
-			InitialConnectionReceiveWindow: 4 * 1024 * 1024,
+			MaxIdleTimeout: 60 * time.Second,
+			KeepAlivePeriod: 15 * time.Second,
+			InitialStreamReceiveWindow: 8 * 1024 * 1024,
+			InitialConnectionReceiveWindow: 16 * 1024 * 1024,
+			Allow0RTT: true,
 		})
 		
 		if err != nil {
@@ -338,16 +355,24 @@ func (v *VPNInstance) startQuicClient() {
 		}
 		
 		log.Printf("[QUIC] 连接成功！(TLS 1.3)")
+		
+		// 打开持久加密 Stream
+		stream, err := conn.OpenStreamSync(context.Background())
+		if err != nil {
+			conn.CloseWithError(0, "stream open failed")
+			continue
+		}
+		
 		v.connMx.Lock()
 		v.quicConn = conn
+		v.activeStream = stream
 		v.connMx.Unlock()
 		
-		// 读循环 (Blocking)
-		// 如果连接断开，这里会返回 error
-		v.handleClientSession(conn)
+		v.readStreamToTUN(stream)
 		
 		v.connMx.Lock()
 		v.quicConn = nil
+		v.activeStream = nil
 		v.connMx.Unlock()
 		
 		log.Printf("[QUIC] 连接断开，准备重连...")
@@ -356,20 +381,7 @@ func (v *VPNInstance) startQuicClient() {
 }
 
 func (v *VPNInstance) handleClientSession(conn *quic.Conn) {
-	// Datagram Reader
-	for {
-		data, err := conn.ReceiveDatagram(context.Background())
-		if err != nil {
-			log.Printf("Receive Error: %v", err)
-			return
-		}
-		
-		bufPtr := bufPool.Get().(*[]byte)
-		buf := *bufPtr
-		copy(buf[TunOffset:], data)
-		v.TunDev.Write([][]byte{buf[:TunOffset+len(data)]}, TunOffset)
-		bufPool.Put(bufPtr)
-	}
+	// 已经由 startQuicClient 的 readStreamToTUN 接管
 }
 
 
