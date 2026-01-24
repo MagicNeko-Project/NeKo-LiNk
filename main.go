@@ -79,7 +79,7 @@ const (
 	Overhead  = chacha20poly1305.Overhead
 	TunOffset = 16
 	BufSize   = 65536
-	BatchSize = 128 // 增大批处理大小，减少 "too many segments" 错误
+	BatchSize = 256 // 支持 1Gbps+ 带宽
 )
 
 // --- 内存池 ---
