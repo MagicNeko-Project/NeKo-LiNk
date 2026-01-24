@@ -79,7 +79,7 @@ const (
 	Overhead  = chacha20poly1305.Overhead
 	TunOffset = 16
 	BufSize   = 65536
-	BatchSize = 256 // 支持 1Gbps+ 带宽
+	BatchSize = 256
 )
 
 // --- 内存池 ---
@@ -91,6 +91,14 @@ var bufPool = sync.Pool{
 	},
 }
 
+// --- 加密工作任务 ---
+
+type encryptJob struct {
+	data   []byte
+	result []byte
+	done   chan struct{}
+}
+
 // --- VPN 实例 ---
 
 type VPNInstance struct {
@@ -98,6 +106,9 @@ type VPNInstance struct {
 
 	TunDev tun.Device
 	AEAD   cipher.AEAD
+
+	// 多核加密 - 每个核一个 AEAD 实例
+	aeadPool []cipher.AEAD
 
 	// UDP 模式 (支持批处理)
 	ConnUDP         *net.UDPConn
@@ -109,11 +120,12 @@ type VPNInstance struct {
 	ConnRaw        []*net.IPConn
 	ClientRemoteIP *net.IPAddr
 	ServerPeerIP   *net.IPAddr
-	rawSendIdx     uint32 // 轮询发送索引
+	rawSendIdx     uint32
 
 	// 性能优化
 	nonceCounter uint64
 	SessionID    uint32
+	numWorkers   int
 }
 
 func NewVPNInstance(cfg Config) *VPNInstance {
@@ -121,10 +133,22 @@ func NewVPNInstance(cfg Config) *VPNInstance {
 	v := &VPNInstance{Cfg: cfg}
 
 	keyHash := sha256.Sum256([]byte(cfg.Key))
+
+	// 主 AEAD
 	var err error
 	v.AEAD, err = chacha20poly1305.NewX(keyHash[:])
 	if err != nil {
 		log.Fatalf("加密初始化失败: %v", err)
+	}
+
+	// 多核加密池 - 每个核一个独立的 AEAD 实例
+	v.numWorkers = runtime.NumCPU()
+	if v.numWorkers > 8 {
+		v.numWorkers = 8
+	}
+	v.aeadPool = make([]cipher.AEAD, v.numWorkers)
+	for i := 0; i < v.numWorkers; i++ {
+		v.aeadPool[i], _ = chacha20poly1305.NewX(keyHash[:])
 	}
 
 	v.SessionID = uint32(os.Getpid()) ^ uint32(keyHash[0])<<24
@@ -137,13 +161,16 @@ func (v *VPNInstance) Start() {
 		debugMode = true
 	}
 
-	log.Printf("[%s] NekoLink v5.4 (安全增强版) 启动中 - 模式: %s, 协议: %s",
-		v.Cfg.InterfaceName, v.Cfg.Mode, v.Cfg.Protocol)
+	log.Printf("[%s] NekoLink v5.5 (多核加密版) 启动中 - 模式: %s, 协议: %s, 加密核心: %d",
+		v.Cfg.InterfaceName, v.Cfg.Mode, v.Cfg.Protocol, v.numWorkers)
 
 	v.InitTUN()
 	v.InitNetwork()
 
-	go v.TUNReaderLoop()
+	// 启动多个 TUN 读取循环利用多核
+	for i := 0; i < v.numWorkers; i++ {
+		go v.TUNReaderLoop(i)
+	}
 }
 
 // --- TUN 初始化 ---
@@ -173,16 +200,13 @@ func (v *VPNInstance) InitTUN() {
 
 // setupNFTables 设置 MSS 钳制和安全防护规则
 func (v *VPNInstance) setupNFTables(iface string) {
-	// 创建表
 	runCmd("nft", "add", "table", "inet", "nekolink")
 
-	// MSS 钳制链
 	chainMSS := fmt.Sprintf("mss_%s", iface)
 	runCmd("nft", "add", "chain", "inet", "nekolink", chainMSS,
 		"{ type filter hook forward priority mangle; policy accept; }")
 	runCmd("nft", "flush", "chain", "inet", "nekolink", chainMSS)
 
-	// MSS 钳制规则 - 自动修正 TCP SYN 包的 MSS
 	runCmd("nft", "add", "rule", "inet", "nekolink", chainMSS,
 		"iifname", iface, "tcp", "flags", "syn", "tcp", "option", "maxseg", "size", "set", "rt", "mtu")
 	runCmd("nft", "add", "rule", "inet", "nekolink", chainMSS,
@@ -190,52 +214,41 @@ func (v *VPNInstance) setupNFTables(iface string) {
 
 	log.Printf("[%s] NFTables MSS 钳制已启用", iface)
 
-	// 服务端添加安全防护规则 (UDP 和 Raw 模式)
 	if v.Cfg.Mode == "server" {
 		v.setupSecurityRules()
 	}
 }
 
-// setupSecurityRules 设置服务端安全防护规则
 func (v *VPNInstance) setupSecurityRules() {
-	// 创建安全表
 	runCmd("nft", "add", "table", "inet", "nekolink_security")
 
-	// 输入链
 	runCmd("nft", "add", "chain", "inet", "nekolink_security", "input",
 		"{ type filter hook input priority filter; policy accept; }")
 	runCmd("nft", "flush", "chain", "inet", "nekolink_security", "input")
 
-	// 允许已建立的连接
 	runCmd("nft", "add", "rule", "inet", "nekolink_security", "input",
 		"ct", "state", "established,related", "accept")
 
-	// 允许本地回环
 	runCmd("nft", "add", "rule", "inet", "nekolink_security", "input",
 		"iifname", "lo", "accept")
 
-	// 允许 ICMP (ping)
 	runCmd("nft", "add", "rule", "inet", "nekolink_security", "input",
 		"meta", "l4proto", "icmp", "accept")
 	runCmd("nft", "add", "rule", "inet", "nekolink_security", "input",
 		"meta", "l4proto", "ipv6-icmp", "accept")
 
-	// 根据协议类型添加规则
 	if v.Cfg.Protocol == "raw" {
-		// Raw 模式: 允许自定义协议号
 		protoNum := fmt.Sprintf("%d", v.Cfg.IPProtocolNum)
 		runCmd("nft", "add", "rule", "inet", "nekolink_security", "input",
 			"meta", "l4proto", protoNum, "accept")
 		log.Printf("[Security] Raw 模式安全规则已启用 (Proto: %s)", protoNum)
 	} else {
-		// UDP 模式: 允许指定端口
 		port := fmt.Sprintf("%d", v.Cfg.BasePort)
 		runCmd("nft", "add", "rule", "inet", "nekolink_security", "input",
 			"udp", "dport", port, "accept")
 		log.Printf("[Security] UDP 模式安全规则已启用 (Port: %s)", port)
 	}
 
-	// 对于无效包直接丢弃
 	runCmd("nft", "add", "rule", "inet", "nekolink_security", "input",
 		"ct", "state", "invalid", "drop")
 }
@@ -267,17 +280,17 @@ func (v *VPNInstance) initUDP() {
 		log.Fatalf("UDP 监听失败: %v", err)
 	}
 
-	conn.SetReadBuffer(16 << 20)
-	conn.SetWriteBuffer(16 << 20)
+	conn.SetReadBuffer(32 << 20) // 32MB
+	conn.SetWriteBuffer(32 << 20)
 	v.ConnUDP = conn
 	v.ConnBatch = ipv4.NewPacketConn(conn)
 
 	if v.Cfg.Mode == "client" {
 		rAddr, _ := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", v.Cfg.RemoteIP, v.Cfg.RemotePort))
 		v.ClientRemoteUDP = rAddr
-		log.Printf("[UDP] 客户端模式 -> %s (批处理已启用)", rAddr)
+		log.Printf("[UDP] 客户端模式 -> %s (批处理+多核)", rAddr)
 	} else {
-		log.Printf("[UDP] 服务端监听 %s (批处理已启用)", bindAddr)
+		log.Printf("[UDP] 服务端监听 %s (批处理+多核)", bindAddr)
 	}
 
 	go v.udpReaderLoop()
@@ -286,10 +299,9 @@ func (v *VPNInstance) initUDP() {
 func (v *VPNInstance) initRaw() {
 	protoStr := fmt.Sprintf("ip4:%d", v.Cfg.IPProtocolNum)
 
-	// 多连接并发 - 提升吞吐量
 	numConns := runtime.NumCPU()
 	if numConns > 4 {
-		numConns = 4 // 最多 4 个并发连接
+		numConns = 4
 	}
 
 	v.ConnRaw = make([]*net.IPConn, numConns)
@@ -305,11 +317,10 @@ func (v *VPNInstance) initRaw() {
 			log.Fatalf("Raw Socket 监听失败: %v", err)
 		}
 
-		conn.SetReadBuffer(16 << 20)
-		conn.SetWriteBuffer(16 << 20)
+		conn.SetReadBuffer(32 << 20)
+		conn.SetWriteBuffer(32 << 20)
 		v.ConnRaw[i] = conn
 
-		// 启动读取循环
 		go v.rawReaderLoop(i)
 	}
 
@@ -366,7 +377,6 @@ func (v *VPNInstance) rawReaderLoop(idx int) {
 			continue
 		}
 
-		// Raw 协议直接传输加密数据，无额外头部
 		if n < NonceSize+Overhead {
 			continue
 		}
@@ -379,14 +389,17 @@ func (v *VPNInstance) rawReaderLoop(idx int) {
 	}
 }
 
-// --- TUN 读取循环 ---
+// --- TUN 读取循环 (多核并行) ---
 
-func (v *VPNInstance) TUNReaderLoop() {
+func (v *VPNInstance) TUNReaderLoop(workerID int) {
 	buffs := make([][]byte, BatchSize)
 	for i := range buffs {
 		buffs[i] = make([]byte, BufSize)
 	}
 	sizes := make([]int, BatchSize)
+
+	// 每个 worker 使用自己的 AEAD 实例
+	aead := v.aeadPool[workerID]
 
 	// UDP 批处理发送队列
 	var sendMsgs []ipv4.Message
@@ -397,20 +410,16 @@ func (v *VPNInstance) TUNReaderLoop() {
 	for {
 		n, err := v.TunDev.Read(buffs, sizes, TunOffset)
 		if err != nil {
-			log.Printf("TUN 读取错误: %v", err)
+			logDebug("TUN[%d] 读取错误: %v", workerID, err)
 			continue
 		}
 
 		if v.Cfg.Protocol == "udp" {
-			// UDP 批处理模式
 			sendMsgs = sendMsgs[:0]
-			
-			// 服务端：检查是否有客户端连接
+
 			if v.Cfg.Mode == "server" && v.ServerPeerAddr == nil {
 				continue
 			}
-			
-			// 客户端：检查是否配置了远程地址
 			if v.Cfg.Mode == "client" && v.ClientRemoteUDP == nil {
 				continue
 			}
@@ -420,7 +429,7 @@ func (v *VPNInstance) TUNReaderLoop() {
 					continue
 				}
 				data := buffs[i][TunOffset : TunOffset+sizes[i]]
-				encrypted := v.encryptPacket(data)
+				encrypted := v.encryptPacketWithAEAD(data, aead)
 				if encrypted != nil {
 					var addr net.Addr
 					if v.Cfg.Mode == "client" {
@@ -438,13 +447,12 @@ func (v *VPNInstance) TUNReaderLoop() {
 				v.ConnBatch.WriteBatch(sendMsgs, 0)
 			}
 		} else {
-			// Raw 模式 - 并发发送
 			for i := 0; i < n; i++ {
 				if sizes[i] == 0 {
 					continue
 				}
 				data := buffs[i][TunOffset : TunOffset+sizes[i]]
-				v.sendRawPacket(data)
+				v.sendRawPacketWithAEAD(data, aead)
 			}
 		}
 	}
@@ -471,39 +479,32 @@ func (v *VPNInstance) handleIncomingPacket(encrypted []byte) {
 	}
 }
 
-func (v *VPNInstance) encryptPacket(ipPacket []byte) []byte {
+// encryptPacketWithAEAD 使用指定的 AEAD 实例加密
+func (v *VPNInstance) encryptPacketWithAEAD(ipPacket []byte, aead cipher.AEAD) []byte {
 	if len(ipPacket) == 0 {
 		return nil
 	}
 
-	dstPtr := bufPool.Get().(*[]byte)
-	dst := (*dstPtr)[:NonceSize+len(ipPacket)+Overhead]
+	// 直接分配精确大小，避免池复用带来的 data race
+	dst := make([]byte, NonceSize+len(ipPacket)+Overhead)
 
 	// Nonce (计数器模式)
 	nonce := dst[:NonceSize]
 	nonceVal := atomic.AddUint64(&v.nonceCounter, 1)
 	binary.BigEndian.PutUint64(nonce[0:8], nonceVal)
 	binary.BigEndian.PutUint32(nonce[8:12], v.SessionID)
-	for i := 12; i < NonceSize; i++ {
-		nonce[i] = 0
-	}
 
-	v.AEAD.Seal(dst[NonceSize:NonceSize], nonce, ipPacket, nil)
+	aead.Seal(dst[NonceSize:NonceSize], nonce, ipPacket, nil)
 
-	// 拷贝结果（因为池会复用）
-	result := make([]byte, len(dst))
-	copy(result, dst)
-	bufPool.Put(dstPtr)
-
-	return result
+	return dst
 }
 
-func (v *VPNInstance) sendRawPacket(ipPacket []byte) {
+func (v *VPNInstance) sendRawPacketWithAEAD(ipPacket []byte, aead cipher.AEAD) {
 	if len(ipPacket) == 0 {
 		return
 	}
 
-	encrypted := v.encryptPacket(ipPacket)
+	encrypted := v.encryptPacketWithAEAD(ipPacket, aead)
 	if encrypted == nil {
 		return
 	}
@@ -518,18 +519,14 @@ func (v *VPNInstance) sendRawPacket(ipPacket []byte) {
 		return
 	}
 
-	// 轮询选择连接发送 (负载均衡)
 	idx := atomic.AddUint32(&v.rawSendIdx, 1) % uint32(len(v.ConnRaw))
 	v.ConnRaw[idx].WriteToIP(encrypted, addr)
 }
 
 func (v *VPNInstance) writeTUN(data []byte) {
-	bufPtr := bufPool.Get().(*[]byte)
-	buf := (*bufPtr)[:TunOffset+len(data)]
+	buf := make([]byte, TunOffset+len(data))
 	copy(buf[TunOffset:], data)
-
 	v.TunDev.Write([][]byte{buf}, TunOffset)
-	bufPool.Put(bufPtr)
 }
 
 // --- 主函数 ---
