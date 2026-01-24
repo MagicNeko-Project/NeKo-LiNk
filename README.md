@@ -5,6 +5,7 @@
 
 ## ✨ 核心特性 (Features)
 
+*   **v6.0 Next-Gen QUIC Revolution**: 全面拥抱 QUIC 协议 (基于 HTTP/3 底层)，内置 Google BBR 拥塞控制，彻底解决 UDP 丢包、乱序和卡顿。
 *   **Pure IP 虚拟化 (L3)**: 抛弃了复杂的二层以太网头，直接在 IP 层进行数据传输。彻底解决 L2 带来的广播风暴和兼容性问题，让 ping 和路由更加稳定。
 *   **计数器 Nonce 加密 (Counter Nonce)**: **(New!)** 使用原子计数器生成 Nonce，避免每包调用 `crypto/rand` 的系统调用开销，性能提升 20-30%。
 *   **零拷贝缓冲池 (Zero-Copy Buffer Pool)**: **(New!)** 全链路使用 `sync.Pool` 复用内存，减少 GC 压力，降低延迟抖动。
@@ -14,7 +15,7 @@
 *   **Layer 3 虚拟化 (WireGuard-TUN)**: 基于官方 `wireguard/tun` 库，支持多队列和 GSO/GRO，提供目前 Go 生态中最顶级的 TUN 读写性能。
 *   **批处理传输 (UDP/IPv4 Batching)**: 引入 `x/net/ipv4` 的 `ReadBatch` 技术，一次系统调用处理一组数据包，极大降低高吞吐下的 CPU 中断和损耗。
 *   **调试监控系统 (Debug Mode)**: 支持通过 `-debug` 参数开启详细的包追踪日志，实时洞察数据包在隧道中的流转状态。
-*   **现代加密**: 全程使用 XChaCha20-Poly1305 进行加密和完整性校验，安全无忧。
+*   **现代加密**: 使用 QUIC 内置的 **TLS 1.3** 进行银行级加密与身份验证，更安全，更高效。
 
 ## 🛠️ 快速开始 (Quick Start)
 
@@ -47,16 +48,15 @@ go build -o vpn main.go
 
 ```json
 {
-  "server_addr": "1.2.3.4",        // 服务端 IP (Client 填 Server IP, Server 可填 [::])
-  "protocol": "udp",               // "udp" 或 "raw"
+  "server_addr": "1.2.3.4",        // 服务端 IP
+  "protocol": "quic",              // "quic" (推荐), "udp", "tcp", 或 "raw"
   "ip_protocol_num": 233,          // Raw 模式下的协议号
-  "base_port": 9000,               // UDP 起始端口
-  "port_count": 4,                 //并发通道数量 (建议 4-8)
-  "key": "your-secret-key-32-chars-needed!!", // 32字节密钥
+  "base_port": 9000,               // UDP/QUIC 监听端口
+  "key": "your-secret-key-32-chars-needed!!", // 32字节密钥 (用于 TLS PSK)
   "local_addr": "10.0.0.1/24",     // 虚拟网卡 IP
   "mode": "server",                // "server" 或 "client"
   "interface_name": "tap0",        // 自定义网卡名称
-  "mtu": 1280                      // 推荐 1280 (IPv6安全值) 或 1400 (搭配自动MSS)
+  "mtu": 1280                      // 推荐 1280
 }
 ```
 
