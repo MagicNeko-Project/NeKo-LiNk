@@ -251,7 +251,7 @@ func generateWGKey() ([]byte, []byte) {
 
 func (v *VPNInstance) startWireGuardRaw() {
 	// 1. Create Bind
-	bind := NewRawBind(v.Cfg.IPProtocolNum, v.Cfg.UseNATT, v.Cfg.ListenPort)
+	bind := NewRawBind(v.Cfg.IPProtocolNum, v.Cfg.UseNATT, v.Cfg.ListenPort, v.Cfg.PeerPort)
 	
 	// 2. Client Mode: Set Remote
 	if v.Cfg.Mode == "client" {

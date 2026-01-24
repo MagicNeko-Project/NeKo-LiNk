@@ -13,7 +13,7 @@ import (
 // --- Raw Endpoint (Shadowing) ---
 
 type RawEndpoint struct {
-	RealAddr netip.Addr // The actual remote IP (for sending)
+	RealAddr netip.AddrPort // The actual remote IP + Port (for sending)
 }
 
 func (e *RawEndpoint) ClearSrc() {}
@@ -22,12 +22,12 @@ func (e *RawEndpoint) DstToString() string {
 	// Fake Endpoint for external tools (Masking)
 	// Derive a fake port from the RealAddr to distinguish peers in "wg show"
 	// but keep IP as 127.0.0.1
-	hash := crc32.ChecksumIEEE(e.RealAddr.AsSlice())
+	hash := crc32.ChecksumIEEE(e.RealAddr.Addr().AsSlice())
 	port := 10000 + (hash % 50000)
 	return fmt.Sprintf("127.0.0.1:%d", port)
 }
-func (e *RawEndpoint) DstToBytes() []byte  { return e.RealAddr.AsSlice() }
-func (e *RawEndpoint) DstIP() netip.Addr   { return e.RealAddr }
+func (e *RawEndpoint) DstToBytes() []byte  { return e.RealAddr.Addr().AsSlice() }
+func (e *RawEndpoint) DstIP() netip.Addr   { return e.RealAddr.Addr() }
 func (e *RawEndpoint) SrcIP() netip.Addr   { return netip.Addr{} }
 
 // --- Raw Bind ---
@@ -39,18 +39,20 @@ type RawBind struct {
 	udpConn      *net.UDPConn
 	protoNum     int
 	useNATT      bool
-	nattPort     int
+	nattLocalPort int
+	nattRemotePort int
 	handshakeCb  func(data []byte, remote netip.Addr) bool
 	
 	// For Client mode fix: optionally force a remote address if set
 	clientRemote netip.Addr
 }
 
-func NewRawBind(proto int, useNATT bool, nattPort int) *RawBind {
+func NewRawBind(proto int, useNATT bool, localPort, remotePort int) *RawBind {
 	return &RawBind{
-		protoNum: proto,
-		useNATT:  useNATT,
-		nattPort: nattPort,
+		protoNum:       proto,
+		useNATT:        useNATT,
+		nattLocalPort:  localPort,
+		nattRemotePort: remotePort,
 	}
 }
 
@@ -65,7 +67,7 @@ func (b *RawBind) SetClientRemote(addr netip.Addr) {
 func (b *RawBind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
 	if b.useNATT {
 		// Use UDP for NAT-T
-		addr := &net.UDPAddr{IP: net.IPv4zero, Port: b.nattPort}
+		addr := &net.UDPAddr{IP: net.IPv4zero, Port: b.nattLocalPort}
 		c, err := net.ListenUDP("udp", addr)
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to open UDP for NAT-T: %w", err)
@@ -73,7 +75,7 @@ func (b *RawBind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
 		c.SetReadBuffer(10 * 1024 * 1024)
 		c.SetWriteBuffer(10 * 1024 * 1024)
 		b.udpConn = c
-		return []conn.ReceiveFunc{b.receiveUDP}, uint16(b.nattPort), nil
+		return []conn.ReceiveFunc{b.receiveUDP}, uint16(b.nattLocalPort), nil
 	}
 
 	// Open Raw Sockets based on Configured Protocol Number
@@ -109,9 +111,11 @@ func (b *RawBind) receiveUDP(packets [][]byte, sizes []int, eps []conn.Endpoint)
 	nRead, addr, err := b.udpConn.ReadFromUDP(buf)
 	if err != nil { return 0, err }
 	
-	ip, ok := netip.AddrFromSlice(addr.IP)
-	if !ok { return 0, nil }
-	ip = ip.Unmap()
+	addrPort, err := netip.ParseAddrPort(addr.String())
+	if err != nil { return 0, nil }
+	
+	ip := addrPort.Addr().Unmap()
+	addrPort = netip.AddrPortFrom(ip, addrPort.Port())
 
 	if nRead > 0 && buf[0] == 0xFE {
 		if b.handshakeCb != nil {
@@ -123,7 +127,7 @@ func (b *RawBind) receiveUDP(packets [][]byte, sizes []int, eps []conn.Endpoint)
 	}
 	
 	sizes[0] = nRead
-	eps[0] = &RawEndpoint{RealAddr: ip}
+	eps[0] = &RawEndpoint{RealAddr: addrPort}
 	return 1, nil
 }
 
@@ -152,7 +156,7 @@ func (b *RawBind) receiveIPv4(packets [][]byte, sizes []int, eps []conn.Endpoint
 	}
 	
 	sizes[0] = nRead
-	eps[0] = &RawEndpoint{RealAddr: ip}
+	eps[0] = &RawEndpoint{RealAddr: netip.AddrPortFrom(ip, 0)}
 	return 1, nil
 }
 
@@ -177,26 +181,26 @@ func (b *RawBind) receiveIPv6(packets [][]byte, sizes []int, eps []conn.Endpoint
 	}
 
 	sizes[0] = nRead
-	eps[0] = &RawEndpoint{RealAddr: ip}
+	eps[0] = &RawEndpoint{RealAddr: netip.AddrPortFrom(ip, 0)}
 	return 1, nil
 }
 
 func (b *RawBind) Send(bufs [][]byte, ep conn.Endpoint) error {
-	var targetIP netip.Addr
+	var target netip.AddrPort
 	
 	if b.clientRemote.IsValid() {
-		targetIP = b.clientRemote
+		target = netip.AddrPortFrom(b.clientRemote, uint16(b.nattRemotePort))
 	} else {
 		rep, ok := ep.(*RawEndpoint)
 		if !ok { return conn.ErrWrongEndpointType }
-		targetIP = rep.RealAddr
+		target = rep.RealAddr
 	}
 	
-	if !targetIP.IsValid() { return nil }
+	if !target.Addr().IsValid() { return nil }
 
 	if b.useNATT {
 		if b.udpConn == nil { return net.ErrClosed }
-		addr := &net.UDPAddr{IP: targetIP.AsSlice(), Port: b.nattPort}
+		addr := &net.UDPAddr{IP: target.Addr().AsSlice(), Port: int(target.Port())}
 		for _, buf := range bufs {
 			if len(buf) > 0 {
 				b.udpConn.WriteToUDP(buf, addr)
@@ -205,9 +209,9 @@ func (b *RawBind) Send(bufs [][]byte, ep conn.Endpoint) error {
 		return nil
 	}
 
-	addr, _ := net.ResolveIPAddr("ip", targetIP.String())
+	addr, _ := net.ResolveIPAddr("ip", target.Addr().String())
 	var c *net.IPConn
-	if targetIP.Is4() {
+	if target.Addr().Is4() {
 		c = b.ipv4
 	} else {
 		c = b.ipv6
@@ -226,7 +230,7 @@ func (b *RawBind) Send(bufs [][]byte, ep conn.Endpoint) error {
 func (b *RawBind) SendRaw(data []byte, remote netip.Addr) error {
 	if b.useNATT {
 		if b.udpConn == nil { return net.ErrClosed }
-		addr := &net.UDPAddr{IP: remote.AsSlice(), Port: b.nattPort}
+		addr := &net.UDPAddr{IP: remote.AsSlice(), Port: b.nattRemotePort}
 		_, err := b.udpConn.WriteToUDP(data, addr)
 		return err
 	}
@@ -266,5 +270,5 @@ func (b *RawBind) ParseEndpoint(s string) (conn.Endpoint, error) {
 	// But in Client mode, we force Send to clientRemote.
 	// In Server mode? WireGuard learns Endpoint from Receive path usually (Roaming).
 	// So ParseEndpoint is often just for initial config.
-	return &RawEndpoint{RealAddr: netip.MustParseAddr("127.0.0.1")}, nil 
+	return &RawEndpoint{RealAddr: netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), 0)}, nil 
 }
