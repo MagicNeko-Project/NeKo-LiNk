@@ -567,8 +567,14 @@ func (v *VPNInstance) initRaw() {
 	}
 
 	if v.Cfg.UseEBPF {
-		// Try to clean up any leftover eBPF maps for TCP
-		if engine, err := xdp.GetShadowXEngine(v.Cfg.EBPFDevice, "tcp"); err != nil {
+		// eBPF engine will be initialized per-worker-bind later in wg_bind logic or connection startup.
+		// For legacy raw mode here, we don't strictly need to pre-load.
+		// However, if we want to retain the engine handle for registration:
+		
+		engineMode := "raw"
+		if v.Cfg.UseTCP { engineMode = "tcp" }
+		
+		if engine, err := xdp.GetShadowXEngine(v.Cfg.EBPFDevice, engineMode); err != nil {
 			log.Printf("[EBPF] 核心加载失败: %v. 回退到纯用户态 Raw Socket.", err)
 			v.Cfg.UseEBPF = false
 		} else {
