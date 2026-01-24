@@ -137,7 +137,7 @@ func (v *VPNInstance) Start() {
 		debugMode = true
 	}
 
-	log.Printf("[%s] NekoLink v5.3 (Raw优化版) 启动中 - 模式: %s, 协议: %s",
+	log.Printf("[%s] NekoLink v5.4 (安全增强版) 启动中 - 模式: %s, 协议: %s",
 		v.Cfg.InterfaceName, v.Cfg.Mode, v.Cfg.Protocol)
 
 	v.InitTUN()
@@ -164,8 +164,74 @@ func (v *VPNInstance) InitTUN() {
 	runCmd("sysctl", "-w", "net.ipv4.conf.all.rp_filter=0")
 	runCmd("sysctl", "-w", fmt.Sprintf("net.ipv4.conf.%s.rp_filter=0", realName))
 
+	// 设置 nftables 规则
+	v.setupNFTables(realName)
+
 	log.Printf("[%s] TUN 接口已启动 (IP: %s, MTU: %d) Nya~",
 		realName, v.Cfg.LocalAddr, v.Cfg.MTU)
+}
+
+// setupNFTables 设置 MSS 钳制和安全防护规则
+func (v *VPNInstance) setupNFTables(iface string) {
+	// 创建表
+	runCmd("nft", "add", "table", "inet", "nekolink")
+
+	// MSS 钳制链
+	chainMSS := fmt.Sprintf("mss_%s", iface)
+	runCmd("nft", "add", "chain", "inet", "nekolink", chainMSS,
+		"{ type filter hook forward priority mangle; policy accept; }")
+	runCmd("nft", "flush", "chain", "inet", "nekolink", chainMSS)
+
+	// MSS 钳制规则 - 自动修正 TCP SYN 包的 MSS
+	runCmd("nft", "add", "rule", "inet", "nekolink", chainMSS,
+		"iifname", iface, "tcp", "flags", "syn", "tcp", "option", "maxseg", "size", "set", "rt", "mtu")
+	runCmd("nft", "add", "rule", "inet", "nekolink", chainMSS,
+		"oifname", iface, "tcp", "flags", "syn", "tcp", "option", "maxseg", "size", "set", "rt", "mtu")
+
+	log.Printf("[%s] NFTables MSS 钳制已启用", iface)
+
+	// 仅服务端添加安全防护规则
+	if v.Cfg.Mode == "server" && v.Cfg.Protocol == "raw" {
+		v.setupSecurityRules()
+	}
+}
+
+// setupSecurityRules 设置 Raw 模式的安全防护规则
+func (v *VPNInstance) setupSecurityRules() {
+	protoNum := fmt.Sprintf("%d", v.Cfg.IPProtocolNum)
+
+	// 创建 raw 表用于入站过滤
+	runCmd("nft", "add", "table", "inet", "nekolink_security")
+
+	// 输入链
+	runCmd("nft", "add", "chain", "inet", "nekolink_security", "input",
+		"{ type filter hook input priority filter; policy accept; }")
+	runCmd("nft", "flush", "chain", "inet", "nekolink_security", "input")
+
+	// 只允许我们协议号的流量，拒绝其他嗅探
+	// 允许自定义协议
+	runCmd("nft", "add", "rule", "inet", "nekolink_security", "input",
+		"meta", "l4proto", protoNum, "accept")
+
+	// 允许已建立的连接
+	runCmd("nft", "add", "rule", "inet", "nekolink_security", "input",
+		"ct", "state", "established,related", "accept")
+
+	// 允许本地回环
+	runCmd("nft", "add", "rule", "inet", "nekolink_security", "input",
+		"iifname", "lo", "accept")
+
+	// 允许 ICMP (ping)
+	runCmd("nft", "add", "rule", "inet", "nekolink_security", "input",
+		"meta", "l4proto", "icmp", "accept")
+	runCmd("nft", "add", "rule", "inet", "nekolink_security", "input",
+		"meta", "l4proto", "ipv6-icmp", "accept")
+
+	// 对于无效包直接丢弃
+	runCmd("nft", "add", "rule", "inet", "nekolink_security", "input",
+		"ct", "state", "invalid", "drop")
+
+	log.Printf("[Security] Raw 模式安全规则已启用 (Proto: %s)", protoNum)
 }
 
 // --- 网络初始化 ---
