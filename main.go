@@ -1,6 +1,7 @@
 package main
 
 import (
+	"container/heap"
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
@@ -55,7 +56,6 @@ type Config struct {
 	UseXDP        bool `json:"use_xdp"`
 	Debug         bool `json:"debug"`
 
-	TargetAddr string `json:"target_addr"` // For wg-raw mode (Server forward target)
 	SocksBind string `json:"socks_bind"`
 }
 
@@ -107,7 +107,8 @@ type VPNInstance struct {
 	TunDev tun.Device
 	AEAD   cipher.AEAD
 
-	Conn     *ipv4.PacketConn
+	ConnUDP     []*net.UDPConn
+	ConnBatch   []*ipv4.PacketConn
 	ConnTCP     net.Conn
 	ConnRaw     *net.IPConn
 	TCPMutex    sync.Mutex
@@ -120,28 +121,13 @@ type VPNInstance struct {
 	SessionID uint32
 	TxSeq     uint32
 
-	WGNat sync.Map // Map[string]*net.UDPConn (NAT for wg-raw server)
-	
-	ReplayFilter *AntiReplay
-	RxChan       chan RxPacket // Async packet processing channel
-}
 
-type RxPacket struct {
-	Data    []byte
-	SrcAddr net.Addr
-	Conn    net.Conn
+	Reorderer *PacketReorderer
 }
 
 type PeerRoute struct {
 	Addr     net.Addr
-	Conn     net.Conn // TCP connection for this peer (if TCP mode)
-}
-
-func (v *VPNInstance) logDebug(format string, args ...interface{}) {
-	if debugMode {
-		prefix := fmt.Sprintf("[%s] ", v.Cfg.InterfaceName)
-		log.Printf("[DEBUG] "+prefix+format, args...)
-	}
+	LocalIdx int
 }
 
 func NewVPNInstance(cfg Config) *VPNInstance {
@@ -159,11 +145,8 @@ func NewVPNInstance(cfg Config) *VPNInstance {
 	rand.Read(b)
 	v.SessionID = binary.BigEndian.Uint32(b)
 
-	v.SessionID = binary.BigEndian.Uint32(b)
-	
-	v.ReplayFilter = NewAntiReplay(2048)
-	v.RxChan = make(chan RxPacket, 4096) // Large buffer to prevent blocking
-	
+	v.Reorderer = NewReorderer()
+
 	return v
 }
 
@@ -172,16 +155,8 @@ func (v *VPNInstance) Start() {
 		debugMode = true
 	}
 	log.Printf("[%s] Starting L3 Engine v4.2 in %s mode on %s...", v.Cfg.InterfaceName, v.Cfg.Mode, v.Cfg.LocalAddr)
-
-	if v.Cfg.Protocol == "wg-raw" {
-		log.Printf("[%s] Running in WireGuard-Raw Forwarding Mode", v.Cfg.InterfaceName)
-		v.InitNetwork() // Setup Raw/UDP sockets
-		return
-	}
-
 	v.InitTUN()
-
-	// v.Reorderer.WriteFunc = v.IfaceWrite // Removed, direct call now
+	v.Reorderer.WriteFunc = v.IfaceWrite
 
 	v.InitNetwork()
 
@@ -191,12 +166,6 @@ func (v *VPNInstance) Start() {
 	if v.Cfg.Mode == "client" {
 		go v.KeepaliveLoop()
 	}
-	
-	// Start async packet processor workers
-	for i := 0; i < 4; i++ {
-		go v.packetWorker()
-	}
-	
 	go v.TUNReaderLoop()
 }
 
@@ -266,7 +235,7 @@ func (v *VPNInstance) IfaceWrite(data []byte) {
 	
 	_, err := v.TunDev.Write([][]byte{toWrite}, TunOffset)
 	if err != nil {
-		v.logDebug("TUN-WRITE Error: %v", err)
+		logDebug("TUN-WRITE Error: %v", err)
 	}
 	
 	// Only put back if it's the original large buffer
@@ -291,11 +260,11 @@ func (v *VPNInstance) tracePacket(prefix string, data []byte) {
 			icmpID := binary.BigEndian.Uint16(data[24:26])
 			summary += fmt.Sprintf(" [ICMP Type:%d, Code:%d, ID:%d]", icmpType, icmpCode, icmpID)
 		}
-		v.logDebug(summary)
+		logDebug(summary)
 	} else if version == 6 && len(data) >= 40 {
 		src := net.IP(data[8:24])
 		dst := net.IP(data[24:40])
-		v.logDebug("[%s] IPv6: %s -> %s (Len:%d)", prefix, src, dst, len(data))
+		logDebug("[%s] IPv6: %s -> %s (Len:%d)", prefix, src, dst, len(data))
 	}
 }
 
@@ -320,44 +289,45 @@ func (v *VPNInstance) InitNetwork() {
 	}
 
 	if v.Cfg.Protocol == "udp" {
-		var bindAddrStr string
-		if v.Cfg.Mode == "server" {
-			bindAddrStr = fmt.Sprintf("%s:%d", v.Cfg.ServerBindAddr, v.Cfg.BasePort)
-		} else {
-			bindAddrStr = ":0"
-		}
-		lAddr, _ := net.ResolveUDPAddr("udp", bindAddrStr)
-		c, err := net.ListenUDP("udp", lAddr)
-		if err != nil { log.Fatal(err) }
-		
-		c.SetReadBuffer(32 << 20) // Large buffer for single socket
-		c.SetWriteBuffer(32 << 20)
-		
-		v.Conn = ipv4.NewPacketConn(c)
+		v.ConnUDP = make([]*net.UDPConn, v.Cfg.PortCount)
+		v.ConnBatch = make([]*ipv4.PacketConn, v.Cfg.PortCount)
+		v.ClientRemoteUDP = make([]*net.UDPAddr, v.Cfg.PortCount)
+		for i := 0; i < v.Cfg.PortCount; i++ {
+			var bindAddrStr string
+			if v.Cfg.Mode == "server" {
+				bindAddrStr = fmt.Sprintf("%s:%d", v.Cfg.ServerBindAddr, v.Cfg.BasePort+i)
+			} else {
+				bindAddrStr = ":0"
+			}
+			lAddr, _ := net.ResolveUDPAddr("udp", bindAddrStr)
+			c, err := net.ListenUDP("udp", lAddr)
+			if err != nil { log.Fatal(err) }
+			c.SetReadBuffer(16 << 20)
+			c.SetWriteBuffer(16 << 20)
+			v.ConnUDP[i] = c
+			v.ConnBatch[i] = ipv4.NewPacketConn(c)
 
-		// Optimize IPv6 Priority (DSCP: EF / 46 -> 0xB8)
-		p6 := ipv6.NewPacketConn(c)
-		if err := p6.SetTrafficClass(0xB8); err != nil {
-			v.logDebug("IPv6 TrafficClass Warn: %v", err)
-		}
+			// Optimize IPv6 Priority (DSCP: EF / 46 -> 0xB8)
+			// This simulates VoLTE voice traffic for lower latency on mobile networks.
+			p6 := ipv6.NewPacketConn(c)
+			if err := p6.SetTrafficClass(0xB8); err != nil {
+				logDebug("IPv6 TrafficClass Warn: %v", err)
+			}
 
-		if v.Cfg.Mode == "client" {
-			rAddrStr := fmt.Sprintf("%s:%d", v.Cfg.RemoteIP, v.Cfg.RemotePort)
-			v.ClientRemoteUDP = make([]*net.UDPAddr, 1)
-			v.ClientRemoteUDP[0], _ = net.ResolveUDPAddr("udp", rAddrStr)
+			if v.Cfg.Mode == "client" {
+				rAddrStr := fmt.Sprintf("%s:%d", v.Cfg.RemoteIP, v.Cfg.RemotePort+i)
+				rAddr, _ := net.ResolveUDPAddr("udp", rAddrStr)
+				v.ClientRemoteUDP[i] = rAddr
+			}
+			go v.UDPListenerLoop(i, v.ConnBatch[i])
 		}
-		
-		go v.UDPListenerLoop(v.Conn)
 		return
 	}
 
-	if v.Cfg.Protocol == "raw" || v.Cfg.Protocol == "wg-raw" {
+	if v.Cfg.Protocol == "raw" {
 		protoStr := fmt.Sprintf("ip4:%d", v.Cfg.IPProtocolNum)
 		var lAddr *net.IPAddr
-
-		// Fix: Only bind to specific address if Server Mode and not 0.0.0.0
-		// Clients usually are behind NAT or have dynamic IP, so binding to nil (0.0.0.0) is safer.
-		if v.Cfg.Mode == "server" && v.Cfg.ServerBindAddr != "" && v.Cfg.ServerBindAddr != "0.0.0.0" {
+		if v.Cfg.Mode == "server" && v.Cfg.ServerBindAddr != "0.0.0.0" {
 			lAddr, _ = net.ResolveIPAddr("ip", v.Cfg.ServerBindAddr)
 		}
 		c, err := net.ListenIP(protoStr, lAddr)
@@ -367,39 +337,13 @@ func (v *VPNInstance) InitNetwork() {
 		v.ConnRaw = c
 		if v.Cfg.Mode == "client" {
 			v.ClientRemoteIP, _ = net.ResolveIPAddr("ip", v.Cfg.RemoteIP)
-			// Start UDP Listener for Local WG ONLY if protocol is wg-raw
-			if v.Cfg.Protocol == "wg-raw" {
-				go v.WGRawClientStart()
-			}
 		}
 		go v.RawListenerLoop(c)
 	}
 }
 
-func (v *VPNInstance) WGRawClientStart() {
-    lAddr, _ := net.ResolveUDPAddr("udp", fmt.Sprintf(":%d", v.Cfg.BasePort))
-    c, err := net.ListenUDP("udp", lAddr)
-    if err != nil { log.Fatalf("WG-Raw Client UDP Bind Fail: %v", err) }
-    log.Printf("[%s] WG-Raw Client Listening UDP %s", v.Cfg.InterfaceName, lAddr)
-
-    // Store Conn for RawListenerLoop to use for Replies
-    v.Conn = ipv4.NewPacketConn(c)
-    
-    buf := make([]byte, 2000)
-    for {
-        n, addr, err := c.ReadFromUDP(buf)
-        if err != nil { continue }
-        // Store the local WG addr to reply to later
-        v.WGNat.Store("local_wg", addr)
-        
-        // Wrap & Send Raw
-        // No headers, just payload
-        v.ConnRaw.WriteToIP(buf[:n], v.ClientRemoteIP)
-    }
-}
-
-func (v *VPNInstance) UDPListenerLoop(pc *ipv4.PacketConn) {
-	const batchSize = 64 // Increased batch size for single thread efficiency
+func (v *VPNInstance) UDPListenerLoop(idx int, pc *ipv4.PacketConn) {
+	const batchSize = 16
 	msgs := make([]ipv4.Message, batchSize)
 	bufPtrs := make([]*[]byte, batchSize)
 
@@ -418,25 +362,10 @@ func (v *VPNInstance) UDPListenerLoop(pc *ipv4.PacketConn) {
 
 		for i := 0; i < nMsgs; i++ {
 			msg := &msgs[i]
+			// 修正：必须要深度拷贝地址，防止并发覆盖
 			srcAddr := v.copyAddr(msg.Addr)
-			// Non-blocking send to channel (async processing)
-			dataCopy := make([]byte, msg.N)
-			copy(dataCopy, (*bufPtrs[i])[:msg.N])
-			select {
-			case v.RxChan <- RxPacket{Data: dataCopy, SrcAddr: srcAddr}:
-			default:
-				// Channel full, drop packet (back-pressure)
-				if debugMode {
-					v.logDebug("RxChan FULL, dropping packet")
-				}
-			}
+			v.ProcessPacket((*bufPtrs[i])[:msg.N], srcAddr, idx)
 		}
-	}
-}
-
-func (v *VPNInstance) packetWorker() {
-	for pkt := range v.RxChan {
-		v.ProcessPacket(pkt.Data, pkt.SrcAddr, pkt.Conn)
 	}
 }
 
@@ -453,70 +382,6 @@ func (v *VPNInstance) copyAddr(addr net.Addr) net.Addr {
 }
 
 func (v *VPNInstance) RawListenerLoop(c *net.IPConn) {
-    // WG-Raw Handling
-    if v.Cfg.Protocol == "wg-raw" {
-        buf := make([]byte, 65536) // Dedicated buffer for this loop
-        for {
-            n, src, err := c.ReadFromIP(buf)
-            if err != nil { return }
-            if n < 1 { continue }
-            payload := buf[:n] // In wg-raw, payload starts at 0 (IP header stripped by kernel)
-
-            if v.Cfg.Mode == "client" {
-                // Received Raw from Server -> Forward to Local WG UDP
-                if val, ok := v.WGNat.Load("local_wg"); ok {
-                    addr := val.(*net.UDPAddr)
-                    // We need the UDP conn. It's not stored globally?
-                    // Issue: WGRawClientStart created the conn but didn't save it.
-                    // Fix: Save it in v.ConnUDP[0] or similar.
-                    // Let's use v.ConnUDP for convenience (it makes slice).
-                    if v.Conn != nil {
-                         v.Conn.WriteTo(payload, nil, addr)
-                    } else {
-                        // Re-find logic.
-                        // Better: InitNetwork should save the UDP conn.
-                    }
-                }
-            } else {
-                // Server Mode: Received Raw from Client -> Forward to Target WG
-                // Check Session
-                srcIP := src.String()
-                var udpConn *net.UDPConn
-                if val, ok := v.WGNat.Load(srcIP); ok {
-                    udpConn = val.(*net.UDPConn)
-                } else {
-                    // Create new Session
-                    rAddr, _ := net.ResolveUDPAddr("udp", v.Cfg.TargetAddr)
-                    u, err := net.DialUDP("udp", nil, rAddr)
-                    if err != nil {
-                        v.logDebug("WG-Raw Dial Target Fail: %v", err)
-                        continue
-                    }
-                    udpConn = u
-                    v.WGNat.Store(srcIP, udpConn)
-                    log.Printf("WG-Raw: New Session %s -> %s", srcIP, v.Cfg.TargetAddr)
-
-                    // Start Return Loop
-                    go func(uc *net.UDPConn, targetSrc *net.IPAddr) {
-                        b := make([]byte, 2000)
-                        defer uc.Close()
-                        for {
-                            rn, _, err := uc.ReadFromUDP(b)
-                            if err != nil { 
-                                v.WGNat.Delete(srcIP)
-                                return 
-                            }
-                            v.ConnRaw.WriteToIP(b[:rn], targetSrc)
-                        }
-                    }(u, src)
-                }
-                udpConn.Write(payload)
-            }
-        }
-        return
-    }
-
-    // Standard Raw Mode
 	for {
 		bufPtr := bufPool.Get().(*[]byte)
 		buf := *bufPtr
@@ -529,7 +394,7 @@ func (v *VPNInstance) RawListenerLoop(c *net.IPConn) {
 			bufPool.Put(bufPtr)
 			continue
 		}
-		v.ProcessPacket(buf[4:n], src, nil)
+		v.ProcessPacket(buf[4:n], src, 0)
 		bufPool.Put(bufPtr)
 	}
 }
@@ -560,15 +425,6 @@ func (v *VPNInstance) TCPClientDial(addr string) {
 }
 func (v *VPNInstance) TCPHandler(c net.Conn) {
 	defer c.Close()
-
-	if tcpConn, ok := c.(*net.TCPConn); ok {
-		tcpConn.SetNoDelay(true) // Disable Nagle's Algo (Crucial for VPN!)
-		tcpConn.SetKeepAlive(true)
-		tcpConn.SetKeepAlivePeriod(30 * time.Second)
-		tcpConn.SetReadBuffer(4 * 1024 * 1024)
-		tcpConn.SetWriteBuffer(4 * 1024 * 1024)
-	}
-
 	header := make([]byte, 2)
 	for {
 		if _, err := io.ReadFull(c, header); err != nil { return }
@@ -584,19 +440,19 @@ func (v *VPNInstance) TCPHandler(c net.Conn) {
 			bufPool.Put(bufPtr)
 			return
 		}
-		v.ProcessPacket(body, v.copyAddr(c.RemoteAddr()), c)
+		v.ProcessPacket(body, v.copyAddr(c.RemoteAddr()), 0)
 		bufPool.Put(bufPtr)
 	}
 }
 
-func (v *VPNInstance) ProcessPacket(encrypted []byte, srcAddr net.Addr, conn net.Conn) {
+func (v *VPNInstance) ProcessPacket(encrypted []byte, srcAddr net.Addr, idx int) {
 	if len(encrypted) < NonceSize+Overhead { return }
 	nonce := encrypted[:NonceSize]
 	ciphertext := encrypted[NonceSize:]
 
 	plaintext, err := v.AEAD.Open(ciphertext[:0], nonce, ciphertext, nil)
 	if err != nil {
-		v.logDebug("Crypto: Decrypt failed from %v", srcAddr)
+		logDebug("Crypto: Decrypt failed from %v", srcAddr)
 		return
 	}
 
@@ -615,21 +471,14 @@ func (v *VPNInstance) ProcessPacket(encrypted []byte, srcAddr net.Addr, conn net
 		if version == 4 {
 			srcIP := binary.BigEndian.Uint32(ipPacket[12:16])
 			if srcIP != 0 {
-				v.PeerMap.Store(srcIP, PeerRoute{Addr: srcAddr, Conn: conn})
+				v.PeerMap.Store(srcIP, PeerRoute{Addr: srcAddr, LocalIdx: idx})
 			}
 		}
 	}
 
 	dataCopy := make([]byte, len(ipPacket))
 	copy(dataCopy, ipPacket)
-	
-	if v.ReplayFilter.Check(sessionID, seq) {
-		v.IfaceWrite(dataCopy)
-	} else {
-		if debugMode {
-			v.logDebug("AntiReplay: Drop S:%d Seq:%d (Dup/Old)", sessionID, seq)
-		}
-	}
+	v.Reorderer.Push(sessionID, seq, dataCopy)
 }
 
 func (v *VPNInstance) TUNReaderLoop() {
@@ -661,10 +510,9 @@ func (v *VPNInstance) handleOutgoingPacket(ipPacket []byte) {
 	}
 
 	var destAddr net.Addr
-	var destConn net.Conn
 	var isBroadcast bool
 	seq := atomic.AddUint32(&v.TxSeq, 1) - 1
-	// idx := int(uint64(seq) % uint64(v.Cfg.PortCount)) // Removed
+	idx := int(uint64(seq) % uint64(v.Cfg.PortCount))
 
 	// Determine Routing
 	if v.Cfg.Mode == "server" {
@@ -681,9 +529,9 @@ func (v *VPNInstance) handleOutgoingPacket(ipPacket []byte) {
 					if val, ok := v.PeerMap.Load(dstIP); ok {
 						route := val.(PeerRoute)
 						destAddr = route.Addr
-						destConn = route.Conn
+						idx = route.LocalIdx
 					} else if debugMode {
-						v.logDebug("ROUTING: No peer for target, dropping...")
+						logDebug("ROUTING: No peer for target, dropping...")
 					}
 				}
 			} else if version == 6 {
@@ -716,38 +564,37 @@ func (v *VPNInstance) handleOutgoingPacket(ipPacket []byte) {
 	dst = v.AEAD.Seal(dst, nonce, pt, nil)
 
 	if debugMode && v.Cfg.Mode == "client" {
-		v.logDebug("NET-TX: Out %d bytes (Seq:%d) to Server", len(dst), seq)
+		logDebug("NET-TX: Out %d bytes (Seq:%d) to Server", len(dst), seq)
 	} else if debugMode {
-		v.logDebug("NET-TX: Out %d bytes (Seq:%d) to %v (Bcast:%v)", len(dst), seq, destAddr, isBroadcast)
+		logDebug("NET-TX: Out %d bytes (Seq:%d) to %v (Bcast:%v)", len(dst), seq, destAddr, isBroadcast)
 	}
 
 	if isBroadcast && v.Cfg.Mode == "server" {
-		// Broadcast to all active peers
-		// Broadcast to all active peers (Simple)
+		// Broadcast to all active peers (Deduplicated)
+		sent := make(map[string]bool)
 		v.PeerMap.Range(func(key, value interface{}) bool {
 			route := value.(PeerRoute)
-			v.SendPacket(dst, route.Addr, route.Conn)
+			rAddr := route.Addr.String()
+			if !sent[rAddr] {
+				v.SendPacket(dst, route.LocalIdx, route.Addr)
+				sent[rAddr] = true
+			}
 			return true
 		})
 	} else {
 		// Unicast / Client Send
-		v.SendPacket(dst, destAddr, destConn)
+		v.SendPacket(dst, idx, destAddr)
 	}
 
 	bufPool.Put(ptPtr)
 	bufPool.Put(dstPtr)
 }
 
-func (v *VPNInstance) SendPacket(data []byte, destAddr net.Addr, conn net.Conn) {
+func (v *VPNInstance) SendPacket(data []byte, idx int, destAddr net.Addr) {
 	if v.Cfg.Protocol == "tcp" {
-		var c net.Conn
-		if conn != nil {
-			c = conn
-		} else {
-			v.TCPMutex.Lock()
-			c = v.ConnTCP
-			v.TCPMutex.Unlock()
-		}
+		v.TCPMutex.Lock()
+		c := v.ConnTCP
+		v.TCPMutex.Unlock()
 		if c == nil { return }
 		l := len(data)
 		h := make([]byte, 2)
@@ -758,20 +605,21 @@ func (v *VPNInstance) SendPacket(data []byte, destAddr net.Addr, conn net.Conn) 
 	}
 
 	if v.Cfg.Protocol == "udp" {
+		pc := v.ConnBatch[idx]
 		var addr net.Addr
 		if v.Cfg.Mode == "client" {
-			addr = v.ClientRemoteUDP[0]
+			addr = v.ClientRemoteUDP[idx]
 		} else {
 			if destAddr == nil { return }
 			addr = destAddr
 		}
-		v.Conn.WriteTo(data, nil, addr)
+		pc.WriteTo(data, nil, addr)
 		return
 	}
 
 	if v.Cfg.Protocol == "raw" {
 		payload := make([]byte, 4+len(data))
-		binary.BigEndian.PutUint32(payload[0:4], 0) // idx is always 0 now
+		binary.BigEndian.PutUint32(payload[0:4], uint32(idx))
 		copy(payload[4:], data)
 		var addr *net.IPAddr
 		if v.Cfg.Mode == "client" {
@@ -851,133 +699,100 @@ func (v *VPNInstance) KeepaliveLoop() {
 	copy(pkt[16:20], []byte{255, 255, 255, 255})
 
 	for range tick.C {
-		v.logDebug("KEEPALIVE: Sending probe...")
+		logDebug("KEEPALIVE: Sending probe...")
 		v.handleOutgoingPacket(pkt)
 	}
 }
 
-// --- Anti-Replay (Sliding Window) ---
+// --- Reorderer ---
 
-type AntiReplay struct {
-	mutex       sync.Mutex
+type SeqPacket struct {
+	Seq  uint32
+	Data []byte
+	T    time.Time
+}
+type PacketHeap []SeqPacket
+func (h PacketHeap) Len() int           { return len(h) }
+func (h PacketHeap) Less(i, j int) bool { return h[i].Seq < h[j].Seq }
+func (h PacketHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *PacketHeap) Push(x interface{}) { *h = append(*h, x.(SeqPacket)) }
+func (h *PacketHeap) Pop() interface{} {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[0 : n-1]
+	return x
+}
+
+type PacketReorderer struct {
+	mu          sync.Mutex
+	nextSeq     uint32
+	buffer      PacketHeap
 	lastSession uint32
-	lastSeq     uint32
-	bitmap      []uint64
-	windowSize  uint32
-	sizeBlocks  uint32
+	WriteFunc   func([]byte)
 }
 
-func NewAntiReplay(windowSize uint32) *AntiReplay {
-	blocks := windowSize / 64
-	if windowSize%64 != 0 {
-		blocks++
+func NewReorderer() *PacketReorderer {
+	r := &PacketReorderer{buffer: make(PacketHeap, 0)}
+	heap.Init(&r.buffer)
+	go r.watchdog()
+	return r
+}
+
+func (pr *PacketReorderer) Push(sess uint32, seq uint32, data []byte) {
+	pr.mu.Lock()
+	defer pr.mu.Unlock()
+	if sess != pr.lastSession {
+		logDebug("Reorderer: Session reset %v -> %v", pr.lastSession, sess)
+		pr.lastSession = sess
+		pr.nextSeq = seq
+		pr.buffer = pr.buffer[:0]
 	}
-	return &AntiReplay{
-		bitmap:     make([]uint64, blocks),
-		windowSize: windowSize,
-		sizeBlocks: blocks,
+	diff := int32(seq - pr.nextSeq)
+	if diff < 0 { return }
+	if seq == pr.nextSeq {
+		if pr.WriteFunc != nil { pr.WriteFunc(data) }
+		pr.nextSeq++
+		pr.drain()
+		return
+	}
+	if pr.buffer.Len() > MaxReorderBuffer {
+		min := heap.Pop(&pr.buffer).(SeqPacket)
+		pr.nextSeq = min.Seq
+		if pr.WriteFunc != nil { pr.WriteFunc(min.Data) }
+		pr.nextSeq++
+		pr.drain()
+	}
+	heap.Push(&pr.buffer, SeqPacket{Seq: seq, Data: data, T: time.Now()})
+}
+
+func (pr *PacketReorderer) drain() {
+	for pr.buffer.Len() > 0 {
+		min := pr.buffer[0]
+		if min.Seq == pr.nextSeq {
+			heap.Pop(&pr.buffer)
+			if pr.WriteFunc != nil { pr.WriteFunc(min.Data) }
+			pr.nextSeq++
+		} else { break }
 	}
 }
 
-func (a *AntiReplay) Check(session uint32, seq uint32) bool {
-	a.mutex.Lock()
-	defer a.mutex.Unlock()
-
-	// Session Reset
-	if session != a.lastSession {
-		a.lastSession = session
-		a.lastSeq = seq
-		a.resetBitmap()
-		// First packet of new session is accepted
-		return true
-	}
-
-	diff := int64(seq) - int64(a.lastSeq)
-
-	if diff > 0 {
-		// New largest sequence
-		// Shift window by diff
-		if diff >= int64(a.windowSize) {
-			if debugMode { log.Printf("AntiReplay: Window Reset (Jump %d) Seq %d -> %d", diff, a.lastSeq, seq) }
-			a.resetBitmap()
-		} else {
-			a.shift(uint32(diff))
+func (pr *PacketReorderer) watchdog() {
+	tick := time.NewTicker(20 * time.Millisecond)
+	for range tick.C {
+		pr.mu.Lock()
+		if pr.buffer.Len() > 0 {
+			head := pr.buffer[0]
+			if time.Since(head.T) > 50*time.Millisecond {
+				logDebug("Reorderer: Force jump Seq %v (Timeout)", head.Seq)
+				pr.nextSeq = head.Seq
+				heap.Pop(&pr.buffer)
+				if pr.WriteFunc != nil { pr.WriteFunc(head.Data) }
+				pr.nextSeq++
+				pr.drain()
+			}
 		}
-		a.lastSeq = seq
-		// Set bit 0 (representing lastSeq)
-		a.bitmap[0] |= 1
-		return true
-	}
-
-	// Old sequence (diff <= 0)
-	diffAbs := -diff
-	if diffAbs >= int64(a.windowSize) {
-		if debugMode { log.Printf("AntiReplay: Too Old (Diff %d) Seq %d Last %d", diffAbs, seq, a.lastSeq) }
-		return false // Too old
-	}
-
-	// Check duplicates
-	block := diffAbs / 64
-	bit := diffAbs % 64
-	mask := uint64(1) << bit
-
-	if (a.bitmap[block] & mask) != 0 {
-		if debugMode { log.Printf("AntiReplay: Dup Seq %d", seq) }
-		return false // Duplicate
-	}
-
-	// Mark and accept
-	a.bitmap[block] |= mask
-	return true
-}
-
-func (a *AntiReplay) resetBitmap() {
-	for i := range a.bitmap {
-		a.bitmap[i] = 0
-	}
-	// Implicitly marks nothing seen. 
-	// The caller usually sets the current bit immediately after reset if it's a new max.
-}
-
-func (a *AntiReplay) shift(n uint32) {
-	// Shift bitmap left by n bits
-	// Since bitmap[0] is high end (lastSeq), bitmap[1] is older...
-	// We need to implement bit shift across uint64 array.
-	// Simpler: iterate.
-	
-	// Fast path for large shifts handled by reset logic above.
-	
-	// We implementing "Right Shift" logic conceptually if index 0 is newest.
-	// Let's say index 0 bit 0 is lastSeq. index 0 bit 1 is lastSeq-1.
-	// When we move lastSeq by +n, the old lastSeq becomes bit n.
-	// So we need to shift all bits "Left" (towards higher index/bit value) by n.
-	
-	// Implementation:
-	// Go doesn't natively shift arrays.
-	// But 2048 window is just 32 uint64s.
-	
-	shiftBlocks := n / 64
-	shiftBits := n % 64
-
-	// 1. Shift blocks
-	if shiftBlocks > 0 {
-		for i := int(a.sizeBlocks) - 1; i >= int(shiftBlocks); i-- {
-			a.bitmap[i] = a.bitmap[i-int(shiftBlocks)]
-		}
-		for i := 0; i < int(shiftBlocks); i++ {
-			a.bitmap[i] = 0
-		}
-	}
-
-	// 2. Shift bits
-	if shiftBits > 0 {
-		carry := uint64(0)
-		for i := 0; i < int(a.sizeBlocks); i++ {
-			val := a.bitmap[i]
-			newVal := (val << shiftBits) | carry
-			carry = val >> (64 - shiftBits)
-			a.bitmap[i] = newVal
-		}
+		pr.mu.Unlock()
 	}
 }
 
