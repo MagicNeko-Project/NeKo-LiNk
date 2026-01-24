@@ -91,7 +91,10 @@ func (b *RawBind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
 			RawProto:      uint8(b.protoNum),
 		}
 
-		engine, err := xdp.GetShadowXEngine(b.ifaceName)
+		engineMode := "raw"
+		if b.useTCP { engineMode = "tcp" }
+
+		engine, err := xdp.GetShadowXEngine(b.ifaceName, engineMode)
 		if err != nil {
 			log.Printf("[eBPF] Failed to load Shared Shadow X Engine: %v. Falling back.", err)
 			b.useEBPF = false

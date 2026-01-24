@@ -8,31 +8,17 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
-// --- 配置结构体 (仅用于 Fake-TCP) ---
+// --- 配置结构体 ---
 
 struct shadow_config {
-    __u32 mode;       // 1=Raw-IP (废弃), 2=Fake-TCP
-    __u32 proto_num;  // 协议号 (Fake-TCP 模式下未使用)
+    __u32 mode;       // 2=Fake-TCP
+    __u32 proto_num;  
     __u16 local_port; // 本地监听端口 (大端序)
     __u16 reserved;
 };
 
-// --- Maps (映射表) ---
+// --- Maps (仅 Fake-TCP) ---
 
-// 1. Raw 模式入站/出站白名单: 协议号 -> 占位符
-// Key: IP 协议号 (__u8)
-// Value: 0 (占位)
-// 只有在这些 Map 中的协议号，才会被认为是 "Neko 管理的 Raw 流量" (虽然目前不转换，但保留机制)
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(key_size, sizeof(__u8));
-    __uint(value_size, sizeof(__u8));
-    __uint(max_entries, 16);
-} raw_allow_map SEC(".maps");
-
-// 2. Fake-TCP 模式主要配置映射
-// Key: 端口 (__u16, Big Endian) - TCP 目的端口或 UDP 源端口
-// Value: 配置结构体
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(key_size, sizeof(__u16));
@@ -84,7 +70,7 @@ static __always_inline int safe_move_ipv4_forward(void *data_end, void *base, in
     return 0;
 }
 
-// --- 入站处理 (Ingress) ---
+// --- 入站处理 (Ingress: TCP -> UDP) ---
 
 SEC("tc/ingress")
 int tc_shadow_ingress(struct __sk_buff *skb) {
@@ -98,24 +84,12 @@ int tc_shadow_ingress(struct __sk_buff *skb) {
     struct iphdr *ip = (struct iphdr *)((void *)eth + sizeof(*eth));
     if ((void *)ip + sizeof(*ip) > data_end) return TC_ACT_OK;
 
-    // --- 1. 检查 Raw 模式 (基于 IP 协议号) ---
-    // 逻辑变更: Legacy Raw 模式下，直接 Pass，不进行 UDP 转换。
-    // 这里仅做允许检查 (如果有需要的话，可以用于统计或未来扩展)
-    __u8 *allowed = bpf_map_lookup_elem(&raw_allow_map, &ip->protocol);
-    if (allowed) {
-        // bpf_printk("入站 Raw 允许: 协议 %d", ip->protocol);
-        return TC_ACT_OK; // 直接放行给内核 ListenIP
-    }
-
-    // --- 2. 检查 Fake-TCP 模式 (基于 TCP 目的端口) ---
     if (ip->protocol == IPPROTO_TCP) {
         struct tcphdr *tcp = (struct tcphdr *)((void *)ip + (ip->ihl * 4));
         if ((void *)tcp + sizeof(*tcp) > data_end) return TC_ACT_OK;
 
         struct shadow_config *cfg = bpf_map_lookup_elem(&port_shadow_map, &tcp->dest);
         if (cfg && cfg->mode == 2) {
-            // bpf_printk("入站 Fake-TCP 转换: %d", bpf_ntohs(tcp->dest));
-            
             __be16 s_p = tcp->source;
             __be16 d_p = tcp->dest;
             void *ip_ptr = (void *)eth + sizeof(*eth);
@@ -144,11 +118,10 @@ int tc_shadow_ingress(struct __sk_buff *skb) {
             full_ip_recompute(new_ip);
         }
     }
-
     return TC_ACT_OK;
 }
 
-// --- 出站处理 (Egress) ---
+// --- 出站处理 (Egress: UDP -> TCP) ---
 
 SEC("tc/egress")
 int tc_shadow_egress(struct __sk_buff *skb) {
@@ -162,20 +135,12 @@ int tc_shadow_egress(struct __sk_buff *skb) {
     struct iphdr *ip = (struct iphdr *)((void *)eth + sizeof(*eth));
     if ((void *)ip + sizeof(*ip) > data_end) return TC_ACT_OK;
 
-    // --- 1. 检查 Raw 模式 ---
-    // 如果是 Raw 模式，协议号本身就是 target，不需要转换。
-    // bpf_map_lookup_elem(&raw_allow_map, &ip->protocol); 
-    // Pass implicitly.
-
-    // --- 2. 检查 Fake-TCP 模式 (基于 UDP 源端口) ---
     if (ip->protocol == IPPROTO_UDP) {
         struct udphdr *udp = (struct udphdr *)((void *)ip + (ip->ihl * 4));
         if ((void *)udp + sizeof(*udp) > data_end) return TC_ACT_OK;
 
         struct shadow_config *cfg = bpf_map_lookup_elem(&port_shadow_map, &udp->source);
         if (cfg && cfg->mode == 2) {
-            // bpf_printk("出站 Fake-TCP 转换: %d", bpf_ntohs(udp->source));
-            
             __be16 s_p = udp->source;
             __be16 d_p = udp->dest;
             __u32 jitter = skb->tstamp; 
@@ -210,7 +175,6 @@ int tc_shadow_egress(struct __sk_buff *skb) {
             full_ip_recompute(new_ip);
         }
     }
-
     return TC_ACT_OK;
 }
 

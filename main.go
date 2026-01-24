@@ -567,8 +567,8 @@ func (v *VPNInstance) initRaw() {
 	}
 
 	if v.Cfg.UseEBPF {
-		engine, err := xdp.GetShadowXEngine(v.Cfg.EBPFDevice)
-		if err != nil {
+		// Try to clean up any leftover eBPF maps for TCP
+		if engine, err := xdp.GetShadowXEngine(v.Cfg.EBPFDevice, "tcp"); err != nil {
 			log.Printf("[EBPF] 核心加载失败: %v. 回退到纯用户态 Raw Socket.", err)
 			v.Cfg.UseEBPF = false
 		} else {
