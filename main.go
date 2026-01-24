@@ -132,6 +132,13 @@ type PeerRoute struct {
 	LocalIdx int
 }
 
+func (v *VPNInstance) logDebug(format string, args ...interface{}) {
+	if debugMode {
+		prefix := fmt.Sprintf("[%s] ", v.Cfg.InterfaceName)
+		log.Printf("[DEBUG] "+prefix+format, args...)
+	}
+}
+
 func NewVPNInstance(cfg Config) *VPNInstance {
 	cfg.ParseLegacy()
 	v := &VPNInstance{Cfg: cfg}
@@ -148,6 +155,7 @@ func NewVPNInstance(cfg Config) *VPNInstance {
 	v.SessionID = binary.BigEndian.Uint32(b)
 
 	v.Reorderer = NewReorderer()
+	v.Reorderer.LogFunc = v.logDebug
 
 	return v
 }
@@ -244,7 +252,7 @@ func (v *VPNInstance) IfaceWrite(data []byte) {
 	
 	_, err := v.TunDev.Write([][]byte{toWrite}, TunOffset)
 	if err != nil {
-		logDebug("TUN-WRITE Error: %v", err)
+		v.logDebug("TUN-WRITE Error: %v", err)
 	}
 	
 	// Only put back if it's the original large buffer
@@ -269,11 +277,11 @@ func (v *VPNInstance) tracePacket(prefix string, data []byte) {
 			icmpID := binary.BigEndian.Uint16(data[24:26])
 			summary += fmt.Sprintf(" [ICMP Type:%d, Code:%d, ID:%d]", icmpType, icmpCode, icmpID)
 		}
-		logDebug(summary)
+		v.logDebug(summary)
 	} else if version == 6 && len(data) >= 40 {
 		src := net.IP(data[8:24])
 		dst := net.IP(data[24:40])
-		logDebug("[%s] IPv6: %s -> %s (Len:%d)", prefix, src, dst, len(data))
+		v.logDebug("[%s] IPv6: %s -> %s (Len:%d)", prefix, src, dst, len(data))
 	}
 }
 
@@ -320,7 +328,7 @@ func (v *VPNInstance) InitNetwork() {
 			// This simulates VoLTE voice traffic for lower latency on mobile networks.
 			p6 := ipv6.NewPacketConn(c)
 			if err := p6.SetTrafficClass(0xB8); err != nil {
-				logDebug("IPv6 TrafficClass Warn: %v", err)
+				v.logDebug("IPv6 TrafficClass Warn: %v", err)
 			}
 
 			if v.Cfg.Mode == "client" {
@@ -455,7 +463,7 @@ func (v *VPNInstance) RawListenerLoop(c *net.IPConn) {
                     rAddr, _ := net.ResolveUDPAddr("udp", v.Cfg.TargetAddr)
                     u, err := net.DialUDP("udp", nil, rAddr)
                     if err != nil {
-                        logDebug("WG-Raw Dial Target Fail: %v", err)
+                        v.logDebug("WG-Raw Dial Target Fail: %v", err)
                         continue
                     }
                     udpConn = u
@@ -562,7 +570,7 @@ func (v *VPNInstance) ProcessPacket(encrypted []byte, srcAddr net.Addr, idx int)
 
 	plaintext, err := v.AEAD.Open(ciphertext[:0], nonce, ciphertext, nil)
 	if err != nil {
-		logDebug("Crypto: Decrypt failed from %v", srcAddr)
+		v.logDebug("Crypto: Decrypt failed from %v", srcAddr)
 		return
 	}
 
@@ -641,7 +649,7 @@ func (v *VPNInstance) handleOutgoingPacket(ipPacket []byte) {
 						destAddr = route.Addr
 						idx = route.LocalIdx
 					} else if debugMode {
-						logDebug("ROUTING: No peer for target, dropping...")
+						v.logDebug("ROUTING: No peer for target, dropping...")
 					}
 				}
 			} else if version == 6 {
@@ -674,9 +682,9 @@ func (v *VPNInstance) handleOutgoingPacket(ipPacket []byte) {
 	dst = v.AEAD.Seal(dst, nonce, pt, nil)
 
 	if debugMode && v.Cfg.Mode == "client" {
-		logDebug("NET-TX: Out %d bytes (Seq:%d) to Server", len(dst), seq)
+		v.logDebug("NET-TX: Out %d bytes (Seq:%d) to Server", len(dst), seq)
 	} else if debugMode {
-		logDebug("NET-TX: Out %d bytes (Seq:%d) to %v (Bcast:%v)", len(dst), seq, destAddr, isBroadcast)
+		v.logDebug("NET-TX: Out %d bytes (Seq:%d) to %v (Bcast:%v)", len(dst), seq, destAddr, isBroadcast)
 	}
 
 	if isBroadcast && v.Cfg.Mode == "server" {
@@ -809,7 +817,7 @@ func (v *VPNInstance) KeepaliveLoop() {
 	copy(pkt[16:20], []byte{255, 255, 255, 255})
 
 	for range tick.C {
-		logDebug("KEEPALIVE: Sending probe...")
+		v.logDebug("KEEPALIVE: Sending probe...")
 		v.handleOutgoingPacket(pkt)
 	}
 }
@@ -840,6 +848,7 @@ type PacketReorderer struct {
 	buffer      PacketHeap
 	lastSession uint32
 	WriteFunc   func([]byte)
+	LogFunc     func(string, ...interface{})
 }
 
 func NewReorderer() *PacketReorderer {
@@ -849,11 +858,17 @@ func NewReorderer() *PacketReorderer {
 	return r
 }
 
+func (pr *PacketReorderer) log(format string, v ...interface{}) {
+	if pr.LogFunc != nil {
+		pr.LogFunc(format, v...)
+	}
+}
+
 func (pr *PacketReorderer) Push(sess uint32, seq uint32, data []byte) {
 	pr.mu.Lock()
 	defer pr.mu.Unlock()
 	if sess != pr.lastSession {
-		logDebug("Reorderer: Session reset %v -> %v", pr.lastSession, sess)
+		pr.log("Reorderer: Session reset %v -> %v", pr.lastSession, sess)
 		pr.lastSession = sess
 		pr.nextSeq = seq
 		pr.buffer = pr.buffer[:0]
@@ -894,7 +909,7 @@ func (pr *PacketReorderer) watchdog() {
 		if pr.buffer.Len() > 0 {
 			head := pr.buffer[0]
 			if time.Since(head.T) > 50*time.Millisecond {
-				logDebug("Reorderer: Force jump Seq %v (Timeout)", head.Seq)
+				pr.log("Reorderer: Force jump Seq %v (Timeout)", head.Seq)
 				pr.nextSeq = head.Seq
 				heap.Pop(&pr.buffer)
 				if pr.WriteFunc != nil { pr.WriteFunc(head.Data) }
