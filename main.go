@@ -904,8 +904,10 @@ func (pr *PacketReorderer) watchdog() {
 		pr.mu.Lock()
 		if pr.buffer.Len() > 0 {
 			head := pr.buffer[0]
-			if time.Since(head.T) > 50*time.Millisecond {
-				pr.log("Reorderer: Force jump Seq %v (Timeout)", head.Seq)
+			if time.Since(head.T) > 10*time.Millisecond {
+				if debugMode {
+					pr.log("Reorderer: Force jump Seq %v -> %v (Timeout > 10ms)", pr.nextSeq, head.Seq)
+				}
 				pr.nextSeq = head.Seq
 				heap.Pop(&pr.buffer)
 				if pr.WriteFunc != nil { pr.WriteFunc(head.Data) }
