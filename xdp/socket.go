@@ -18,9 +18,10 @@ var bpfContent embed.FS
 // --- Kernel Structs ---
 
 type shadowConfig struct {
-	Mode     uint32
-	ProtoNum uint32
-	Reserved [2]uint32
+	Mode      uint32
+	ProtoNum  uint32
+	LocalPort uint16
+	Reserved  uint16
 }
 
 // --- Manager Logic ---
@@ -39,8 +40,8 @@ type ShadowXConfig struct {
 
 type ShadowXEngine struct {
 	ifaceName string
-	xdpLink   link.Link
-	tcLink    link.Link
+	tcLinkEgress  link.Link
+	tcLinkIngress link.Link
 	
 	portMap  *ebpf.Map
 	protoMap *ebpf.Map
@@ -66,7 +67,7 @@ func GetShadowXEngine(ifaceName string) (*ShadowXEngine, error) {
 	if err != nil { return nil, err }
 
 	var objs struct {
-		XdpIngress *ebpf.Program `ebpf:"xdp_shadow_ingress"`
+		TcIngress  *ebpf.Program `ebpf:"tc_shadow_ingress"`
 		TcEgress   *ebpf.Program `ebpf:"tc_shadow_egress"`
 		PortMap    *ebpf.Map     `ebpf:"port_shadow_map"`
 		ProtoMap   *ebpf.Map     `ebpf:"proto_shadow_map"`
@@ -77,38 +78,33 @@ func GetShadowXEngine(ifaceName string) (*ShadowXEngine, error) {
 	iface, err := net.InterfaceByName(ifaceName)
 	if err != nil { return nil, err }
 
-	// Attach XDP
-	xl, err := link.AttachXDP(link.XDPOptions{
-		Program:   objs.XdpIngress,
-		Interface: iface.Index,
-	})
-	if err != nil {
-		log.Printf("[eBPF] Native XDP failed, falling back to Generic mode...")
-		xl, err = link.AttachXDP(link.XDPOptions{
-			Program:   objs.XdpIngress,
-			Interface: iface.Index,
-			Flags:     link.XDPGenericMode,
-		})
-	}
-	if err != nil { return nil, err }
-
-	// Attach TCX
-	tl, err := link.AttachTCX(link.TCXOptions{
+	// Attach TCX Egress
+	te, err := link.AttachTCX(link.TCXOptions{
 		Program:   objs.TcEgress,
 		Interface: iface.Index,
 		Attach:    ebpf.AttachTCXEgress,
 	})
 	if err != nil {
-		log.Printf("[eBPF] tcx failed, egress acceleration might be unavailable (%v)", err)
+		log.Printf("[eBPF] tcx egress failed (%v), kernel might be too old.", err)
+	}
+
+	// Attach TCX Ingress
+	ti, err := link.AttachTCX(link.TCXOptions{
+		Program:   objs.TcIngress,
+		Interface: iface.Index,
+		Attach:    ebpf.AttachTCXIngress,
+	})
+	if err != nil {
+		log.Printf("[eBPF] tcx ingress failed (%v), kernel might be too old.", err)
 	}
 
 	e := &ShadowXEngine{
-		ifaceName: ifaceName,
-		xdpLink:   xl,
-		tcLink:    tl,
-		portMap:   objs.PortMap,
-		protoMap:  objs.ProtoMap,
-		refCount:  1,
+		ifaceName:     ifaceName,
+		tcLinkEgress:  te,
+		tcLinkIngress: ti,
+		portMap:       objs.PortMap,
+		protoMap:      objs.ProtoMap,
+		refCount:      1,
 	}
 
 	engineRegistry[ifaceName] = e
@@ -120,23 +116,23 @@ func (e *ShadowXEngine) Register(cfg ShadowXConfig) error {
 	defer e.mu.Unlock()
 
 	conf := shadowConfig{
-		Mode:     cfg.Mode,
-		ProtoNum: uint32(cfg.RawProto),
+		Mode:      cfg.Mode,
+		ProtoNum:  uint32(cfg.RawProto),
+		LocalPort: htons(cfg.LocalPort),
 	}
 
-	if cfg.Mode == 2 { // Fake-TCP
-		port := htons(cfg.LocalPort)
-		if err := e.portMap.Put(&port, &conf); err != nil {
-			return fmt.Errorf("failed to register port %d: %v", cfg.LocalPort, err)
-		}
-	} else if cfg.Mode == 1 { // Raw-IP
+	// For both modes, we usually want to register the local port 
+	// so the Egress hook identifies our app's traffic.
+	port := htons(cfg.LocalPort)
+	if err := e.portMap.Put(&port, &conf); err != nil {
+		return fmt.Errorf("failed to register port %d: %v", cfg.LocalPort, err)
+	}
+
+	if cfg.Mode == 1 { // Raw-IP
 		proto := uint8(cfg.RawProto)
 		if err := e.protoMap.Put(&proto, &conf); err != nil {
 			return fmt.Errorf("failed to register proto %d: %v", cfg.RawProto, err)
 		}
-		// In Mode 1, we also often need to check ports for the TC egress part
-		port := htons(cfg.LocalPort)
-		e.portMap.Put(&port, &conf)
 	}
 
 	return nil
@@ -146,14 +142,12 @@ func (e *ShadowXEngine) Unregister(cfg ShadowXConfig) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	if cfg.Mode == 2 {
-		port := htons(cfg.LocalPort)
-		e.portMap.Delete(&port)
-	} else if cfg.Mode == 1 {
+	port := htons(cfg.LocalPort)
+	e.portMap.Delete(&port)
+
+	if cfg.Mode == 1 {
 		proto := uint8(cfg.RawProto)
 		e.protoMap.Delete(&proto)
-		port := htons(cfg.LocalPort)
-		e.portMap.Delete(&port)
 	}
 }
 
@@ -161,8 +155,8 @@ func (e *ShadowXEngine) Close() {
 	registryMutex.Lock()
 	e.refCount--
 	if e.refCount <= 0 {
-		if e.xdpLink != nil { e.xdpLink.Close() }
-		if e.tcLink != nil { e.tcLink.Close() }
+		if e.tcLinkEgress != nil { e.tcLinkEgress.Close() }
+		if e.tcLinkIngress != nil { e.tcLinkIngress.Close() }
 		delete(engineRegistry, e.ifaceName)
 	}
 	registryMutex.Unlock()
