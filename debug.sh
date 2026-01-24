@@ -27,6 +27,9 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+echo ">>> [Debug] 正在自动优化配置文件..."
+$APP_BIN -migrate -c "$CONF"
+
 # 查找配置
 CONF="/etc/neko-link/config.json"
 if [ ! -f "$CONF" ]; then

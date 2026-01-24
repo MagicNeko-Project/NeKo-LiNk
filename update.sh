@@ -26,6 +26,12 @@ echo ">>> 更新二进制文件..."
 cp $BIN_NAME $BIN_DIR/
 chmod +x $BIN_DIR/$BIN_NAME
 
+echo ">>> 正在自动优化并升级配置文件..."
+$BIN_DIR/$BIN_NAME -migrate -c /etc/neko-link/config.json 2>/dev/null
+if [ -f "config.json" ]; then
+    ./$BIN_NAME -migrate -c config.json 2>/dev/null
+fi
+
 echo ">>> 重启服务..."
 systemctl start $SERVICE_NAME
 systemctl status $SERVICE_NAME --no-pager

@@ -61,13 +61,15 @@ type Config struct {
 	Debug         bool `json:"debug"`
 }
 
-func (c *Config) ParseLegacy() {
+func (c *Config) ParseLegacy() (changed bool) {
 	// 1. 基本字段兼容
 	if c.Mode == "client" && c.RemoteIP == "" && c.ServerBindAddr != "" {
 		c.RemoteIP = c.ServerBindAddr
+		changed = true
 	}
 	if c.Mode == "client" && c.RemotePort == 0 && c.BasePort != 0 {
 		c.RemotePort = c.BasePort
+		changed = true
 	}
 	
 	// 2. 协议迁移 (UDP/TCP/QUIC -> wg-raw)
@@ -75,11 +77,13 @@ func (c *Config) ParseLegacy() {
 	if oldProto == "udp" || oldProto == "tcp" || oldProto == "quic" || oldProto == "" {
 		c.Protocol = "wg-raw"
 		log.Printf("[%s] 自动将旧版协议 %s 升级为 wg-raw", c.InterfaceName, oldProto)
+		changed = true
 	}
 	
 	// 3. 默认值设置
 	if c.IPProtocolNum == 0 {
 		c.IPProtocolNum = 233
+		changed = true
 	}
 	
 	// 4. MTU 优化 (避免分片)
@@ -88,18 +92,26 @@ func (c *Config) ParseLegacy() {
 		c.MTU = 1400
 		if oldMTU != 0 {
 			log.Printf("[%s] 优化 MTU: %d -> 1400", c.InterfaceName, oldMTU)
+			changed = true
+		}
+		if oldMTU == 0 {
+			changed = true
 		}
 	}
 	
 	if c.UDPPort == 0 && c.BasePort != 0 {
 		c.UDPPort = c.BasePort
+		changed = true
 	}
 	if c.UDPPort == 0 {
 		c.UDPPort = 23333
+		changed = true
 	}
 	if c.InterfaceName == "" {
 		c.InterfaceName = "neko0"
+		changed = true
 	}
+	return
 }
 
 func writeFull(w io.Writer, b []byte) error {
@@ -565,17 +577,58 @@ func (v *VPNInstance) writeTUN(data []byte) {
 func main() {
 	cfgPath := flag.String("c", "config.json", "Config path")
 	debug := flag.Bool("debug", false, "Debug mode")
+	migrate := flag.Bool("migrate", false, "Migrate legacy config to new format and exit")
 	flag.Parse()
 	debugMode = *debug
 
-	data, _ := os.ReadFile(*cfgPath)
-	var configs []Config
-	if err := json.Unmarshal(data, &configs); err != nil {
-		var single Config
-		if err2 := json.Unmarshal(data, &single); err2 == nil { configs = append(configs, single) }
+	data, err := os.ReadFile(*cfgPath)
+	if err != nil {
+		log.Fatalf("无法读取配置文件: %v", err)
 	}
 
-	for _, cfg := range configs { NewVPNInstance(cfg).Start() }
+	var configs []Config
+	var isArray bool
+	if err := json.Unmarshal(data, &configs); err != nil {
+		var single Config
+		if err2 := json.Unmarshal(data, &single); err2 == nil {
+			configs = append(configs, single)
+			isArray = false
+		} else {
+			log.Fatalf("配置文件格式错误: %v", err)
+		}
+	} else {
+		isArray = true
+	}
+
+	anyChanged := false
+	for i := range configs {
+		if configs[i].ParseLegacy() {
+			anyChanged = true
+		}
+	}
+
+	if anyChanged && *migrate {
+		log.Printf(">>> 正在保存优化后的配置文件...")
+		var outData []byte
+		if isArray {
+			outData, _ = json.MarshalIndent(configs, "", "  ")
+		} else {
+			outData, _ = json.MarshalIndent(configs[0], "", "  ")
+		}
+		if err := os.WriteFile(*cfgPath, outData, 0644); err != nil {
+			log.Printf("保存失败: %v", err)
+		} else {
+			log.Printf("✅ 配置文件已成功升级并优化！")
+		}
+		os.Exit(0)
+	} else if *migrate {
+		log.Printf("配置文件已经是最新版，无需迁移。")
+		os.Exit(0)
+	}
+
+	for _, cfg := range configs {
+		NewVPNInstance(cfg).Start()
+	}
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
 	<-c
