@@ -483,8 +483,6 @@ func (v *VPNInstance) ProcessPacket(encrypted []byte, srcAddr net.Addr, idx int)
 
 	if len(plaintext) < 8 { return }
 
-	// sessionID := binary.BigEndian.Uint32(plaintext[0:4])  // 不再需要
-	// seq := binary.BigEndian.Uint32(plaintext[4:8])        // 不再需要
 	ipPacket := plaintext[8:]
 
 	if debugMode {
@@ -501,8 +499,12 @@ func (v *VPNInstance) ProcessPacket(encrypted []byte, srcAddr net.Addr, idx int)
 		}
 	}
 
-	// 激进优化: 禁用 Reorderer，直接透传到 TUN (避免锁竞争和超时断流)
-	v.IfaceWrite(ipPacket)
+	// 关键修复: 必须拷贝 ipPacket！
+	// 因为 AEAD.Open 是原地解密，plaintext 指向 ReadBatch 复用的缓冲区
+	// 如果不拷贝，下次 ReadBatch 会覆盖这块内存，导致 TUN 写入损坏数据
+	pktCopy := make([]byte, len(ipPacket))
+	copy(pktCopy, ipPacket)
+	v.IfaceWrite(pktCopy)
 }
 
 func (v *VPNInstance) TUNReaderLoop() {
