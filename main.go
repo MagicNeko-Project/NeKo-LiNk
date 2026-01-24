@@ -336,10 +336,11 @@ func (v *VPNInstance) InitNetwork() {
 	if v.Cfg.Protocol == "raw" || v.Cfg.Protocol == "wg-raw" {
 		protoStr := fmt.Sprintf("ip4:%d", v.Cfg.IPProtocolNum)
 		var lAddr *net.IPAddr
-		if (v.Cfg.Mode == "server" || v.Cfg.Mode == "client") && v.Cfg.ServerBindAddr != "0.0.0.0" {
-             // Bind to specific if needed, usually 0.0.0.0 is fine for raw
-             // Go ListenIP usually takes nil/all or specifc.
-             if v.Cfg.ServerBindAddr != "" { lAddr, _ = net.ResolveIPAddr("ip", v.Cfg.ServerBindAddr) }
+
+		// Fix: Only bind to specific address if Server Mode and not 0.0.0.0
+		// Clients usually are behind NAT or have dynamic IP, so binding to nil (0.0.0.0) is safer.
+		if v.Cfg.Mode == "server" && v.Cfg.ServerBindAddr != "" && v.Cfg.ServerBindAddr != "0.0.0.0" {
+			lAddr, _ = net.ResolveIPAddr("ip", v.Cfg.ServerBindAddr)
 		}
 		c, err := net.ListenIP(protoStr, lAddr)
 		if err != nil { log.Fatal(err) }
