@@ -1,11 +1,12 @@
 {
-    "server_addr": "127.0.0.1",
-    "protocol": "udp",
-    "ip_protocol_num": 250,
-    "base_port": 9000,
-    "port_count": 4,
-    "key": "change-this-to-a-secure-key-32-chars-exact!",
-    "local_addr": "10.0.0.1/24",
-    "mode": "server",
-    "mtu": 1400
+  "interface_name": "neko0",
+  "mode": "server",
+  "local_addr": "10.0.0.1/24",
+  "key": "change-this-to-a-secure-key-32-chars-exact!",
+  "protocol": "wg-raw",
+  "mtu": 1400,
+  "listen_addr": "127.0.0.1",
+  "listen_port": 9000,
+  "wg_port": 51820,
+  "ip_protocol_num": 250
 }

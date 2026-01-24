@@ -50,19 +50,19 @@ type Config struct {
 	MTU           int    `json:"mtu"`
 
 	// --- Optimized Naming ---
-	ListenAddr string `json:"listen_addr"`
-	ListenPort int    `json:"listen_port"`
-	PeerAddr   string `json:"peer_addr"`
-	PeerPort   int    `json:"peer_port"`
+	ListenAddr string `json:"listen_addr,omitempty"`
+	ListenPort int    `json:"listen_port,omitempty"`
+	PeerAddr   string `json:"peer_addr,omitempty"`
+	PeerPort   int    `json:"peer_port,omitempty"`
 
 	// --- Internal WG Control ---
-	WGPort int `json:"wg_port"`
+	WGPort int `json:"wg_port,omitempty"`
 
 	// --- Transport Options ---
-	IPProtocolNum int  `json:"ip_protocol_num"`
-	UseNATT       bool `json:"use_nat_t"`
-	UDPPort       int  `json:"udp_port"`
-	Debug         bool `json:"debug"`
+	IPProtocolNum int  `json:"ip_protocol_num,omitempty"`
+	UseNATT       bool `json:"use_nat_t,omitempty"`
+	UDPPort       int  `json:"udp_port,omitempty"`
+	Debug         bool `json:"debug,omitempty"`
 
 	// --- Legacy Fields (Hidden but mapped) ---
 	LegacyServerAddr string `json:"server_addr,omitempty"`
@@ -77,18 +77,25 @@ func (c *Config) ParseLegacy() (changed bool) {
 		c.ListenAddr = c.LegacyServerAddr
 		changed = true
 	}
+	c.LegacyServerAddr = "" // Clear always to clean up JSON
+
 	if c.ListenPort == 0 && c.LegacyBasePort != 0 {
 		c.ListenPort = c.LegacyBasePort
 		changed = true
 	}
+	c.LegacyBasePort = 0 // Clear always
+
 	if c.PeerAddr == "" && c.LegacyServerIP != "" {
 		c.PeerAddr = c.LegacyServerIP
 		changed = true
 	}
+	c.LegacyServerIP = "" // Clear always
+
 	if c.PeerPort == 0 && c.LegacyServerPort != 0 {
 		c.PeerPort = c.LegacyServerPort
 		changed = true
 	}
+	c.LegacyServerPort = 0 // Clear always
 
 	// 2. 基本字段兼容 (兼容之前的老代码可能还在直接用 RemoteIP 等逻辑)
 	// (如果有其它代码引用了旧字段，可以在这里同步，但建议全部改为引用新字段)
@@ -124,6 +131,7 @@ func (c *Config) ParseLegacy() (changed bool) {
 		c.ListenPort = c.UDPPort
 		changed = true
 	}
+	c.UDPPort = 0 // Clear always
 	if c.ListenPort == 0 {
 		c.ListenPort = 23333
 		changed = true
@@ -625,15 +633,12 @@ func main() {
 		isArray = true
 	}
 
-	anyChanged := false
 	for i := range configs {
-		if configs[i].ParseLegacy() {
-			anyChanged = true
-		}
+		configs[i].ParseLegacy()
 	}
 
-	if anyChanged && *migrate {
-		log.Printf(">>> 正在保存优化后的配置文件...")
+	if *migrate {
+		log.Printf(">>> 正在优化并清理配置文件布局...")
 		var outData []byte
 		if isArray {
 			outData, _ = json.MarshalIndent(configs, "", "  ")
@@ -643,11 +648,8 @@ func main() {
 		if err := os.WriteFile(*cfgPath, outData, 0644); err != nil {
 			log.Printf("保存失败: %v", err)
 		} else {
-			log.Printf("✅ 配置文件已成功升级并优化！")
+			log.Printf("✅ 配置文件已精简并保存！")
 		}
-		os.Exit(0)
-	} else if *migrate {
-		log.Printf("配置文件已经是最新版，无需迁移。")
 		os.Exit(0)
 	}
 
