@@ -397,8 +397,9 @@ func (v *VPNInstance) Start() {
 		for i := 0; i < v.numWorkers; i++ {
 			go v.TUNReaderLoopRaw(i)
 		}
-		for i := 0; i < len(v.ConnRaw); i++ {
-			go v.rawReaderLoop(i)
+		// 所有的 reader goroutine 现在共享同一个底层连接，以避免 DUP
+		for i := 0; i < v.numWorkers; i++ {
+			go v.rawReaderLoop(0)
 		}
 	}
 }
@@ -498,10 +499,7 @@ func (v *VPNInstance) InitNetwork() {
 // v6.0: Raw 模式完整保留 (Expert Mode)
 
 func (v *VPNInstance) initRaw() {
-	numConns := 4
-	if runtime.NumCPU() < 4 {
-		numConns = runtime.NumCPU()
-	}
+	numConns := 1 // 核心：只打开一个 Raw 句柄以避免 DUP
 
 	// 检测 IP 类型
 	testIP := v.Cfg.PeerAddr
