@@ -2,6 +2,7 @@ package main
 
 import (
 	"container/heap"
+	"context"
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
@@ -130,7 +131,6 @@ type VPNInstance struct {
 type PeerRoute struct {
 	Addr     net.Addr
 	Conn     net.Conn // TCP connection for this peer (if TCP mode)
-	LocalIdx int
 }
 
 func (v *VPNInstance) logDebug(format string, args ...interface{}) {
@@ -307,38 +307,58 @@ func (v *VPNInstance) InitNetwork() {
 	}
 
 	if v.Cfg.Protocol == "udp" {
-		v.ConnUDP = make([]*net.UDPConn, v.Cfg.PortCount)
+		const SO_REUSEPORT = 0x0F // Linux constant
+
 		v.ConnBatch = make([]*ipv4.PacketConn, v.Cfg.PortCount)
-		v.ClientRemoteUDP = make([]*net.UDPAddr, v.Cfg.PortCount)
+		// We don't need ClientRemoteUDP dict anymore if we use single remote
+		
+		baseAddrStr := fmt.Sprintf("%s:%d", v.Cfg.ServerBindAddr, v.Cfg.BasePort)
+		if v.Cfg.Mode == "client" {
+			baseAddrStr = ":0"
+		}
+
 		for i := 0; i < v.Cfg.PortCount; i++ {
-			var bindAddrStr string
-			if v.Cfg.Mode == "server" {
-				bindAddrStr = fmt.Sprintf("%s:%d", v.Cfg.ServerBindAddr, v.Cfg.BasePort+i)
-			} else {
-				bindAddrStr = ":0"
+			lc := net.ListenConfig{
+				Control: func(network, address string, c syscall.RawConn) error {
+					var opErr error
+					err := c.Control(func(fd uintptr) {
+						opErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, SO_REUSEPORT, 1)
+					})
+					if err != nil { return err }
+					return opErr
+				},
 			}
-			lAddr, _ := net.ResolveUDPAddr("udp", bindAddrStr)
-			c, err := net.ListenUDP("udp", lAddr)
-			if err != nil { log.Fatal(err) }
-			c.SetReadBuffer(16 << 20)
-			c.SetWriteBuffer(16 << 20)
-			v.ConnUDP[i] = c
-			v.ConnBatch[i] = ipv4.NewPacketConn(c)
+			
+			pc, err := lc.ListenPacket(context.Background(), "udp", baseAddrStr)
+			if err != nil {
+				log.Fatalf("ListenUDP (ReusePort) Fail: %v", err)
+			}
+			
+			// Cast to *net.UDPConn to set buffers
+			if udpConn, ok := pc.(*net.UDPConn); ok {
+				udpConn.SetReadBuffer(16 << 20)
+				udpConn.SetWriteBuffer(16 << 20)
+			}
+
+			v.ConnBatch[i] = ipv4.NewPacketConn(pc)
 
 			// Optimize IPv6 Priority (DSCP: EF / 46 -> 0xB8)
-			// This simulates VoLTE voice traffic for lower latency on mobile networks.
-			p6 := ipv6.NewPacketConn(c)
+			p6 := ipv6.NewPacketConn(pc)
 			if err := p6.SetTrafficClass(0xB8); err != nil {
 				v.logDebug("IPv6 TrafficClass Warn: %v", err)
 			}
 
-			if v.Cfg.Mode == "client" {
-				rAddrStr := fmt.Sprintf("%s:%d", v.Cfg.RemoteIP, v.Cfg.RemotePort+i)
-				rAddr, _ := net.ResolveUDPAddr("udp", rAddrStr)
-				v.ClientRemoteUDP[i] = rAddr
-			}
 			go v.UDPListenerLoop(i, v.ConnBatch[i])
 		}
+		
+		if v.Cfg.Mode == "client" {
+			rAddrStr := fmt.Sprintf("%s:%d", v.Cfg.RemoteIP, v.Cfg.RemotePort)
+			// Reset ClientRemoteIP/UDP to just one target
+			rAddr, _ := net.ResolveUDPAddr("udp", rAddrStr)
+			v.ClientRemoteUDP = make([]*net.UDPAddr, 1) // Just slot 0 used mostly, or all use same
+			v.ClientRemoteUDP[0] = rAddr
+		}
+		
 		return
 	}
 
@@ -410,9 +430,10 @@ func (v *VPNInstance) UDPListenerLoop(idx int, pc *ipv4.PacketConn) {
 
 		for i := 0; i < nMsgs; i++ {
 			msg := &msgs[i]
-			// 修正：必须要深度拷贝地址，防止并发覆盖
+			// We can copy addr or just use it if we don't store ref? 
+			// PeerRoute stores it, so yes copy.
 			srcAddr := v.copyAddr(msg.Addr)
-			v.ProcessPacket((*bufPtrs[i])[:msg.N], srcAddr, idx, nil)
+			v.ProcessPacket((*bufPtrs[i])[:msg.N], srcAddr, nil)
 		}
 	}
 }
@@ -506,7 +527,7 @@ func (v *VPNInstance) RawListenerLoop(c *net.IPConn) {
 			bufPool.Put(bufPtr)
 			continue
 		}
-		v.ProcessPacket(buf[4:n], src, 0, nil)
+		v.ProcessPacket(buf[4:n], src, nil)
 		bufPool.Put(bufPtr)
 	}
 }
@@ -561,12 +582,12 @@ func (v *VPNInstance) TCPHandler(c net.Conn) {
 			bufPool.Put(bufPtr)
 			return
 		}
-		v.ProcessPacket(body, v.copyAddr(c.RemoteAddr()), 0, c)
+		v.ProcessPacket(body, v.copyAddr(c.RemoteAddr()), c)
 		bufPool.Put(bufPtr)
 	}
 }
 
-func (v *VPNInstance) ProcessPacket(encrypted []byte, srcAddr net.Addr, idx int, conn net.Conn) {
+func (v *VPNInstance) ProcessPacket(encrypted []byte, srcAddr net.Addr, conn net.Conn) {
 	if len(encrypted) < NonceSize+Overhead { return }
 	nonce := encrypted[:NonceSize]
 	ciphertext := encrypted[NonceSize:]
@@ -592,7 +613,7 @@ func (v *VPNInstance) ProcessPacket(encrypted []byte, srcAddr net.Addr, idx int,
 		if version == 4 {
 			srcIP := binary.BigEndian.Uint32(ipPacket[12:16])
 			if srcIP != 0 {
-				v.PeerMap.Store(srcIP, PeerRoute{Addr: srcAddr, Conn: conn, LocalIdx: idx})
+				v.PeerMap.Store(srcIP, PeerRoute{Addr: srcAddr, Conn: conn})
 			}
 		}
 	}
@@ -634,7 +655,7 @@ func (v *VPNInstance) handleOutgoingPacket(ipPacket []byte) {
 	var destConn net.Conn
 	var isBroadcast bool
 	seq := atomic.AddUint32(&v.TxSeq, 1) - 1
-	idx := int(uint64(seq) % uint64(v.Cfg.PortCount))
+	// idx := int(uint64(seq) % uint64(v.Cfg.PortCount)) // Removed
 
 	// Determine Routing
 	if v.Cfg.Mode == "server" {
@@ -652,7 +673,6 @@ func (v *VPNInstance) handleOutgoingPacket(ipPacket []byte) {
 						route := val.(PeerRoute)
 						destAddr = route.Addr
 						destConn = route.Conn
-						idx = route.LocalIdx
 					} else if debugMode {
 						v.logDebug("ROUTING: No peer for target, dropping...")
 					}
@@ -693,27 +713,23 @@ func (v *VPNInstance) handleOutgoingPacket(ipPacket []byte) {
 	}
 
 	if isBroadcast && v.Cfg.Mode == "server" {
-		// Broadcast to all active peers (Deduplicated)
-		sent := make(map[string]bool)
+		// Broadcast to all active peers
+		// Broadcast to all active peers (Simple)
 		v.PeerMap.Range(func(key, value interface{}) bool {
 			route := value.(PeerRoute)
-			rAddr := route.Addr.String()
-			if !sent[rAddr] {
-				v.SendPacket(dst, route.LocalIdx, route.Addr, route.Conn)
-				sent[rAddr] = true
-			}
+			v.SendPacket(dst, route.Addr, route.Conn)
 			return true
 		})
 	} else {
 		// Unicast / Client Send
-		v.SendPacket(dst, idx, destAddr, destConn)
+		v.SendPacket(dst, destAddr, destConn)
 	}
 
 	bufPool.Put(ptPtr)
 	bufPool.Put(dstPtr)
 }
 
-func (v *VPNInstance) SendPacket(data []byte, idx int, destAddr net.Addr, conn net.Conn) {
+func (v *VPNInstance) SendPacket(data []byte, destAddr net.Addr, conn net.Conn) {
 	if v.Cfg.Protocol == "tcp" {
 		var c net.Conn
 		if conn != nil {
@@ -733,10 +749,14 @@ func (v *VPNInstance) SendPacket(data []byte, idx int, destAddr net.Addr, conn n
 	}
 
 	if v.Cfg.Protocol == "udp" {
+		// Use atomic counter for round-robin load balancing across threads
+		seq := atomic.AddUint32(&v.TxSeq, 1) // Reuse TxSeq or new counter? TxSeq is fine.
+		idx := int(seq % uint32(v.Cfg.PortCount))
 		pc := v.ConnBatch[idx]
+		
 		var addr net.Addr
 		if v.Cfg.Mode == "client" {
-			addr = v.ClientRemoteUDP[idx]
+			addr = v.ClientRemoteUDP[0]
 		} else {
 			if destAddr == nil { return }
 			addr = destAddr
@@ -747,7 +767,7 @@ func (v *VPNInstance) SendPacket(data []byte, idx int, destAddr net.Addr, conn n
 
 	if v.Cfg.Protocol == "raw" {
 		payload := make([]byte, 4+len(data))
-		binary.BigEndian.PutUint32(payload[0:4], uint32(idx))
+		binary.BigEndian.PutUint32(payload[0:4], 0) // idx is always 0 now
 		copy(payload[4:], data)
 		var addr *net.IPAddr
 		if v.Cfg.Mode == "client" {
