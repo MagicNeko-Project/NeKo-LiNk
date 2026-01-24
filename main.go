@@ -27,7 +27,7 @@ import (
 	"golang.org/x/crypto/curve25519"
 	"net/netip"
 	"crypto/rand"
-
+	"vpn/xdp"
 )
 
 // --- 全局分发 ---
@@ -219,7 +219,8 @@ type VPNInstance struct {
 
 	// --- Raw 模式 (Legacy / High Perf) ---
 	// 保留原有逻辑不动
-	ConnRaw        []*net.IPConn
+	ConnRaw        []net.PacketConn // 通用接口以支持 IPConn 和 UDPConn (eBPF)
+	ebpfRawEngine  *xdp.ShadowXEngine
 	ClientRemoteIP *net.IPAddr
 	ServerPeerIP   atomic.Pointer[net.IPAddr]
 	rawSendIdx     uint32
@@ -536,19 +537,44 @@ func (v *VPNInstance) initRaw() {
 		log.Printf("[RAW] IPv6 自定义协议模式 (Proto: %d)", v.Cfg.IPProtocolNum)
 	}
 
-	v.ConnRaw = make([]*net.IPConn, numConns)
+	if v.Cfg.UseEBPF {
+		mode := uint32(1) // Mode 1: Raw-IP
+		if v.Cfg.UseTCP { mode = 2 } // Mode 2: Fake-TCP (if ever used in Raw mode)
+
+		engine, err := xdp.NewShadowXEngine(xdp.ShadowXConfig{
+			InterfaceName: v.Cfg.EBPFDevice,
+			Mode:          mode,
+			LocalPort:     uint16(v.Cfg.ListenPort),
+			RawProto:      uint8(v.Cfg.IPProtocolNum),
+		})
+		if err != nil {
+			log.Printf("[EBPF] 核心加载失败: %v. 回退到纯用户态 Raw Socket.", err)
+			v.Cfg.UseEBPF = false
+		} else {
+			v.ebpfRawEngine = engine
+		}
+	}
+
+	v.ConnRaw = make([]net.PacketConn, numConns)
 	for i := 0; i < numConns; i++ {
 		var lAddr *net.IPAddr
 		if v.Cfg.Mode == "server" && v.Cfg.ListenAddr != "0.0.0.0" && v.Cfg.ListenAddr != "[::]" {
 			lAddr, _ = net.ResolveIPAddr("ip", v.Cfg.ListenAddr)
 		}
-		conn, err := net.ListenIP(protoStr, lAddr)
-		if err != nil {
-			log.Fatalf("Raw 监听失败: %v", err)
+
+		if v.Cfg.UseEBPF {
+			addr := &net.UDPAddr{IP: net.IPv4zero, Port: v.Cfg.ListenPort}
+			if v.IsIPv6 { addr.IP = net.IPv6zero }
+			conn, err := net.ListenUDP("udp", addr)
+			if err != nil { log.Fatalf("UDP 监听失败: %v", err) }
+			conn.SetReadBuffer(25 << 20); conn.SetWriteBuffer(25 << 20)
+			v.ConnRaw[i] = conn
+		} else {
+			conn, err := net.ListenIP(protoStr, lAddr)
+			if err != nil { log.Fatalf("Raw 监听失败: %v", err) }
+			conn.SetReadBuffer(25 << 20); conn.SetWriteBuffer(25 << 20)
+			v.ConnRaw[i] = conn
 		}
-		conn.SetReadBuffer(32 << 20)
-		conn.SetWriteBuffer(32 << 20)
-		v.ConnRaw[i] = conn
 	}
 
 	if v.Cfg.Mode == "client" {
@@ -561,10 +587,22 @@ func (v *VPNInstance) rawReaderLoop(idx int) {
 	conn := v.ConnRaw[idx]
 	buf := make([]byte, BufSize)
 	for {
-		n, addr, err := conn.ReadFromIP(buf)
+		n, addr, err := conn.ReadFrom(buf)
 		if err != nil { continue }
 		if n < NonceSize+Overhead { continue }
-		if v.Cfg.Mode == "server" { v.ServerPeerIP.Store(addr) }
+		
+		// 转换地址为 IPAddr 以便统一处理
+		var ipAddr *net.IPAddr
+		switch a := addr.(type) {
+		case *net.IPAddr:
+			ipAddr = a
+		case *net.UDPAddr:
+			ipAddr = &net.IPAddr{IP: a.IP, Zone: a.Zone}
+		}
+
+		if v.Cfg.Mode == "server" && ipAddr != nil {
+			v.ServerPeerIP.Store(ipAddr)
+		}
 		v.handleIncomingPacket(buf[:n])
 	}
 }
@@ -609,11 +647,29 @@ func (v *VPNInstance) sendRawOptimized(plain []byte, aead cipher.AEAD) {
 	dstPtr := bufPool.Get().(*[]byte)
 	encrypted := v.encryptInto(plain, aead, *dstPtr)
 	if encrypted != nil {
-		addr := v.ClientRemoteIP
-		if v.Cfg.Mode == "server" { addr = v.ServerPeerIP.Load() }
-		if addr != nil {
+		var target net.Addr
+		ip := v.ClientRemoteIP
+		if v.Cfg.Mode == "server" { ip = v.ServerPeerIP.Load() }
+		
+		if ip != nil {
 			idx := atomic.AddUint32(&v.rawSendIdx, 1) % uint32(len(v.ConnRaw))
-			v.ConnRaw[idx].WriteToIP(encrypted, addr)
+			conn := v.ConnRaw[idx]
+
+			// 根据连接类型构造地址
+			if v.Cfg.UseEBPF {
+				target = &net.UDPAddr{IP: ip.IP, Port: v.Cfg.PeerPort}
+				if v.Cfg.Mode == "server" {
+					// 服务端回包给客户端，PeerPort 应该是客户端的监听端口
+					// 但由于 eBPF 模式下我们使用对称端口，这里也用 ListenPort 或从收包地址里学习
+					// 为了简单，我们暂定回物理对端的 PeerPort
+				}
+			} else {
+				target = ip
+			}
+
+			if target != nil {
+				conn.WriteTo(encrypted, target)
+			}
 		}
 	}
 	bufPool.Put(dstPtr)
