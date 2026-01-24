@@ -287,7 +287,7 @@ func (v *VPNInstance) Start() {
 		debugMode = true
 	}
 
-	log.Printf("[%s] NekoLink v5.26 (Stable Pipeline 工业版) 启动中 - 核心: %d, MTU: %d",
+	log.Printf("[%s] NekoLink v5.28 (Stable Pipeline 修正版) 启动中 - 核心: %d, MTU: %d",
 		v.Cfg.InterfaceName, v.numWorkers, v.Cfg.MTU)
 
 	v.InitTUN()
@@ -347,20 +347,23 @@ func (v *VPNInstance) udpReaderLoopV4_Pipeline() {
 			nLen := msgs[i].N
 			if nLen < NonceSize+Overhead { continue }
 			
-			// Copy Encrypted Data
-			enc := make([]byte, nLen)
-			copy(enc, msgs[i].Buffers[0][:nLen])
+			// Extract Nonce & Ciphertext
+			// struct layout: [Nonce][Ciphertext][Tag]
+			// aead.Open expects: nonce, ciphertext(with tag)
+			
+			raw := msgs[i].Buffers[0][:nLen]
+			
+			nonce := make([]byte, NonceSize)
+			copy(nonce, raw[:NonceSize])
+			
+			ciphertext := make([]byte, nLen-NonceSize)
+			copy(ciphertext, raw[NonceSize:])
 			
 			v.jobsChan <- Job{
 				ID:    jobID,
-				Enc:   enc,
+				Enc:   ciphertext,
+				Nonce: nonce,
 				Type:  1, // Decrypt
-				// Addr 在解密后通常不需要，但 Result 可能需要它来路由？
-				// 对于 Decrypt (Net->TUN)，Addr 是 Source Addr。TUN Write 不需要 Addr。
-				// 但为了保持接口一致，或者如果有需要的话。这里暂不设 Addr。
-				// Wait, Worker Loop 中：
-				// res.Addr = job.Addr
-				// 如果 TUN Write 不需要 Addr，那没关系。
 			}
 			jobID++
 		}
@@ -385,10 +388,17 @@ func (v *VPNInstance) udpReaderLoopV6_Pipeline() {
 		for i := 0; i < n; i++ {
 			nLen := msgs[i].N
 			if nLen < NonceSize+Overhead { continue }
-			enc := make([]byte, nLen)
-			copy(enc, msgs[i].Buffers[0][:nLen])
+			
+			raw := msgs[i].Buffers[0][:nLen]
+			
+			nonce := make([]byte, NonceSize)
+			copy(nonce, raw[:NonceSize])
+			
+			ciphertext := make([]byte, nLen-NonceSize)
+			copy(ciphertext, raw[NonceSize:])
+			
 			v.jobsChan <- Job{
-				ID: jobID, Enc: enc, Type: 1,
+				ID: jobID, Enc: ciphertext, Nonce: nonce, Type: 1,
 			}
 			jobID++
 		}
