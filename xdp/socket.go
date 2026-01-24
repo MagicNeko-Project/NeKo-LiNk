@@ -109,25 +109,26 @@ func GetShadowXEngine(ifaceName string) (*ShadowXEngine, error) {
 		log.Printf("[eBPF] Modern TCX attached on %s", ifaceName)
 	} else {
 		// 2. Fallback to Legacy TC (Command line)
-		log.Printf("[eBPF] TCX not supported (%v), falling back to Legacy TC (clsact)...", errE)
+		log.Printf("[eBPF] TCX not supported, falling back to Legacy TC (clsact)...")
 		e.isLegacy = true
 		
-		// Setup clsact qdisc
+		// Setup clsact qdisc (ignore error if exists)
 		exec.Command("tc", "qdisc", "add", "dev", ifaceName, "clsact").Run()
 		
-		// Use manual pin or direct attachment? 
-		// Actually, even in legacy kernels, we can use link.RawAttachProgram for CLSACT
-		// But it's easier to use the library's internal support if we can find it.
-		// For simplicity and 100% success on PVE/Legacy, we use 'tc' command.
-		// We'll need to pin the programs to the filesystem first.
-		
 		pinPath := fmt.Sprintf("/sys/fs/bpf/neko_%s", ifaceName)
+		exec.Command("rm", "-rf", pinPath).Run()
 		exec.Command("mkdir", "-p", pinPath).Run()
-		objs.TcEgress.Pin(pinPath + "/egress")
-		objs.TcIngress.Pin(pinPath + "/ingress")
 		
-		exec.Command("tc", "filter", "replace", "dev", ifaceName, "egress", "bpf", "da", "obj", pinPath+"/egress", "sec", "tc/egress").Run()
-		exec.Command("tc", "filter", "replace", "dev", ifaceName, "ingress", "bpf", "da", "obj", pinPath+"/ingress", "sec", "tc/ingress").Run()
+		if err := objs.TcEgress.Pin(pinPath + "/egp"); err != nil {
+			log.Printf("[eBPF] Failed to pin egress: %v", err)
+		}
+		if err := objs.TcIngress.Pin(pinPath + "/igp"); err != nil {
+			log.Printf("[eBPF] Failed to pin ingress: %v", err)
+		}
+		
+		// Use 'pinned' keyword instead of 'obj' for pinned programs
+		exec.Command("tc", "filter", "replace", "dev", ifaceName, "egress", "bpf", "da", "pinned", pinPath+"/egp").Run()
+		exec.Command("tc", "filter", "replace", "dev", ifaceName, "ingress", "bpf", "da", "pinned", pinPath+"/igp").Run()
 	}
 
 	engineRegistry[ifaceName] = e
