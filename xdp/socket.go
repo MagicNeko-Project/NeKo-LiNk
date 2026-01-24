@@ -55,12 +55,22 @@ func NewShadowXEngine(cfg ShadowXConfig) (*ShadowXEngine, error) {
 	}
 
 	// 1. Attach XDP (Ingress)
+	// Try Native mode first, fallback to Generic (SKB) mode if driver doesn't support it
 	xl, err := link.AttachXDP(link.XDPOptions{
 		Program:   objs.XdpIngress,
 		Interface: iface.Index,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to attach XDP: %v", err)
+		log.Printf("[eBPF] Native XDP failed (%v), attempting Generic (SKB) mode...", err)
+		xl, err = link.AttachXDP(link.XDPOptions{
+			Program:   objs.XdpIngress,
+			Interface: iface.Index,
+			Flags:     link.XDPGenericMode,
+		})
+	}
+	
+	if err != nil {
+		return nil, fmt.Errorf("failed to attach XDP (even in Generic mode): %v", err)
 	}
 
 	// 2. Attach TC (Egress)
