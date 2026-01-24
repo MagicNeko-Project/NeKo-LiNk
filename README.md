@@ -50,16 +50,19 @@ go build -o vpn main.go
 
 ```json
 {
-  "server_ip": "1.2.3.4",          // 服务端 IP (Client 模式)
-  "protocol": "wg-raw",            // "wg-raw" (推荐) 或 "raw"
-  "ip_protocol_num": 233,          // 自定义 IP 协议号 (推荐 > 200 或 6/17 伪装)
-  "use_nat_t": true,               // 是否开启 UDP 封装 (NAT 穿透模式)
-  "udp_port": 23333,               // NAT-T 模式使用的 UDP 端口
-  "key": "your-password-here",     // 共享密码 (自动协商 WireGuard 秘钥)
-  "local_addr": "10.0.0.1/24",     // 本地虚拟网卡 IP
-  "mode": "server",                // "server" 或 "client"
-  "interface_name": "neko0",       // 网卡名称
-  "mtu": 1400                      // 推荐 1400
+  "peer_addr": "1.2.3.4",           // 远端地址 (Client 模式)
+  "peer_port": 23333,               // 远端端口 (Client 模式)
+  "listen_addr": "0.0.0.0",         // 监听地址 (Server 模式)
+  "listen_port": 23333,             // 监听端口 (Server 模式)
+  "protocol": "wg-raw",             // "wg-raw" (推荐) 或 "raw"
+  "wg_port": 51820,                 // WireGuard 内部端口 (选填)
+  "ip_protocol_num": 233,           // 自定义 IP 协议号
+  "use_nat_t": true,                // 是否开启 UDP 封装
+  "key": "your-password-here",      // 共享密码
+  "local_addr": "10.0.0.1/24",      // 虚拟网卡 IP
+  "mode": "server",                 // "server" 或 "client"
+  "interface_name": "neko0",        // 网卡名称
+  "mtu": 1400                       // MTU
 }
 ```
 

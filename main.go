@@ -49,28 +49,49 @@ type Config struct {
 	Protocol      string `json:"protocol"`
 	MTU           int    `json:"mtu"`
 
-	ServerBindAddr string `json:"server_addr"`
-	BasePort       int    `json:"base_port"`
+	// --- Optimized Naming ---
+	ListenAddr string `json:"listen_addr"`
+	ListenPort int    `json:"listen_port"`
+	PeerAddr   string `json:"peer_addr"`
+	PeerPort   int    `json:"peer_port"`
 
-	RemoteIP   string `json:"server_ip"`
-	RemotePort int    `json:"server_port"`
+	// --- Internal WG Control ---
+	WGPort int `json:"wg_port"`
 
+	// --- Transport Options ---
 	IPProtocolNum int  `json:"ip_protocol_num"`
 	UseNATT       bool `json:"use_nat_t"`
 	UDPPort       int  `json:"udp_port"`
 	Debug         bool `json:"debug"`
+
+	// --- Legacy Fields (Hidden but mapped) ---
+	LegacyServerAddr string `json:"server_addr,omitempty"`
+	LegacyBasePort   int    `json:"base_port,omitempty"`
+	LegacyServerIP   string `json:"server_ip,omitempty"`
+	LegacyServerPort int    `json:"server_port,omitempty"`
 }
 
 func (c *Config) ParseLegacy() (changed bool) {
-	// 1. 基本字段兼容
-	if c.Mode == "client" && c.RemoteIP == "" && c.ServerBindAddr != "" {
-		c.RemoteIP = c.ServerBindAddr
+	// 1. 命名字段搬迁 (旧 -> 新)
+	if c.ListenAddr == "" && c.LegacyServerAddr != "" {
+		c.ListenAddr = c.LegacyServerAddr
 		changed = true
 	}
-	if c.Mode == "client" && c.RemotePort == 0 && c.BasePort != 0 {
-		c.RemotePort = c.BasePort
+	if c.ListenPort == 0 && c.LegacyBasePort != 0 {
+		c.ListenPort = c.LegacyBasePort
 		changed = true
 	}
+	if c.PeerAddr == "" && c.LegacyServerIP != "" {
+		c.PeerAddr = c.LegacyServerIP
+		changed = true
+	}
+	if c.PeerPort == 0 && c.LegacyServerPort != 0 {
+		c.PeerPort = c.LegacyServerPort
+		changed = true
+	}
+
+	// 2. 基本字段兼容 (兼容之前的老代码可能还在直接用 RemoteIP 等逻辑)
+	// (如果有其它代码引用了旧字段，可以在这里同步，但建议全部改为引用新字段)
 	
 	// 2. 协议迁移 (UDP/TCP/QUIC -> wg-raw)
 	oldProto := strings.ToLower(c.Protocol)
@@ -99,12 +120,16 @@ func (c *Config) ParseLegacy() (changed bool) {
 		}
 	}
 	
-	if c.UDPPort == 0 && c.BasePort != 0 {
-		c.UDPPort = c.BasePort
+	if c.ListenPort == 0 && c.UDPPort != 0 {
+		c.ListenPort = c.UDPPort
 		changed = true
 	}
-	if c.UDPPort == 0 {
-		c.UDPPort = 23333
+	if c.ListenPort == 0 {
+		c.ListenPort = 23333
+		changed = true
+	}
+	if c.WGPort == 0 {
+		c.WGPort = 51820 // Default internal WG port
 		changed = true
 	}
 	if c.InterfaceName == "" {
@@ -218,11 +243,11 @@ func generateWGKey() ([]byte, []byte) {
 
 func (v *VPNInstance) startWireGuardRaw() {
 	// 1. Create Bind
-	bind := NewRawBind(v.Cfg.IPProtocolNum, v.Cfg.UseNATT, v.Cfg.UDPPort)
+	bind := NewRawBind(v.Cfg.IPProtocolNum, v.Cfg.UseNATT, v.Cfg.ListenPort)
 	
 	// 2. Client Mode: Set Remote
 	if v.Cfg.Mode == "client" {
-		addr, _ := netip.ParseAddr(v.Cfg.RemoteIP)
+		addr, _ := netip.ParseAddr(v.Cfg.PeerAddr)
 		bind.SetClientRemote(addr)
 	}
 	
@@ -277,7 +302,7 @@ func (v *VPNInstance) startWireGuardRaw() {
 	})
 	
 	// 6. Init Device Config
-	initConf := fmt.Sprintf("private_key=%x\nlisten_port=%d\nreplace_peers=true\n", priv, 0)
+	initConf := fmt.Sprintf("private_key=%x\nlisten_port=%d\nreplace_peers=true\n", priv, v.Cfg.WGPort)
 	dev.IpcSet(initConf)
 	dev.Up()
 	log.Printf("[WG-RAW] Device %s up using IP Protocol %d", v.Cfg.InterfaceName, v.Cfg.IPProtocolNum)
@@ -287,7 +312,7 @@ func (v *VPNInstance) startWireGuardRaw() {
 	
 	// 8. Client: Initiate Handshake
 	if v.Cfg.Mode == "client" {
-		addr, _ := netip.ParseAddr(v.Cfg.RemoteIP)
+		addr, _ := netip.ParseAddr(v.Cfg.PeerAddr)
 		go func() {
 			for {
 				v.sendHandshake(bind, addr, pub)
@@ -431,13 +456,13 @@ func (v *VPNInstance) setupSecurityRules(iface string) {
 
 	if v.Cfg.Protocol == "raw" || v.Cfg.Protocol == "wg-raw" {
 		if v.Cfg.Protocol == "wg-raw" && v.Cfg.UseNATT {
-			runCmd("nft", "add", "rule", "inet", tableName, "input", "udp", "dport", fmt.Sprintf("%d", v.Cfg.UDPPort), "accept")
+			runCmd("nft", "add", "rule", "inet", tableName, "input", "udp", "dport", fmt.Sprintf("%d", v.Cfg.ListenPort), "accept")
 		} else {
 			protoNum := v.Cfg.IPProtocolNum
 			runCmd("nft", "add", "rule", "inet", tableName, "input", "meta", "l4proto", fmt.Sprintf("%d", protoNum), "accept")
 		}
 	} else {
-		port := v.Cfg.BasePort
+		port := v.Cfg.ListenPort
 		runCmd("nft", "add", "rule", "inet", tableName, "input", "udp", "dport", fmt.Sprintf("%d", port), "accept")
 	}
 
@@ -465,9 +490,9 @@ func (v *VPNInstance) initRaw() {
 	}
 
 	// 检测 IP 类型
-	testIP := v.Cfg.RemoteIP
+	testIP := v.Cfg.PeerAddr
 	if v.Cfg.Mode == "server" {
-		testIP = v.Cfg.ServerBindAddr
+		testIP = v.Cfg.ListenAddr
 	}
 	
 	protoStr := fmt.Sprintf("ip4:%d", v.Cfg.IPProtocolNum)
@@ -480,8 +505,8 @@ func (v *VPNInstance) initRaw() {
 	v.ConnRaw = make([]*net.IPConn, numConns)
 	for i := 0; i < numConns; i++ {
 		var lAddr *net.IPAddr
-		if v.Cfg.Mode == "server" && v.Cfg.ServerBindAddr != "0.0.0.0" && v.Cfg.ServerBindAddr != "[::]" {
-			lAddr, _ = net.ResolveIPAddr("ip", v.Cfg.ServerBindAddr)
+		if v.Cfg.Mode == "server" && v.Cfg.ListenAddr != "0.0.0.0" && v.Cfg.ListenAddr != "[::]" {
+			lAddr, _ = net.ResolveIPAddr("ip", v.Cfg.ListenAddr)
 		}
 		conn, err := net.ListenIP(protoStr, lAddr)
 		if err != nil {
@@ -493,7 +518,7 @@ func (v *VPNInstance) initRaw() {
 	}
 
 	if v.Cfg.Mode == "client" {
-		v.ClientRemoteIP, _ = net.ResolveIPAddr("ip", v.Cfg.RemoteIP)
+		v.ClientRemoteIP, _ = net.ResolveIPAddr("ip", v.Cfg.PeerAddr)
 	}
 }
 

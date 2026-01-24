@@ -11,12 +11,14 @@ if [ ! -f "$CONFIG_FILE" ]; then
   {
     "mode": "client",
     "protocol": "wg-raw",
-    "server_ip": "1.2.3.4",
+    "peer_addr": "1.2.3.4",
+    "peer_port": 23333,
     "ip_protocol_num": 233,
     "local_addr": "10.0.0.2/24",
     "key": "PASSWORD_HERE",
     "interface_name": "neko0",
-    "mtu": 1400
+    "mtu": 1400,
+    "wg_port": 51820
   }
 ]
 EOF
