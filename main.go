@@ -2,7 +2,6 @@ package main
 
 import (
 	"container/heap"
-	"context"
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
@@ -109,8 +108,7 @@ type VPNInstance struct {
 	TunDev tun.Device
 	AEAD   cipher.AEAD
 
-	ConnUDP     []*net.UDPConn
-	ConnBatch   []*ipv4.PacketConn
+	Conn     *ipv4.PacketConn
 	ConnTCP     net.Conn
 	ConnRaw     *net.IPConn
 	TCPMutex    sync.Mutex
@@ -307,58 +305,34 @@ func (v *VPNInstance) InitNetwork() {
 	}
 
 	if v.Cfg.Protocol == "udp" {
-		const SO_REUSEPORT = 0x0F // Linux constant
-
-		v.ConnBatch = make([]*ipv4.PacketConn, v.Cfg.PortCount)
-		// We don't need ClientRemoteUDP dict anymore if we use single remote
+		var bindAddrStr string
+		if v.Cfg.Mode == "server" {
+			bindAddrStr = fmt.Sprintf("%s:%d", v.Cfg.ServerBindAddr, v.Cfg.BasePort)
+		} else {
+			bindAddrStr = ":0"
+		}
+		lAddr, _ := net.ResolveUDPAddr("udp", bindAddrStr)
+		c, err := net.ListenUDP("udp", lAddr)
+		if err != nil { log.Fatal(err) }
 		
-		baseAddrStr := fmt.Sprintf("%s:%d", v.Cfg.ServerBindAddr, v.Cfg.BasePort)
-		if v.Cfg.Mode == "client" {
-			baseAddrStr = ":0"
+		c.SetReadBuffer(32 << 20) // Large buffer for single socket
+		c.SetWriteBuffer(32 << 20)
+		
+		v.Conn = ipv4.NewPacketConn(c)
+
+		// Optimize IPv6 Priority (DSCP: EF / 46 -> 0xB8)
+		p6 := ipv6.NewPacketConn(c)
+		if err := p6.SetTrafficClass(0xB8); err != nil {
+			v.logDebug("IPv6 TrafficClass Warn: %v", err)
 		}
 
-		for i := 0; i < v.Cfg.PortCount; i++ {
-			lc := net.ListenConfig{
-				Control: func(network, address string, c syscall.RawConn) error {
-					var opErr error
-					err := c.Control(func(fd uintptr) {
-						opErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, SO_REUSEPORT, 1)
-					})
-					if err != nil { return err }
-					return opErr
-				},
-			}
-			
-			pc, err := lc.ListenPacket(context.Background(), "udp", baseAddrStr)
-			if err != nil {
-				log.Fatalf("ListenUDP (ReusePort) Fail: %v", err)
-			}
-			
-			// Cast to *net.UDPConn to set buffers
-			if udpConn, ok := pc.(*net.UDPConn); ok {
-				udpConn.SetReadBuffer(16 << 20)
-				udpConn.SetWriteBuffer(16 << 20)
-			}
-
-			v.ConnBatch[i] = ipv4.NewPacketConn(pc)
-
-			// Optimize IPv6 Priority (DSCP: EF / 46 -> 0xB8)
-			p6 := ipv6.NewPacketConn(pc)
-			if err := p6.SetTrafficClass(0xB8); err != nil {
-				v.logDebug("IPv6 TrafficClass Warn: %v", err)
-			}
-
-			go v.UDPListenerLoop(i, v.ConnBatch[i])
-		}
-		
 		if v.Cfg.Mode == "client" {
 			rAddrStr := fmt.Sprintf("%s:%d", v.Cfg.RemoteIP, v.Cfg.RemotePort)
-			// Reset ClientRemoteIP/UDP to just one target
-			rAddr, _ := net.ResolveUDPAddr("udp", rAddrStr)
-			v.ClientRemoteUDP = make([]*net.UDPAddr, 1) // Just slot 0 used mostly, or all use same
-			v.ClientRemoteUDP[0] = rAddr
+			v.ClientRemoteUDP = make([]*net.UDPAddr, 1)
+			v.ClientRemoteUDP[0], _ = net.ResolveUDPAddr("udp", rAddrStr)
 		}
 		
+		go v.UDPListenerLoop(v.Conn)
 		return
 	}
 
@@ -394,8 +368,7 @@ func (v *VPNInstance) WGRawClientStart() {
     log.Printf("[%s] WG-Raw Client Listening UDP %s", v.Cfg.InterfaceName, lAddr)
 
     // Store Conn for RawListenerLoop to use for Replies
-    v.ConnUDP = make([]*net.UDPConn, 1)
-    v.ConnUDP[0] = c
+    v.Conn = ipv4.NewPacketConn(c)
     
     buf := make([]byte, 2000)
     for {
@@ -410,8 +383,8 @@ func (v *VPNInstance) WGRawClientStart() {
     }
 }
 
-func (v *VPNInstance) UDPListenerLoop(idx int, pc *ipv4.PacketConn) {
-	const batchSize = 16
+func (v *VPNInstance) UDPListenerLoop(pc *ipv4.PacketConn) {
+	const batchSize = 64 // Increased batch size for single thread efficiency
 	msgs := make([]ipv4.Message, batchSize)
 	bufPtrs := make([]*[]byte, batchSize)
 
@@ -430,8 +403,6 @@ func (v *VPNInstance) UDPListenerLoop(idx int, pc *ipv4.PacketConn) {
 
 		for i := 0; i < nMsgs; i++ {
 			msg := &msgs[i]
-			// We can copy addr or just use it if we don't store ref? 
-			// PeerRoute stores it, so yes copy.
 			srcAddr := v.copyAddr(msg.Addr)
 			v.ProcessPacket((*bufPtrs[i])[:msg.N], srcAddr, nil)
 		}
@@ -468,8 +439,8 @@ func (v *VPNInstance) RawListenerLoop(c *net.IPConn) {
                     // Issue: WGRawClientStart created the conn but didn't save it.
                     // Fix: Save it in v.ConnUDP[0] or similar.
                     // Let's use v.ConnUDP for convenience (it makes slice).
-                    if v.ConnUDP != nil && len(v.ConnUDP) > 0 {
-                         v.ConnUDP[0].WriteToUDP(payload, addr)
+                    if v.Conn != nil {
+                         v.Conn.WriteTo(payload, nil, addr)
                     } else {
                         // Re-find logic.
                         // Better: InitNetwork should save the UDP conn.
@@ -749,11 +720,6 @@ func (v *VPNInstance) SendPacket(data []byte, destAddr net.Addr, conn net.Conn) 
 	}
 
 	if v.Cfg.Protocol == "udp" {
-		// Use atomic counter for round-robin load balancing across threads
-		seq := atomic.AddUint32(&v.TxSeq, 1) // Reuse TxSeq or new counter? TxSeq is fine.
-		idx := int(seq % uint32(v.Cfg.PortCount))
-		pc := v.ConnBatch[idx]
-		
 		var addr net.Addr
 		if v.Cfg.Mode == "client" {
 			addr = v.ClientRemoteUDP[0]
@@ -761,7 +727,7 @@ func (v *VPNInstance) SendPacket(data []byte, destAddr net.Addr, conn net.Conn) 
 			if destAddr == nil { return }
 			addr = destAddr
 		}
-		pc.WriteTo(data, nil, addr)
+		v.Conn.WriteTo(data, nil, addr)
 		return
 	}
 
