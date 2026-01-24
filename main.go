@@ -510,34 +510,43 @@ func (v *VPNInstance) handleOutgoingPacket(ipPacket []byte) {
 	}
 
 	var destAddr net.Addr
+	var isBroadcast bool
 	seq := atomic.AddUint32(&v.TxSeq, 1) - 1
 	idx := int(uint64(seq) % uint64(v.Cfg.PortCount))
 
-	// Filter Multicast (224.0.0.0/4) and Broadcast (255.255.255.255)
-	if len(ipPacket) >= 20 {
-		if (ipPacket[0] >> 4) == 4 {
-			dstIP := binary.BigEndian.Uint32(ipPacket[16:20])
-			if (dstIP & 0xE0000000) == 0xE0000000 || dstIP == 0xFFFFFFFF { return }
-		} else if (ipPacket[0] >> 4) == 6 && ipPacket[24] == 0xff { return }
-	}
-
+	// Determine Routing
 	if v.Cfg.Mode == "server" {
 		if len(ipPacket) >= 20 {
 			version := ipPacket[0] >> 4
+			// IPv4
 			if version == 4 {
 				dstIP := binary.BigEndian.Uint32(ipPacket[16:20])
-				if val, ok := v.PeerMap.Load(dstIP); ok {
-					route := val.(PeerRoute)
-					destAddr = route.Addr
-					// Use the same port that received traffic from this peer (Sticky Port)
-					// This is critical for NAT traversal with multiple ports.
-					idx = route.LocalIdx
-				} else if debugMode {
-					logDebug("ROUTING: No peer for %d.%d.%d.%d, dropping...", ipPacket[16], ipPacket[17], ipPacket[18], ipPacket[19])
+				// Multicast (224.0.0.0/4) or Broadcast
+				if (dstIP & 0xF0000000) == 0xE0000000 || dstIP == 0xFFFFFFFF {
+					isBroadcast = true
+				} else {
+					// Unicast Lookup
+					if val, ok := v.PeerMap.Load(dstIP); ok {
+						route := val.(PeerRoute)
+						destAddr = route.Addr
+						idx = route.LocalIdx
+					} else if debugMode {
+						logDebug("ROUTING: No peer for target, dropping...")
+					}
+				}
+			} else if version == 6 {
+				// IPv6
+				// Multicast (FF00::/8)
+				if ipPacket[24] == 0xff {
+					isBroadcast = true
+				} else {
+					// TODO: IPv6 Unicast Lookup support if needed later
 				}
 			}
 		}
-		if destAddr == nil { return }
+		
+		// If Unicast and no route found, return (Drop)
+		if !isBroadcast && destAddr == nil { return }
 	}
 
 	ptLen := 8 + len(ipPacket)
@@ -555,13 +564,27 @@ func (v *VPNInstance) handleOutgoingPacket(ipPacket []byte) {
 	dst = v.AEAD.Seal(dst, nonce, pt, nil)
 
 	if debugMode && v.Cfg.Mode == "client" {
-		// 客户端固定发往 Server
 		logDebug("NET-TX: Out %d bytes (Seq:%d) to Server", len(dst), seq)
 	} else if debugMode {
-		logDebug("NET-TX: Out %d bytes (Seq:%d) to %v", len(dst), seq, destAddr)
+		logDebug("NET-TX: Out %d bytes (Seq:%d) to %v (Bcast:%v)", len(dst), seq, destAddr, isBroadcast)
 	}
 
-	v.SendPacket(dst, idx, destAddr)
+	if isBroadcast && v.Cfg.Mode == "server" {
+		// Broadcast to all active peers (Deduplicated)
+		sent := make(map[string]bool)
+		v.PeerMap.Range(func(key, value interface{}) bool {
+			route := value.(PeerRoute)
+			rAddr := route.Addr.String()
+			if !sent[rAddr] {
+				v.SendPacket(dst, route.LocalIdx, route.Addr)
+				sent[rAddr] = true
+			}
+			return true
+		})
+	} else {
+		// Unicast / Client Send
+		v.SendPacket(dst, idx, destAddr)
+	}
 
 	bufPool.Put(ptPtr)
 	bufPool.Put(dstPtr)
