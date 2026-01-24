@@ -25,4 +25,4 @@ EOF
 fi
 
 echo ">>> 启动 NekoLink (Client)..."
-./vpn -c "$CONFIG_FILE"
+./neko-link -c "$CONFIG_FILE"
