@@ -239,6 +239,11 @@ type VPNInstance struct {
 	ebpfRawCfg xdp.ShadowXConfig
 }
 
+var (
+	usedPorts      = make(map[uint16]string)
+	usedPortsMutex sync.Mutex
+)
+
 func NewVPNInstance(cfg Config) *VPNInstance {
 	cfg.ParseLegacy()
 	v := &VPNInstance{Cfg: cfg}
@@ -408,6 +413,14 @@ func (v *VPNInstance) Start() {
 
 	log.Printf("[%s] NekoLink (WireGuard Edition) 启动中 - 核心: %d, MTU: %d",
 		v.Cfg.InterfaceName, v.numWorkers, v.Cfg.MTU)
+
+	// Check Port Collision early
+	usedPortsMutex.Lock()
+	if owner, exists := usedPorts[uint16(v.Cfg.ListenPort)]; exists {
+		log.Fatalf("❌ 配置错误: 端口 %d 已被实例 %s 占用！每个 NekoLink 实例必须使用唯一的监听端口喵！", v.Cfg.ListenPort, owner)
+	}
+	usedPorts[uint16(v.Cfg.ListenPort)] = v.Cfg.InterfaceName
+	usedPortsMutex.Unlock()
 
 	v.InitTUN()
 	v.InitNetwork()
