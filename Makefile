@@ -13,7 +13,7 @@ xdp/xdp_kern.o: xdp/xdp_kern.c
 
 build:
 	$(GO) mod tidy
-	$(GO) build -o neko-link main.go
+	$(GO) build -o neko-link .
 
 clean:
 	rm -f neko-link xdp/*.o
