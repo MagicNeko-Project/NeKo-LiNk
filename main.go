@@ -89,12 +89,29 @@ const (
 	SeqSize   = 4
 	MaxReorderBuffer = 1024
 	TunOffset = 16
+	WriteBatchSize = 16
 )
 
-// --- Memory Pool ---
+// --- Memory Pools ---
 var bufPool = sync.Pool{
 	New: func() interface{} {
 		b := make([]byte, 65536+256)
+		return &b
+	},
+}
+
+// 小缓冲区池 - 用于 nonce、header 等小分配
+var smallBufPool = sync.Pool{
+	New: func() interface{} {
+		b := make([]byte, 32)
+		return &b
+	},
+}
+
+// TCP header 缓冲区池
+var tcpHeaderPool = sync.Pool{
+	New: func() interface{} {
+		b := make([]byte, 2)
 		return &b
 	},
 }
@@ -121,6 +138,12 @@ type VPNInstance struct {
 	SessionID uint32
 	TxSeq     uint32
 
+	// 性能优化: 计数器 Nonce (避免每包调用 crypto/rand)
+	nonceCounter uint64
+
+	// 性能优化: 批量发送队列
+	writeQueues   []chan ipv4.Message
+	writeQueuesMu []sync.Mutex
 
 	Reorderer *PacketReorderer
 }
@@ -476,9 +499,11 @@ func (v *VPNInstance) ProcessPacket(encrypted []byte, srcAddr net.Addr, idx int)
 		}
 	}
 
-	dataCopy := make([]byte, len(ipPacket))
+	// 性能优化: 使用缓冲区池减少内存分配
+	dataPtr := bufPool.Get().(*[]byte)
+	dataCopy := (*dataPtr)[:len(ipPacket)]
 	copy(dataCopy, ipPacket)
-	v.Reorderer.Push(sessionID, seq, dataCopy)
+	v.Reorderer.Push(sessionID, seq, dataCopy, dataPtr)
 }
 
 func (v *VPNInstance) TUNReaderLoop() {
@@ -558,10 +583,18 @@ func (v *VPNInstance) handleOutgoingPacket(ipPacket []byte) {
 
 	dstPtr := bufPool.Get().(*[]byte)
 	dst := (*dstPtr)[:0]
-	nonce := make([]byte, NonceSize)
-	rand.Read(nonce)
+	
+	// 性能优化: 使用计数器 Nonce 替代 crypto/rand (避免系统调用开销)
+	noncePtr := smallBufPool.Get().(*[]byte)
+	nonce := (*noncePtr)[:NonceSize]
+	nonceVal := atomic.AddUint64(&v.nonceCounter, 1)
+	binary.BigEndian.PutUint64(nonce[0:8], nonceVal)
+	binary.BigEndian.PutUint32(nonce[8:12], v.SessionID)
+	// 剩余 12 字节保持为零 (已经在 pool 中初始化)
+	
 	dst = append(dst, nonce...)
 	dst = v.AEAD.Seal(dst, nonce, pt, nil)
+	smallBufPool.Put(noncePtr)
 
 	if debugMode && v.Cfg.Mode == "client" {
 		logDebug("NET-TX: Out %d bytes (Seq:%d) to Server", len(dst), seq)
@@ -596,11 +629,13 @@ func (v *VPNInstance) SendPacket(data []byte, idx int, destAddr net.Addr) {
 		c := v.ConnTCP
 		v.TCPMutex.Unlock()
 		if c == nil { return }
-		l := len(data)
-		h := make([]byte, 2)
-		binary.BigEndian.PutUint16(h, uint16(l))
+		// 性能优化: 使用缓冲区池替代每次分配
+		hPtr := tcpHeaderPool.Get().(*[]byte)
+		h := *hPtr
+		binary.BigEndian.PutUint16(h, uint16(len(data)))
 		c.Write(h)
 		c.Write(data)
+		tcpHeaderPool.Put(hPtr)
 		return
 	}
 
@@ -618,17 +653,24 @@ func (v *VPNInstance) SendPacket(data []byte, idx int, destAddr net.Addr) {
 	}
 
 	if v.Cfg.Protocol == "raw" {
-		payload := make([]byte, 4+len(data))
+		// 性能优化: 使用缓冲区池替代每次分配
+		payloadPtr := bufPool.Get().(*[]byte)
+		payloadLen := 4 + len(data)
+		payload := (*payloadPtr)[:payloadLen]
 		binary.BigEndian.PutUint32(payload[0:4], uint32(idx))
 		copy(payload[4:], data)
 		var addr *net.IPAddr
 		if v.Cfg.Mode == "client" {
 			addr = v.ClientRemoteIP
 		} else {
-			if destAddr == nil { return }
+			if destAddr == nil {
+				bufPool.Put(payloadPtr)
+				return
+			}
 			addr = destAddr.(*net.IPAddr)
 		}
 		v.ConnRaw.WriteToIP(payload, addr)
+		bufPool.Put(payloadPtr)
 	}
 }
 
@@ -707,9 +749,10 @@ func (v *VPNInstance) KeepaliveLoop() {
 // --- Reorderer ---
 
 type SeqPacket struct {
-	Seq  uint32
-	Data []byte
-	T    time.Time
+	Seq    uint32
+	Data   []byte
+	T      time.Time
+	BufPtr *[]byte // 性能优化: 保留缓冲区指针用于回收
 }
 type PacketHeap []SeqPacket
 func (h PacketHeap) Len() int           { return len(h) }
@@ -730,28 +773,52 @@ type PacketReorderer struct {
 	buffer      PacketHeap
 	lastSession uint32
 	WriteFunc   func([]byte)
+	ReleaseFunc func(*[]byte) // 性能优化: 缓冲区释放回调
 }
 
 func NewReorderer() *PacketReorderer {
-	r := &PacketReorderer{buffer: make(PacketHeap, 0)}
+	r := &PacketReorderer{
+		buffer: make(PacketHeap, 0, 64), // 性能优化: 预分配容量
+		ReleaseFunc: func(ptr *[]byte) {
+			if ptr != nil && cap(*ptr) >= 65536 {
+				bufPool.Put(ptr)
+			}
+		},
+	}
 	heap.Init(&r.buffer)
 	go r.watchdog()
 	return r
 }
 
-func (pr *PacketReorderer) Push(sess uint32, seq uint32, data []byte) {
+func (pr *PacketReorderer) Push(sess uint32, seq uint32, data []byte, bufPtr *[]byte) {
 	pr.mu.Lock()
 	defer pr.mu.Unlock()
 	if sess != pr.lastSession {
 		logDebug("Reorderer: Session reset %v -> %v", pr.lastSession, sess)
+		// 释放旧缓冲区
+		for _, pkt := range pr.buffer {
+			if pr.ReleaseFunc != nil && pkt.BufPtr != nil {
+				pr.ReleaseFunc(pkt.BufPtr)
+			}
+		}
 		pr.lastSession = sess
 		pr.nextSeq = seq
 		pr.buffer = pr.buffer[:0]
 	}
 	diff := int32(seq - pr.nextSeq)
-	if diff < 0 { return }
+	if diff < 0 {
+		// 过期包，直接回收缓冲区
+		if pr.ReleaseFunc != nil && bufPtr != nil {
+			pr.ReleaseFunc(bufPtr)
+		}
+		return
+	}
 	if seq == pr.nextSeq {
 		if pr.WriteFunc != nil { pr.WriteFunc(data) }
+		// 性能优化: 写入后立即回收缓冲区
+		if pr.ReleaseFunc != nil && bufPtr != nil {
+			pr.ReleaseFunc(bufPtr)
+		}
 		pr.nextSeq++
 		pr.drain()
 		return
@@ -760,10 +827,13 @@ func (pr *PacketReorderer) Push(sess uint32, seq uint32, data []byte) {
 		min := heap.Pop(&pr.buffer).(SeqPacket)
 		pr.nextSeq = min.Seq
 		if pr.WriteFunc != nil { pr.WriteFunc(min.Data) }
+		if pr.ReleaseFunc != nil && min.BufPtr != nil {
+			pr.ReleaseFunc(min.BufPtr)
+		}
 		pr.nextSeq++
 		pr.drain()
 	}
-	heap.Push(&pr.buffer, SeqPacket{Seq: seq, Data: data, T: time.Now()})
+	heap.Push(&pr.buffer, SeqPacket{Seq: seq, Data: data, T: time.Now(), BufPtr: bufPtr})
 }
 
 func (pr *PacketReorderer) drain() {
@@ -772,6 +842,10 @@ func (pr *PacketReorderer) drain() {
 		if min.Seq == pr.nextSeq {
 			heap.Pop(&pr.buffer)
 			if pr.WriteFunc != nil { pr.WriteFunc(min.Data) }
+			// 性能优化: 回收缓冲区
+			if pr.ReleaseFunc != nil && min.BufPtr != nil {
+				pr.ReleaseFunc(min.BufPtr)
+			}
 			pr.nextSeq++
 		} else { break }
 	}
@@ -788,6 +862,10 @@ func (pr *PacketReorderer) watchdog() {
 				pr.nextSeq = head.Seq
 				heap.Pop(&pr.buffer)
 				if pr.WriteFunc != nil { pr.WriteFunc(head.Data) }
+				// 性能优化: 回收缓冲区
+				if pr.ReleaseFunc != nil && head.BufPtr != nil {
+					pr.ReleaseFunc(head.BufPtr)
+				}
 				pr.nextSeq++
 				pr.drain()
 			}
