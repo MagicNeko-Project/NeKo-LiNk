@@ -4,11 +4,13 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
+	"log"
 	"net"
 	"net/netip"
 	"sync"
 
 	"golang.zx2c4.com/wireguard/conn"
+	"vpn/xdp"
 )
 
 // --- Raw Endpoint (Shadowing) ---
@@ -41,19 +43,25 @@ type RawBind struct {
 	protoNum     int
 	useNATT       bool
 	useTCP        bool
+	useEBPF       bool
+	ifaceName     string
 	nattLocalPort int
 	nattRemotePort int
 	handshakeCb  func(data []byte, remote netip.AddrPort) bool
 	
+	ebpfEngine   *xdp.ShadowXEngine
+
 	// For Client mode fix: optionally force a remote address if set
 	clientRemote netip.Addr
 }
 
-func NewRawBind(proto int, useNATT bool, useTCP bool, localPort, remotePort int) *RawBind {
+func NewRawBind(proto int, useNATT bool, useTCP bool, useEBPF bool, iface string, localPort, remotePort int) *RawBind {
 	return &RawBind{
 		protoNum:       proto,
 		useNATT:        useNATT,
 		useTCP:         useTCP,
+		useEBPF:        useEBPF,
+		ifaceName:      iface,
 		nattLocalPort:  localPort,
 		nattRemotePort: remotePort,
 	}
@@ -68,6 +76,40 @@ func (b *RawBind) SetClientRemote(addr netip.Addr) {
 }
 
 func (b *RawBind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
+	if b.useEBPF {
+		// Initialize eBPF Shadow X Engine
+		mode := uint32(0)
+		if b.useTCP {
+			mode = 2
+		} else {
+			mode = 1 // Raw-IP
+		}
+
+		engine, err := xdp.NewShadowXEngine(xdp.ShadowXConfig{
+			InterfaceName: b.ifaceName,
+			Mode:          mode,
+			LocalPort:     uint16(b.nattLocalPort),
+			RawProto:      uint8(b.protoNum),
+		})
+		if err != nil {
+			log.Printf("[eBPF] Failed to load Shadow X Engine: %v. Falling back to User-space Raw Socket.", err)
+			b.useEBPF = false
+		} else {
+			b.ebpfEngine = engine
+			// Under eBPF, we just use a standard UDP socket.
+			// The eBPF kernel hooks (XDP/TC) will handle the Fake-TCP/Raw transformation.
+			addr := &net.UDPAddr{IP: net.IPv4zero, Port: b.nattLocalPort}
+			c, err := net.ListenUDP("udp", addr)
+			if err != nil {
+				return nil, 0, fmt.Errorf("failed to open UDP for eBPF mode: %w", err)
+			}
+			c.SetReadBuffer(25 * 1024 * 1024)
+			c.SetWriteBuffer(25 * 1024 * 1024)
+			b.udpConn = c
+			return []conn.ReceiveFunc{b.receiveUDP}, uint16(b.nattLocalPort), nil
+		}
+	}
+
 	if b.useNATT {
 		// Use UDP for NAT-T
 		addr := &net.UDPAddr{IP: net.IPv4zero, Port: b.nattLocalPort}
@@ -268,7 +310,7 @@ func (b *RawBind) Send(bufs [][]byte, ep conn.Endpoint) error {
 	
 	if !target.Addr().IsValid() { return nil }
 
-	if b.useNATT {
+	if b.useEBPF || b.useNATT {
 		if b.udpConn == nil { return net.ErrClosed }
 		addr := &net.UDPAddr{IP: target.Addr().AsSlice(), Port: int(target.Port())}
 		for _, buf := range bufs {
@@ -328,7 +370,7 @@ func (b *RawBind) Send(bufs [][]byte, ep conn.Endpoint) error {
 
 // SendRaw allows sending control packets (e.g. handshake) bypassing WireGuard
 func (b *RawBind) SendRaw(data []byte, remote netip.AddrPort) error {
-	if b.useNATT {
+	if b.useEBPF || b.useNATT {
 		if b.udpConn == nil { return net.ErrClosed }
 		port := int(remote.Port())
 		if port == 0 {
@@ -373,6 +415,7 @@ func (b *RawBind) SendRaw(data []byte, remote netip.AddrPort) error {
 }
 
 func (b *RawBind) Close() error {
+	if b.ebpfEngine != nil { b.ebpfEngine.Close() }
 	if b.ipv4 != nil { b.ipv4.Close() }
 	if b.ipv6 != nil { b.ipv6.Close() }
 	if b.udpConn != nil { b.udpConn.Close() }

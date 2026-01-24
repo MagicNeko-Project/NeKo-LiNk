@@ -62,6 +62,7 @@ type Config struct {
 	IPProtocolNum int  `json:"ip_protocol_num,omitempty"`
 	UseNATT       bool `json:"use_nat_t,omitempty"`
 	UseTCP        bool `json:"use_tcp,omitempty"`
+	UseEBPF       bool `json:"use_ebpf,omitempty"`
 	UDPPort       int  `json:"udp_port,omitempty"`
 	Debug         bool `json:"debug,omitempty"`
 
@@ -256,7 +257,7 @@ func generateWGKey() ([]byte, []byte) {
 
 func (v *VPNInstance) startWireGuardRaw() {
 	// 1. Create Bind
-	bind := NewRawBind(v.Cfg.IPProtocolNum, v.Cfg.UseNATT, v.Cfg.UseTCP, v.Cfg.ListenPort, v.Cfg.PeerPort)
+	bind := NewRawBind(v.Cfg.IPProtocolNum, v.Cfg.UseNATT, v.Cfg.UseTCP, v.Cfg.UseEBPF, v.Cfg.InterfaceName, v.Cfg.ListenPort, v.Cfg.PeerPort)
 	
 	// 2. Client Mode: Set Remote
 	if v.Cfg.Mode == "client" {
