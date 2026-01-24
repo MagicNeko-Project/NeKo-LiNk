@@ -159,9 +159,16 @@ func (c *Config) ParseLegacy() (changed bool) {
 		c.ListenPort = 23333
 		changed = true
 	}
-	if c.WGPort == 0 {
-		c.WGPort = 51820 // Default internal WG port
-		changed = true
+	if c.Protocol == "wg-raw" {
+		if c.WGPort == 0 {
+			c.WGPort = 51820 // Default internal WG port only for wg-raw
+			changed = true
+		}
+	} else {
+		if c.WGPort != 0 {
+			c.WGPort = 0 // Clear WG port for non-WG modes
+			changed = true
+		}
 	}
 	if c.InterfaceName == "" {
 		c.InterfaceName = "neko0"
