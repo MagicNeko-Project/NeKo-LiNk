@@ -82,9 +82,17 @@ func GetShadowXEngine(ifaceName string) (*ShadowXEngine, error) {
 
 	// Disable BTF for maps to support kernels without BTF support
 	spec.Types = nil
-	for _, m := range spec.Maps {
+	for i, m := range spec.Maps {
+		if m.Key != nil || m.Value != nil {
+			log.Printf("[eBPF] Map %s 包含 BTF 信息，正在清理...", i)
+		}
 		m.Key = nil
 		m.Value = nil
+	}
+	
+	// Programs don't have direct BTF field to clear, relying on spec.Types = nil
+	for i := range spec.Programs {
+		log.Printf("[eBPF] 准备加载 Program: %s", i)
 	}
 
 	if err := spec.LoadAndAssign(&objs, nil); err != nil { return nil, err }
