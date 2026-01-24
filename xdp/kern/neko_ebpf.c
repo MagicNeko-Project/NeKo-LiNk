@@ -33,6 +33,24 @@ struct {
     __uint(max_entries, 128);
 } proto_shadow_map SEC(".maps");
 
+// --- Helpers ---
+
+static __always_inline void update_ip_checksum(struct iphdr *ip) {
+    __u32 csum = 0;
+    __u16 *p = (__u16 *)ip;
+    ip->check = 0;
+    
+    // Simple 20-byte IP header checksum
+    #pragma unroll
+    for (int i = 0; i < 10; i++) {
+        csum += p[i];
+    }
+    
+    csum = (csum & 0xFFFF) + (csum >> 16);
+    csum = (csum & 0xFFFF) + (csum >> 16);
+    ip->check = ~(__u16)csum;
+}
+
 // --- Ingress: TC (Restore) ---
 
 SEC("tc/ingress")
@@ -47,73 +65,69 @@ int tc_shadow_ingress(struct __sk_buff *skb) {
     struct iphdr *ip = (void *)(eth + 1);
     if ((void *)(ip + 1) > data_end) return TC_ACT_OK;
 
-    // --- Mode 1: Restore Raw-IP to UDP ---
+    // --- Mode 1: Restore Raw-IP (Add UDP Head) ---
     struct shadow_config *cfg = bpf_map_lookup_elem(&proto_shadow_map, &ip->protocol);
     if (cfg && cfg->mode == 1) {
-        // Expand 8 bytes for UDP header
         if (bpf_skb_adjust_room(skb, 8, BPF_ADJ_ROOM_NET, 0) < 0) return TC_ACT_OK;
         
-        // Re-fetch pointers
         data = (void *)(long)skb->data;
         data_end = (void *)(long)skb->data_end;
         eth = data;
-        if ((void *)(eth + 1) > data_end) return TC_ACT_OK;
         ip = (void *)(eth + 1);
         if ((void *)(ip + 1) > data_end) return TC_ACT_OK;
 
-        __u32 ihl = ip->ihl * 4;
-        if (ihl < 20 || ihl > 60) return TC_ACT_OK;
-        
-        struct udphdr *udp = (void *)ip + ihl;
+        struct udphdr *udp = (void *)ip + (ip->ihl * 4);
         if ((void *)(udp + 1) > data_end) return TC_ACT_OK;
 
-        // Populate UDP header
-        // Since it was Raw-IP, we don't have ports. We use local_port for dest.
         udp->dest = cfg->local_port;
-        udp->source = bpf_htons(12345); // Dummy source
-        udp->len = bpf_htons(bpf_ntohs(ip->tot_len) + 8 - ihl);
+        udp->source = bpf_htons(12345);
+        udp->len = bpf_htons(bpf_ntohs(ip->tot_len) + 8 - (ip->ihl * 4));
         udp->check = 0;
 
+        __be32 old_tot_len = ip->tot_len;
         ip->protocol = IPPROTO_UDP;
         ip->tot_len = bpf_htons(bpf_ntohs(ip->tot_len) + 8);
+        
+        // Update L3 sum
+        bpf_l3_csum_replace(skb, offsetof(struct iphdr, check), old_tot_len, ip->tot_len, sizeof(__be16));
+        bpf_l3_csum_replace(skb, offsetof(struct iphdr, check), bpf_htons(cfg->proto_num), bpf_htons(IPPROTO_UDP), sizeof(__be16));
+        
         return TC_ACT_OK;
     }
 
-    // --- Mode 2: Restore Fake-TCP to UDP ---
+    // --- Mode 2: Restore Fake-TCP (TCP 20 -> UDP 8) ---
     if (ip->protocol == IPPROTO_TCP) {
         __u32 ihl = ip->ihl * 4;
-        if (ihl < 20 || ihl > 60) return TC_ACT_OK;
-
         struct tcphdr *tcp = (void *)ip + ihl;
         if ((void *)(tcp + 1) > data_end) return TC_ACT_OK;
 
         cfg = bpf_map_lookup_elem(&port_shadow_map, &tcp->dest);
         if (cfg && cfg->mode == 2) {
-            // Shrink 12 bytes (TCP 20 -> UDP 8)
+            __be16 src_port = tcp->source;
+            __be16 dst_port = tcp->dest;
+
+            // Remove 12 bytes
             if (bpf_skb_adjust_room(skb, -12, BPF_ADJ_ROOM_NET, 0) < 0) return TC_ACT_OK;
             
             data = (void *)(long)skb->data;
             data_end = (void *)(long)skb->data_end;
-            eth = data;
-            if ((void *)(eth + 1) > data_end) return TC_ACT_OK;
-            ip = (void *)(eth + 1);
+            ip = (void *)(data + sizeof(struct ethhdr));
             if ((void *)(ip + 1) > data_end) return TC_ACT_OK;
-
+            
             struct udphdr *udp = (void *)ip + (ip->ihl * 4);
             if ((void *)(udp + 1) > data_end) return TC_ACT_OK;
 
-            // Use original ports from TCP header (already shifted)
-            // Note: bpf_skb_adjust_room with negative index shifts the payload "right"? 
-            // Actually it just cuts space. The data after TCP header is now after UDP header.
-            // We need to re-set the UDP header fields.
+            udp->source = src_port;
+            udp->dest = dst_port;
+            udp->len = bpf_htons(bpf_ntohs(ip->tot_len) - 12 - (ip->ihl * 4));
+            udp->check = 0;
+
+            __be32 old_tot_len = ip->tot_len;
             ip->protocol = IPPROTO_UDP;
             ip->tot_len = bpf_htons(bpf_ntohs(ip->tot_len) - 12);
-            
-            // Re-fetch TCP ports if they were moved... 
-            // In fact, the first 8 bytes of 'tcp' are now where 'udp' is.
-            // tcp->source/dest share positions with udp->source/dest.
-            udp->len = bpf_htons(bpf_ntohs(ip->tot_len) - (ip->ihl * 4));
-            udp->check = 0;
+
+            bpf_l3_csum_replace(skb, offsetof(struct iphdr, check), old_tot_len, ip->tot_len, sizeof(__be16));
+            bpf_l3_csum_replace(skb, offsetof(struct iphdr, check), bpf_htons(IPPROTO_TCP), bpf_htons(IPPROTO_UDP), sizeof(__be16));
         }
     }
 
@@ -136,56 +150,62 @@ int tc_shadow_egress(struct __sk_buff *skb) {
 
     if (ip->protocol != IPPROTO_UDP) return TC_ACT_OK;
 
-    __u32 ihl = ip->ihl * 4;
-    if (ihl < 20 || ihl > 60) return TC_ACT_OK;
-
-    struct udphdr *udp = (void *)ip + ihl;
+    struct udphdr *udp = (void *)ip + (ip->ihl * 4);
     if ((void *)(udp + 1) > data_end) return TC_ACT_OK;
 
-    // Lookup by Source Port
     struct shadow_config *cfg = bpf_map_lookup_elem(&port_shadow_map, &udp->source);
     if (!cfg) return TC_ACT_OK;
 
-    // --- Mode 1: Apply Raw-IP (Delete UDP) ---
+    // --- Mode 1: Apply Raw-IP (Remove UDP Head) ---
     if (cfg->mode == 1) {
         if (bpf_skb_adjust_room(skb, -8, BPF_ADJ_ROOM_NET, 0) < 0) return TC_ACT_OK;
         
         data = (void *)(long)skb->data;
         data_end = (void *)(long)skb->data_end;
-        eth = data;
-        if ((void *)(eth + 1) > data_end) return TC_ACT_OK;
-        ip = (void *)(eth + 1);
+        ip = (void *)(data + sizeof(struct ethhdr));
         if ((void *)(ip + 1) > data_end) return TC_ACT_OK;
 
+        __be32 old_tot_len = ip->tot_len;
         ip->protocol = (__u8)cfg->proto_num;
         ip->tot_len = bpf_htons(bpf_ntohs(ip->tot_len) - 8);
+
+        bpf_l3_csum_replace(skb, offsetof(struct iphdr, check), old_tot_len, ip->tot_len, sizeof(__be16));
+        bpf_l3_csum_replace(skb, offsetof(struct iphdr, check), bpf_htons(IPPROTO_UDP), bpf_htons(cfg->proto_num), sizeof(__be16));
+        
         return TC_ACT_OK;
     }
 
-    // --- Mode 2: Apply Fake-TCP (Expand) ---
+    // --- Mode 2: Apply Fake-TCP (UDP 8 -> TCP 20) ---
     if (cfg->mode == 2) {
+        __be16 src_port = udp->source;
+        __be16 dst_port = udp->dest;
+
         if (bpf_skb_adjust_room(skb, 12, BPF_ADJ_ROOM_NET, 0) < 0) return TC_ACT_OK;
         
         data = (void *)(long)skb->data;
         data_end = (void *)(long)skb->data_end;
-        eth = data;
-        if ((void *)(eth + 1) > data_end) return TC_ACT_OK;
-        ip = (void *)(eth + 1);
+        ip = (void *)(data + sizeof(struct ethhdr));
         if ((void *)(ip + 1) > data_end) return TC_ACT_OK;
 
-        ip->protocol = IPPROTO_TCP;
-        ip->tot_len = bpf_htons(bpf_ntohs(ip->tot_len) + 12);
-        
         struct tcphdr *tcp = (void *)ip + (ip->ihl * 4);
         if ((void *)(tcp + 1) > data_end) return TC_ACT_OK;
 
-        tcp->seq = bpf_htonl(2024);
+        tcp->source = src_port;
+        tcp->dest = dst_port;
+        tcp->seq = bpf_htonl(100);
         tcp->ack_seq = bpf_htonl(1);
         tcp->doff = 5;
         tcp->psh = 1;
         tcp->ack = 1;
-        tcp->window = bpf_htons(32768);
+        tcp->window = bpf_htons(8192);
         tcp->check = 0;
+
+        __be32 old_tot_len = ip->tot_len;
+        ip->protocol = IPPROTO_TCP;
+        ip->tot_len = bpf_htons(bpf_ntohs(ip->tot_len) + 12);
+
+        bpf_l3_csum_replace(skb, offsetof(struct iphdr, check), old_tot_len, ip->tot_len, sizeof(__be16));
+        bpf_l3_csum_replace(skb, offsetof(struct iphdr, check), bpf_htons(IPPROTO_UDP), bpf_htons(IPPROTO_TCP), sizeof(__be16));
     }
 
     return TC_ACT_OK;
