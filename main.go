@@ -149,7 +149,7 @@ func (v *VPNInstance) Start() {
 		debugMode = true
 	}
 
-	log.Printf("[%s] NekoLink v5.23 (接收端火力全开版) 启动中 - 核心: %d, MTU: %d",
+	log.Printf("[%s] NekoLink v5.24 (全量修复版) 启动中 - 核心: %d, MTU: %d",
 		v.Cfg.InterfaceName, v.numWorkers, v.Cfg.MTU)
 
 	v.InitTUN()
@@ -280,8 +280,10 @@ func (v *VPNInstance) initUDP() {
 	v.ConnUDP = conn
 
 	if v.IsIPv6 {
+		v.ConnBatchV6 = ipv6.NewPacketConn(conn)
 		log.Printf("[UDP] IPv6 模式已启用 (MTU建议 1400 以下)")
 	} else {
+		v.ConnBatchV4 = ipv4.NewPacketConn(conn)
 		log.Printf("[UDP] IPv4 模式运行中")
 	}
 }
