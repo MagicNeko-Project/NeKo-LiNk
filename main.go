@@ -87,7 +87,7 @@ NonceSize = chacha20poly1305.NonceSizeX
 Overhead  = chacha20poly1305.Overhead
 SeqSize   = 4
 MaxReorderBuffer = 1024
-TunOffset = 0
+TunOffset = 16
 )
 
 // --- Memory Pool ---
@@ -186,13 +186,31 @@ log.Printf("[%s] Interface Up & L3 Optimized (Nya~)", realName)
 }
 
 func (v *VPNInstance) IfaceWrite(data []byte) {
-if debugMode {
-v.tracePacket("TUN-WRITE", data)
-}
-_, err := v.TunDev.Write([][]byte{data}, TunOffset)
-if err != nil {
-logDebug("TUN-WRITE Error: %v", err)
-}
+	if debugMode {
+		v.tracePacket("TUN-WRITE", data)
+	}
+
+	// Helper for TUN Write with offset
+	bufPtr := bufPool.Get().(*[]byte)
+	buf := *bufPtr
+	
+	totalLen := TunOffset + len(data)
+	if cap(buf) < totalLen {
+		buf = make([]byte, totalLen)
+	}
+	
+	copy(buf[TunOffset:], data)
+	toWrite := buf[:totalLen]
+	
+	_, err := v.TunDev.Write([][]byte{toWrite}, TunOffset)
+	if err != nil {
+		logDebug("TUN-WRITE Error: %v", err)
+	}
+	
+	// Only put back if it's the original large buffer
+	if cap(buf) >= 65536 {
+		bufPool.Put(bufPtr)
+	}
 }
 
 func (v *VPNInstance) tracePacket(prefix string, data []byte) {
@@ -441,7 +459,7 @@ break
 }
 
 for i := 0; i < n; i++ {
-data := buffs[i][:sizes[i]]
+data := buffs[i][TunOffset : TunOffset+sizes[i]]
 if debugMode {
 v.tracePacket("TUN-READ", data)
 }
