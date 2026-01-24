@@ -377,6 +377,7 @@ func (v *VPNInstance) UDPListenerLoop(idx int, pc *ipv4.PacketConn) {
 		msgs[i].Buffers = [][]byte{*bufPtrs[i]}
 	}
 
+	var rxCount uint64
 	for {
 		nMsgs, err := pc.ReadBatch(msgs, 0)
 		if err != nil {
@@ -387,7 +388,10 @@ func (v *VPNInstance) UDPListenerLoop(idx int, pc *ipv4.PacketConn) {
 
 		for i := 0; i < nMsgs; i++ {
 			msg := &msgs[i]
-			// 修正：必须要深度拷贝地址，防止并发覆盖
+			rxCount++
+			if debugMode && rxCount%1000 == 0 {
+				log.Printf("[UDP-%d] RX packets: %d", idx, rxCount)
+			}
 			srcAddr := v.copyAddr(msg.Addr)
 			v.ProcessPacket((*bufPtrs[i])[:msg.N], srcAddr, idx)
 		}
@@ -586,12 +590,16 @@ func (v *VPNInstance) handleOutgoingPacket(ipPacket []byte) {
 	dst := (*dstPtr)[:0]
 	
 	// 性能优化: 使用计数器 Nonce 替代 crypto/rand (避免系统调用开销)
+	// XChaCha20-Poly1305 的 nonce 是 24 字节
 	noncePtr := smallBufPool.Get().(*[]byte)
 	nonce := (*noncePtr)[:NonceSize]
+	// 清零后 12 字节 (防止残留数据)
+	for i := 12; i < NonceSize; i++ {
+		nonce[i] = 0
+	}
 	nonceVal := atomic.AddUint64(&v.nonceCounter, 1)
 	binary.BigEndian.PutUint64(nonce[0:8], nonceVal)
 	binary.BigEndian.PutUint32(nonce[8:12], v.SessionID)
-	// 剩余 12 字节保持为零 (已经在 pool 中初始化)
 	
 	dst = append(dst, nonce...)
 	dst = v.AEAD.Seal(dst, nonce, pt, nil)
