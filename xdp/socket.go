@@ -150,7 +150,7 @@ func (e *ShadowXEngine) Register(cfg ShadowXConfig) error {
 	// Check for Port Collision
 	var existing shadowConfig
 	if err := e.portMap.Lookup(&port, &existing); err == nil {
-		log.Printf("[eBPF] ⚠️ 警告: 端口 %d 已被其它实例注册 (模式 %d)，即将覆盖配置喵！", cfg.LocalPort, existing.Mode)
+		log.Printf("[eBPF] ⚠️ 警告: 端口 %d 已被其它隧道占用！这会导致流量冲突喵！请确保每个 NekoLink 实例使用唯一的监听端口。", cfg.LocalPort)
 	}
 
 	if err := e.portMap.Put(&port, &conf); err != nil {
@@ -161,7 +161,7 @@ func (e *ShadowXEngine) Register(cfg ShadowXConfig) error {
 		proto := uint8(cfg.RawProto)
 		// Check for Proto Collision
 		if err := e.protoMap.Lookup(&proto, &existing); err == nil {
-			log.Printf("[eBPF] ⚠️ 警告: 协议号 %d 已被其它实例占用 (端口 %d)，冲突可能导致入站识别失败喵！", cfg.RawProto, ntohs(existing.LocalPort))
+			log.Printf("[eBPF] ⚠️ 冲突警告: 协议号 %d 已被其它隧道使用 (对应端口 %d)！在同一网卡上使用相同协议号会导致无法正确区分入站流量喵！请为主人的每个 Raw 隧道分配唯一的协议号。", cfg.RawProto, ntohs(existing.LocalPort))
 		}
 		if err := e.protoMap.Put(&proto, &conf); err != nil {
 			return fmt.Errorf("failed to register proto %d: %v", cfg.RawProto, err)

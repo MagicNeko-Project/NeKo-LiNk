@@ -547,29 +547,12 @@ func (v *VPNInstance) initRaw() {
 	}
 
 	if v.Cfg.UseEBPF {
-		mode := uint32(1) // Mode 1: Raw-IP
-		if v.Cfg.UseTCP { mode = 2 } // Mode 2: Fake-TCP (if ever used in Raw mode)
-
-		ebpfCfg := xdp.ShadowXConfig{
-			InterfaceName: v.Cfg.EBPFDevice,
-			Mode:          mode,
-			LocalPort:     uint16(v.Cfg.ListenPort),
-			RawProto:      uint8(v.Cfg.IPProtocolNum),
-		}
-
 		engine, err := xdp.GetShadowXEngine(v.Cfg.EBPFDevice)
 		if err != nil {
 			log.Printf("[EBPF] 核心加载失败: %v. 回退到纯用户态 Raw Socket.", err)
 			v.Cfg.UseEBPF = false
 		} else {
-			if err := engine.Register(ebpfCfg); err != nil {
-				log.Printf("[EBPF] 注册失败: %v. 回退.", err)
-				engine.Close()
-				v.Cfg.UseEBPF = false
-			} else {
-				v.ebpfRawEngine = engine
-				v.ebpfRawCfg = ebpfCfg
-			}
+			v.ebpfRawEngine = engine
 		}
 	}
 
@@ -588,7 +571,16 @@ func (v *VPNInstance) initRaw() {
 			
 			// Capture bound port
 			boundPort := uint16(conn.LocalAddr().(*net.UDPAddr).Port)
-			v.ebpfRawCfg.LocalPort = boundPort
+			// 构造 eBPF 配置
+			mode := uint32(1)
+			if v.Cfg.UseTCP { mode = 2 }
+			
+			v.ebpfRawCfg = xdp.ShadowXConfig{
+				InterfaceName: v.Cfg.EBPFDevice,
+				Mode:          mode,
+				LocalPort:     boundPort,
+				RawProto:      uint8(v.Cfg.IPProtocolNum),
+			}
 
 			if err := v.ebpfRawEngine.Register(v.ebpfRawCfg); err != nil {
 				log.Printf("[EBPF] 注册失败: %v. 回退.", err)
