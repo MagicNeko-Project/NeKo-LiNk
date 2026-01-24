@@ -163,6 +163,7 @@ func (v *VPNInstance) startQuicServer() {
 	listener, err := quic.ListenAddr(bindAddr, tlsConf, &quic.Config{
 		MaxIdleTimeout:      30 * time.Second,
 		EnableDatagrams:     true,
+		KeepAlivePeriod:     10 * time.Second,
 		InitialStreamReceiveWindow:     1024 * 1024,
 		InitialConnectionReceiveWindow: 4 * 1024 * 1024,
 	})
@@ -189,55 +190,36 @@ func (v *VPNInstance) startQuicServer() {
 }
 
 func (v *VPNInstance) handleQuicSession(conn *quic.Conn) {
-	defer conn.CloseWithError(0, "bye")
+	remoteAddr := conn.RemoteAddr().String()
+	log.Printf("[QUIC] Session 开始: %s", remoteAddr)
 	
-	// 鉴权 (Optional for now, trust TLS or add Token handshake)
-	// 我们简单地接受连接
-	
-	// 启动 Reader 循环 (从 QUIC 读 -> 写入 TUN)
-	// QUIC 支持 Stream 和 Datagram
-	// 我们主要使用 Datagram (无序、低延迟)
-	// 也可以由 Client 决定用哪个
-	
-	// Datagram Reader
-	go func() {
-		for {
-			data, err := conn.ReceiveDatagram(context.Background())
-			if err != nil {
-				return
-			}
-			// 写入 TUN (需还原 Offset for TUN)
-			// data is pure IP packet
-			// TUN Write need Offset
-			// 我们需要申请内存并 Copy
-			// 优化: 使用 pool
-			
-			bufPtr := bufPool.Get().(*[]byte)
-			buf := *bufPtr
-			
-			// Copy data to buf[Offset:]
-			copy(buf[TunOffset:], data)
-			
-			v.TunDev.Write([][]byte{buf[:TunOffset+len(data)]}, TunOffset)
-			
-			bufPool.Put(bufPtr)
+	defer func() {
+		log.Printf("[QUIC] Session 结束: %s", remoteAddr)
+		conn.CloseWithError(0, "bye")
+		
+		serverConnMx.Lock()
+		if serverActiveConn == conn {
+			serverActiveConn = nil
 		}
+		serverConnMx.Unlock()
 	}()
 	
-	// Stream Reader (Legacy/Reliable fallback)
-	// Stream Reader (Legacy/Reliable fallback)
-	/*
+	// Datagram Reader (阻塞模式，防止函数立即退出)
 	for {
-		stream, err := conn.AcceptStream(context.Background())
+		data, err := conn.ReceiveDatagram(context.Background())
 		if err != nil {
+			log.Printf("[QUIC] Datagram 接收停止: %v", err)
 			return
 		}
-		go func(s quic.Stream) {
-			defer s.Close()
-			io.Copy(io.Discard, s)
-		}(stream)
+		
+		bufPtr := bufPool.Get().(*[]byte)
+		buf := *bufPtr
+		
+		copy(buf[TunOffset:], data)
+		v.TunDev.Write([][]byte{buf[:TunOffset+len(data)]}, TunOffset)
+		
+		bufPool.Put(bufPtr)
 	}
-	*/
 }
 
 // --- TUN -> QUIC Forwarder ---
@@ -344,6 +326,7 @@ func (v *VPNInstance) startQuicClient() {
 		conn, err := quic.DialAddr(context.Background(), addr, tlsConf, &quic.Config{
 			MaxIdleTimeout: 30 * time.Second,
 			EnableDatagrams: true,
+			KeepAlivePeriod: 10 * time.Second,
 			InitialStreamReceiveWindow: 1024 * 1024,
 			InitialConnectionReceiveWindow: 4 * 1024 * 1024,
 		})
@@ -362,6 +345,10 @@ func (v *VPNInstance) startQuicClient() {
 		// 读循环 (Blocking)
 		// 如果连接断开，这里会返回 error
 		v.handleClientSession(conn)
+		
+		v.connMx.Lock()
+		v.quicConn = nil
+		v.connMx.Unlock()
 		
 		log.Printf("[QUIC] 连接断开，准备重连...")
 		time.Sleep(1 * time.Second)

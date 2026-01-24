@@ -28,7 +28,7 @@ func GenerateTLSConfig(isServer bool) *tls.Config {
 
 	template := x509.Certificate{
 		SerialNumber: big.NewInt(1),
-		NotBefore:    time.Now(),
+		NotBefore:    time.Now().Add(-24 * time.Hour),
 		NotAfter:     time.Now().Add(time.Hour * 24 * 365),
 		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},

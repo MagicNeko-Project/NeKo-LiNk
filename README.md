@@ -15,7 +15,9 @@
 *   **Layer 3 虚拟化 (WireGuard-TUN)**: 基于官方 `wireguard/tun` 库，支持多队列和 GSO/GRO，提供目前 Go 生态中最顶级的 TUN 读写性能。
 *   **批处理传输 (UDP/IPv4 Batching)**: 引入 `x/net/ipv4` 的 `ReadBatch` 技术，一次系统调用处理一组数据包，极大降低高吞吐下的 CPU 中断和损耗。
 *   **调试监控系统 (Debug Mode)**: 支持通过 `-debug` 参数开启详细的包追踪日志，实时洞察数据包在隧道中的流转状态。
-*   **现代加密**: 使用 QUIC 内置的 **TLS 1.3** 进行银行级加密与身份验证，更安全，更高效。
+*   **现代加密 (Modern Encryption)**:
+    *   **QUIC 模式**: 使用内置 **TLS 1.3** 进行银行级加密与身份验证。
+    *   **Raw 模式**: 继续使用经典的 **XChaCha20-Poly1305** 自动 Nonce 加密，高性能且安全。
 
 ## 🛠️ 快速开始 (Quick Start)
 
