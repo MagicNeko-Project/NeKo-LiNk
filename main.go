@@ -129,25 +129,17 @@ func NewVPNInstance(cfg Config) *VPNInstance {
 	v := &VPNInstance{Cfg: cfg}
 
 	keyHash := sha256.Sum256([]byte(cfg.Key))
-	var err error
-	v.AEAD, err = chacha20poly1305.NewX(keyHash[:])
-	if err != nil {
-		log.Fatalf("加密初始化失败: %v", err)
+	// 准备 AEAD 算力池 (16核并行预备)
+	v.aeadPool = make([]cipher.AEAD, 16)
+	for i := 0; i < 16; i++ {
+		v.aeadPool[i], _ = chacha20poly1305.NewX(keyHash[:])
 	}
+	v.AEAD = v.aeadPool[0]
 
 	v.numWorkers = runtime.NumCPU()
 	if v.numWorkers > 8 {
 		v.numWorkers = 8
 	}
-	if v.Cfg.Protocol == "raw" {
-		// Raw 模式需要更多的 Worker 来维持极致吞吐
-		v.numWorkers = 8 
-	}
-	v.aeadPool = make([]cipher.AEAD, v.numWorkers)
-	for i := 0; i < v.numWorkers; i++ {
-		v.aeadPool[i], _ = chacha20poly1305.NewX(keyHash[:])
-	}
-
 	v.SessionID = uint32(os.Getpid()) ^ uint32(keyHash[0])<<24
 	return v
 }
@@ -157,7 +149,7 @@ func (v *VPNInstance) Start() {
 		debugMode = true
 	}
 
-	log.Printf("[%s] NekoLink v5.21 (Raw抢修版) 启动中 - 核心: %d, MTU: %d",
+	log.Printf("[%s] NekoLink v5.22 (融合保序版) 启动中 - 核心: %d, MTU: %d",
 		v.Cfg.InterfaceName, v.numWorkers, v.Cfg.MTU)
 
 	v.InitTUN()
@@ -410,40 +402,71 @@ func (v *VPNInstance) rawReaderLoop(idx int) {
 	}
 }
 
-// --- UDP 专用 TUN 读取与发送循环 (v5.20 归化版：单包保序) ---
+// --- UDP 专用 TUN 读取与发送循环 (v5.22 融合保序版) ---
 func (v *VPNInstance) TUNReaderLoopUDP_Ordered() {
-	buf := make([]byte, BufSize)
-	aead := v.aeadPool[0] // 使用主核心 AEAD
+	buffs := make([][]byte, BatchSize)
+	for i := range buffs {
+		buffs[i] = make([]byte, BufSize)
+	}
+	sizes := make([]int, BatchSize)
 
-	// 准备单包容器
-	buffs := [][]byte{buf}
-	sizes := []int{0}
+	// 提前申请好并行结果位
+	results := make([][]byte, BatchSize)
+	ptrs := make([]*[]byte, BatchSize)
 
 	for {
-		// 每次只读一个包，彻底消除 Micro-bursts
+		// 1. 批捕获：一次抓一波包（高效），杜绝单包系统调用瓶颈
 		n, err := v.TunDev.Read(buffs, sizes, TunOffset)
-		if err != nil {
-			continue
-		}
-		if n == 0 || sizes[0] == 0 {
+		if err != nil || n == 0 {
 			continue
 		}
 
+		// 2. 并行加工：多核切菜但不打乱顺序
+		var wg sync.WaitGroup
+		wg.Add(n)
+		for i := 0; i < n; i++ {
+			go func(idx int) {
+				defer wg.Done()
+				if sizes[idx] <= 0 {
+					return
+				}
+				dstPtr := bufPool.Get().(*[]byte)
+				ptrs[idx] = dstPtr
+				// 使用独占 AEAD (idx%16) 保证线程安全
+				results[idx] = v.encryptInto(buffs[idx][TunOffset:TunOffset+sizes[idx]], v.aeadPool[idx%16], *dstPtr)
+			}(i)
+		}
+		wg.Wait()
+
+		// 3. 落地：获取远端地址
 		addr := v.ClientRemoteUDP
 		if v.Cfg.Mode == "server" {
 			addr = v.ServerPeerAddr.Load()
 		}
-		if addr == nil {
-			continue
-		}
 
-		// 同步加密：不开启任何并发，保证节奏与内核完全一致
-		dstPtr := bufPool.Get().(*[]byte)
-		encrypted := v.encryptInto(buf[TunOffset:TunOffset+sizes[0]], aead, *dstPtr)
-		if encrypted != nil {
-			v.ConnUDP.WriteToUDP(encrypted, addr)
+		// 4. 平滑发送：循环调用 WriteToUDP，利用系统调用间隙形成天然 Pacing
+		if addr != nil {
+			for i := 0; i < n; i++ {
+				if results[i] != nil {
+					v.ConnUDP.WriteToUDP(results[i], addr)
+				}
+				// 立即回收内存
+				if ptrs[i] != nil {
+					bufPool.Put(ptrs[i])
+					ptrs[i] = nil
+				}
+				results[i] = nil
+			}
+		} else {
+			// 仅做内存回收
+			for i := 0; i < n; i++ {
+				if ptrs[i] != nil {
+					bufPool.Put(ptrs[i])
+					ptrs[i] = nil
+				}
+				results[i] = nil
+			}
 		}
-		bufPool.Put(dstPtr)
 	}
 }
 
