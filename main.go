@@ -246,26 +246,14 @@ func (v *VPNInstance) IfaceWrite(data []byte) {
 		v.tracePacket("TUN-WRITE", data)
 	}
 
-	// Helper for TUN Write with offset
-	bufPtr := bufPool.Get().(*[]byte)
-	buf := *bufPtr
-	
+	// 简化逻辑：直接分配精确大小的缓冲区，避免复杂的池管理
 	totalLen := TunOffset + len(data)
-	if cap(buf) < totalLen {
-		buf = make([]byte, totalLen)
-	}
-	
+	buf := make([]byte, totalLen)
 	copy(buf[TunOffset:], data)
-	toWrite := buf[:totalLen]
 	
-	_, err := v.TunDev.Write([][]byte{toWrite}, TunOffset)
+	_, err := v.TunDev.Write([][]byte{buf}, TunOffset)
 	if err != nil {
 		logDebug("TUN-WRITE Error: %v", err)
-	}
-	
-	// Only put back if it's the original large buffer
-	if cap(buf) >= 65536 {
-		bufPool.Put(bufPtr)
 	}
 }
 
