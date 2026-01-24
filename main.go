@@ -190,28 +190,21 @@ func (v *VPNInstance) setupNFTables(iface string) {
 
 	log.Printf("[%s] NFTables MSS 钳制已启用", iface)
 
-	// 仅服务端添加安全防护规则
-	if v.Cfg.Mode == "server" && v.Cfg.Protocol == "raw" {
+	// 服务端添加安全防护规则 (UDP 和 Raw 模式)
+	if v.Cfg.Mode == "server" {
 		v.setupSecurityRules()
 	}
 }
 
-// setupSecurityRules 设置 Raw 模式的安全防护规则
+// setupSecurityRules 设置服务端安全防护规则
 func (v *VPNInstance) setupSecurityRules() {
-	protoNum := fmt.Sprintf("%d", v.Cfg.IPProtocolNum)
-
-	// 创建 raw 表用于入站过滤
+	// 创建安全表
 	runCmd("nft", "add", "table", "inet", "nekolink_security")
 
 	// 输入链
 	runCmd("nft", "add", "chain", "inet", "nekolink_security", "input",
 		"{ type filter hook input priority filter; policy accept; }")
 	runCmd("nft", "flush", "chain", "inet", "nekolink_security", "input")
-
-	// 只允许我们协议号的流量，拒绝其他嗅探
-	// 允许自定义协议
-	runCmd("nft", "add", "rule", "inet", "nekolink_security", "input",
-		"meta", "l4proto", protoNum, "accept")
 
 	// 允许已建立的连接
 	runCmd("nft", "add", "rule", "inet", "nekolink_security", "input",
@@ -227,11 +220,24 @@ func (v *VPNInstance) setupSecurityRules() {
 	runCmd("nft", "add", "rule", "inet", "nekolink_security", "input",
 		"meta", "l4proto", "ipv6-icmp", "accept")
 
+	// 根据协议类型添加规则
+	if v.Cfg.Protocol == "raw" {
+		// Raw 模式: 允许自定义协议号
+		protoNum := fmt.Sprintf("%d", v.Cfg.IPProtocolNum)
+		runCmd("nft", "add", "rule", "inet", "nekolink_security", "input",
+			"meta", "l4proto", protoNum, "accept")
+		log.Printf("[Security] Raw 模式安全规则已启用 (Proto: %s)", protoNum)
+	} else {
+		// UDP 模式: 允许指定端口
+		port := fmt.Sprintf("%d", v.Cfg.BasePort)
+		runCmd("nft", "add", "rule", "inet", "nekolink_security", "input",
+			"udp", "dport", port, "accept")
+		log.Printf("[Security] UDP 模式安全规则已启用 (Port: %s)", port)
+	}
+
 	// 对于无效包直接丢弃
 	runCmd("nft", "add", "rule", "inet", "nekolink_security", "input",
 		"ct", "state", "invalid", "drop")
-
-	log.Printf("[Security] Raw 模式安全规则已启用 (Proto: %s)", protoNum)
 }
 
 // --- 网络初始化 ---
