@@ -79,11 +79,9 @@ func (b *RawBind) SetClientRemote(addr netip.Addr) {
 func (b *RawBind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
 	if b.useEBPF {
 		// Initialize eBPF Shadow X Engine
-		mode := uint32(0)
+		mode := uint32(1) // Default: Raw-IP
 		if b.useTCP {
-			mode = 2
-		} else {
-			mode = 1 // Raw-IP
+			mode = 2 // Fake-TCP
 		}
 
 		ebpfCfg := xdp.ShadowXConfig{
@@ -98,27 +96,32 @@ func (b *RawBind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
 			log.Printf("[eBPF] Failed to load Shared Shadow X Engine: %v. Falling back to User-space Raw Socket.", err)
 			b.useEBPF = false
 		} else {
-			if err := engine.Register(ebpfCfg); err != nil {
-				log.Printf("[eBPF] Failed to register config: %v. Falling back.", err)
-				engine.Close()
-				b.useEBPF = false
-			} else {
-				b.ebpfEngine = engine
-				b.ebpfCfg = ebpfCfg
-				// Under eBPF, we just use a standard UDP socket.
-			// The eBPF kernel hooks (XDP/TC) will handle the Fake-TCP/Raw transformation.
+			// Under eBPF, we just use a standard UDP socket.
 			addr := &net.UDPAddr{IP: net.IPv4zero, Port: b.nattLocalPort}
 			c, err := net.ListenUDP("udp", addr)
 			if err != nil {
 				return nil, 0, fmt.Errorf("failed to open UDP for eBPF mode: %w", err)
 			}
-			c.SetReadBuffer(25 * 1024 * 1024)
-			c.SetWriteBuffer(25 * 1024 * 1024)
-			b.udpConn = c
-			return []conn.ReceiveFunc{b.receiveUDP}, uint16(b.nattLocalPort), nil
+
+			// Capture dynamic port
+			boundPort := uint16(c.LocalAddr().(*net.UDPAddr).Port)
+			ebpfCfg.LocalPort = boundPort
+
+			if err := engine.Register(ebpfCfg); err != nil {
+				log.Printf("[eBPF] Failed to register config: %v. Falling back.", err)
+				c.Close()
+				engine.Close()
+				b.useEBPF = false
+			} else {
+				b.ebpfEngine = engine
+				b.ebpfCfg = ebpfCfg
+				c.SetReadBuffer(25 * 1024 * 1024)
+				c.SetWriteBuffer(25 * 1024 * 1024)
+				b.udpConn = c
+				return []conn.ReceiveFunc{b.receiveUDP}, boundPort, nil
+			}
 		}
 	}
-}
 
 	if b.useNATT {
 		// Use UDP for NAT-T
@@ -155,7 +158,7 @@ func (b *RawBind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
 		b.ipv6 = v6Conn
 	}
 
-	return []conn.ReceiveFunc{b.receiveIPv4, b.receiveIPv6}, port, nil
+	return []conn.ReceiveFunc{b.receiveIPv4, b.receiveIPv6}, uint16(b.nattLocalPort), nil
 }
 
 func (b *RawBind) receiveUDP(packets [][]byte, sizes []int, eps []conn.Endpoint) (n int, err error) {

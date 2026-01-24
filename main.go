@@ -585,8 +585,20 @@ func (v *VPNInstance) initRaw() {
 			if v.IsIPv6 { addr.IP = net.IPv6zero }
 			conn, err := net.ListenUDP("udp", addr)
 			if err != nil { log.Fatalf("UDP 监听失败: %v", err) }
-			conn.SetReadBuffer(25 << 20); conn.SetWriteBuffer(25 << 20)
-			v.ConnRaw[i] = conn
+			
+			// Capture bound port
+			boundPort := uint16(conn.LocalAddr().(*net.UDPAddr).Port)
+			v.ebpfRawCfg.LocalPort = boundPort
+
+			if err := v.ebpfRawEngine.Register(v.ebpfRawCfg); err != nil {
+				log.Printf("[EBPF] 注册失败: %v. 回退.", err)
+				conn.Close()
+				v.ebpfRawEngine.Close()
+				v.Cfg.UseEBPF = false
+			} else {
+				conn.SetReadBuffer(25 << 20); conn.SetWriteBuffer(25 << 20)
+				v.ConnRaw[i] = conn
+			}
 		} else {
 			conn, err := net.ListenIP(protoStr, lAddr)
 			if err != nil { log.Fatalf("Raw 监听失败: %v", err) }

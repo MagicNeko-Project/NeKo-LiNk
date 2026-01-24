@@ -14,7 +14,7 @@ struct shadow_config {
     __u32 mode;       // 1=Raw-IP (Custom Proto), 2=Fake-TCP
     __u32 proto_num;  // Only used for Mode 1
     __u16 local_port; // Port the app is listening on (Big Endian)
-    __u16 reserved;   // Checksum helpers
+    __u16 reserved;   
 };
 
 // --- Maps ---
@@ -35,7 +35,7 @@ struct {
 
 // --- Helper: IP Checksum ---
 
-static __always_inline void fast_ip_recompute(struct iphdr *ip) {
+static __always_inline void full_ip_recompute(struct iphdr *ip) {
     __u32 csum = 0;
     __u16 *p = (__u16 *)ip;
     ip->check = 0;
@@ -57,63 +57,60 @@ int tc_shadow_ingress(struct __sk_buff *skb) {
     void *data_end = (void *)(long)skb->data_end;
     void *data = (void *)(long)skb->data;
 
-    struct ethhdr *eth = data;
-    if ((void *)(eth + 1) > data_end) return TC_ACT_OK;
+    struct ethhdr *eth = (struct ethhdr *)data;
+    if ((void *)eth + sizeof(*eth) > data_end) return TC_ACT_OK;
     if (eth->h_proto != bpf_htons(ETH_P_IP)) return TC_ACT_OK;
 
-    struct iphdr *ip = (void *)(eth + 1);
-    if ((void *)(ip + 1) > data_end) return TC_ACT_OK;
+    struct iphdr *ip = (struct iphdr *)((void *)eth + sizeof(*eth));
+    if ((void *)ip + sizeof(*ip) > data_end) return TC_ACT_OK;
 
-    // --- Mode 1 Search (Protocol based) ---
+    // --- Mode 1: Restore Raw-IP (Add UDP Head) ---
     struct shadow_config *cfg = bpf_map_lookup_elem(&proto_shadow_map, &ip->protocol);
     if (cfg && cfg->mode == 1) {
-        // Expand room for UDP header (8 bytes)
+        // bpf_printk("[eBPF] Ingress Mode 1: Restoration triggered (proto %d)\n", ip->protocol);
+
         if (bpf_skb_adjust_room(skb, 8, BPF_ADJ_ROOM_NET, 0) < 0) return TC_ACT_OK;
         
-        // Re-read pointers after adjust
         data = (void *)(long)skb->data;
         data_end = (void *)(long)skb->data_end;
-        eth = data;
-        ip = (void *)(eth + 1);
-        if ((void *)(ip + 1) > data_end) return TC_ACT_OK;
+        eth = (struct ethhdr *)data;
+        ip = (struct iphdr *)((void *)eth + sizeof(*eth));
+        if ((void *)ip + sizeof(*ip) > data_end) return TC_ACT_OK;
 
-        struct udphdr *udp = (void *)ip + (ip->ihl * 4);
-        if ((void *)(udp + 1) > data_end) return TC_ACT_OK;
+        struct udphdr *udp = (struct udphdr *)((void *)ip + (ip->ihl * 4));
+        if ((void *)udp + sizeof(*udp) > data_end) return TC_ACT_OK;
 
-        // Restore to UDP
         udp->dest = cfg->local_port;
-        udp->source = bpf_htons(12345); // Dummy source for raw
+        udp->source = bpf_htons(12345);
         udp->len = bpf_htons(bpf_ntohs(ip->tot_len) + 8 - (ip->ihl * 4));
         udp->check = 0;
 
         ip->protocol = IPPROTO_UDP;
         ip->tot_len = bpf_htons(bpf_ntohs(ip->tot_len) + 8);
-        fast_ip_recompute(ip);
+        full_ip_recompute(ip);
         
-        // bpf_printk("[eBPF] Ingress Mode 1 Restored: Proto %d -> Port %d\n", ip->protocol, bpf_ntohs(udp->dest));
         return TC_ACT_OK;
     }
 
-    // --- Mode 2 Search (Port based) ---
+    // --- Mode 2: Restore Fake-TCP (TCP 20 -> UDP 8) ---
     if (ip->protocol == IPPROTO_TCP) {
-        struct tcphdr *tcp = (void *)ip + (ip->ihl * 4);
-        if ((void *)(tcp + 1) > data_end) return TC_ACT_OK;
+        struct tcphdr *tcp = (struct tcphdr *)((void *)ip + (ip->ihl * 4));
+        if ((void *)tcp + sizeof(*tcp) > data_end) return TC_ACT_OK;
 
         cfg = bpf_map_lookup_elem(&port_shadow_map, &tcp->dest);
         if (cfg && cfg->mode == 2) {
             __be16 s_p = tcp->source;
             __be16 d_p = tcp->dest;
 
-            // Remove 12 bytes (TCP 20 -> UDP 8)
             if (bpf_skb_adjust_room(skb, -12, BPF_ADJ_ROOM_NET, 0) < 0) return TC_ACT_OK;
             
             data = (void *)(long)skb->data;
             data_end = (void *)(long)skb->data_end;
-            ip = (void *)(data + sizeof(struct ethhdr));
-            if ((void *)(ip + 1) > data_end) return TC_ACT_OK;
+            ip = (struct iphdr *)((void *)data + sizeof(struct ethhdr));
+            if ((void *)ip + sizeof(*ip) > data_end) return TC_ACT_OK;
             
-            struct udphdr *udp = (void *)ip + (ip->ihl * 4);
-            if ((void *)(udp + 1) > data_end) return TC_ACT_OK;
+            struct udphdr *udp = (struct udphdr *)((void *)ip + (ip->ihl * 4));
+            if ((void *)udp + sizeof(*udp) > data_end) return TC_ACT_OK;
 
             udp->source = s_p;
             udp->dest = d_p;
@@ -122,9 +119,7 @@ int tc_shadow_ingress(struct __sk_buff *skb) {
 
             ip->protocol = IPPROTO_UDP;
             ip->tot_len = bpf_htons(bpf_ntohs(ip->tot_len) - 12);
-            fast_ip_recompute(ip);
-            
-            // bpf_printk("[eBPF] Ingress Mode 2 Restored: TCP->UDP Port %d\n", bpf_ntohs(udp->dest));
+            full_ip_recompute(ip);
         }
     }
 
@@ -138,56 +133,51 @@ int tc_shadow_egress(struct __sk_buff *skb) {
     void *data_end = (void *)(long)skb->data_end;
     void *data = (void *)(long)skb->data;
 
-    struct ethhdr *eth = data;
-    if ((void *)(eth + 1) > data_end) return TC_ACT_OK;
+    struct ethhdr *eth = (struct ethhdr *)data;
+    if ((void *)eth + sizeof(*eth) > data_end) return TC_ACT_OK;
     if (eth->h_proto != bpf_htons(ETH_P_IP)) return TC_ACT_OK;
 
-    struct iphdr *ip = (void *)(eth + 1);
-    if ((void *)(ip + 1) > data_end) return TC_ACT_OK;
+    struct iphdr *ip = (struct iphdr *)((void *)eth + sizeof(*eth));
+    if ((void *)ip + sizeof(*ip) > data_end) return TC_ACT_OK;
 
     if (ip->protocol != IPPROTO_UDP) return TC_ACT_OK;
 
-    struct udphdr *udp = (void *)ip + (ip->ihl * 4);
-    if ((void *)(udp + 1) > data_end) return TC_ACT_OK;
+    struct udphdr *udp = (struct udphdr *)((void *)ip + (ip->ihl * 4));
+    if ((void *)udp + sizeof(*udp) > data_end) return TC_ACT_OK;
 
-    // Lookup by local source port
     struct shadow_config *cfg = bpf_map_lookup_elem(&port_shadow_map, &udp->source);
     if (!cfg) return TC_ACT_OK;
 
-    // --- Mode 1 Implementation (Strip UDP) ---
+    // --- Mode 1: Apply Raw-IP (Delete UDP Head) ---
     if (cfg->mode == 1) {
-        // bpf_printk("[eBPF] Egress Mode 1 Applying: Port %d -> Proto %d\n", bpf_ntohs(udp->source), cfg->proto_num);
-        
         if (bpf_skb_adjust_room(skb, -8, BPF_ADJ_ROOM_NET, 0) < 0) return TC_ACT_OK;
         
         data = (void *)(long)skb->data;
         data_end = (void *)(long)skb->data_end;
-        ip = (void *)(data + sizeof(struct ethhdr));
-        if ((void *)(ip + 1) > data_end) return TC_ACT_OK;
+        ip = (struct iphdr *)((void *)data + sizeof(struct ethhdr));
+        if ((void *)ip + sizeof(*ip) > data_end) return TC_ACT_OK;
 
         ip->protocol = (__u8)cfg->proto_num;
         ip->tot_len = bpf_htons(bpf_ntohs(ip->tot_len) - 8);
-        fast_ip_recompute(ip);
+        full_ip_recompute(ip);
         return TC_ACT_OK;
     }
 
-    // --- Mode 2 Implementation (UDP -> TCP) ---
+    // --- Mode 2: Apply Fake-TCP (UDP 8 -> TCP 20) ---
     if (cfg->mode == 2) {
-        // bpf_printk("[eBPF] Egress Mode 2 Applying: Port %d -> Fake TCP\n", bpf_ntohs(udp->source));
-        
         __be16 s_p = udp->source;
         __be16 d_p = udp->dest;
-        __u32 jitter = skb->ifindex + skb->tstamp; // Some jitter
+        __u32 jitter = skb->tstamp; 
 
         if (bpf_skb_adjust_room(skb, 12, BPF_ADJ_ROOM_NET, 0) < 0) return TC_ACT_OK;
         
         data = (void *)(long)skb->data;
         data_end = (void *)(long)skb->data_end;
-        ip = (void *)(data + sizeof(struct ethhdr));
-        if ((void *)(ip + 1) > data_end) return TC_ACT_OK;
+        ip = (struct iphdr *)((void *)data + sizeof(struct ethhdr));
+        if ((void *)ip + sizeof(*ip) > data_end) return TC_ACT_OK;
 
-        struct tcphdr *tcp = (void *)ip + (ip->ihl * 4);
-        if ((void *)(tcp + 1) > data_end) return TC_ACT_OK;
+        struct tcphdr *tcp = (struct tcphdr *)((void *)ip + (ip->ihl * 4));
+        if ((void *)tcp + sizeof(*tcp) > data_end) return TC_ACT_OK;
 
         tcp->source = s_p;
         tcp->dest = d_p;
@@ -201,7 +191,7 @@ int tc_shadow_egress(struct __sk_buff *skb) {
 
         ip->protocol = IPPROTO_TCP;
         ip->tot_len = bpf_htons(bpf_ntohs(ip->tot_len) + 12);
-        fast_ip_recompute(ip);
+        full_ip_recompute(ip);
     }
 
     return TC_ACT_OK;
