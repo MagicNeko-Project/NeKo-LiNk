@@ -246,6 +246,13 @@ if v.Cfg.Mode == "client" {
 addr = fmt.Sprintf("%s:%d", v.Cfg.RemoteIP, v.Cfg.RemotePort)
 }
 
+// Filter Multicast/Broadcast
+if len(ipPacket) >= 20 {
+if (ipPacket[0] >> 4) == 4 {
+dstIP := binary.BigEndian.Uint32(ipPacket[16:20])
+if (dstIP & 0xE0000000) == 0xE0000000 || dstIP == 0xFFFFFFFF { return }
+} else if (ipPacket[0] >> 4) == 6 && ipPacket[24] == 0xff { return }
+}
 if v.Cfg.Mode == "server" {
 ln, err := net.Listen("tcp", addr)
 if err != nil { log.Fatal(err) }
@@ -263,6 +270,13 @@ v.ConnBatch = make([]*ipv4.PacketConn, v.Cfg.PortCount)
 v.ClientRemoteUDP = make([]*net.UDPAddr, v.Cfg.PortCount)
 for i := 0; i < v.Cfg.PortCount; i++ {
 var bindAddrStr string
+// Filter Multicast/Broadcast
+if len(ipPacket) >= 20 {
+if (ipPacket[0] >> 4) == 4 {
+dstIP := binary.BigEndian.Uint32(ipPacket[16:20])
+if (dstIP & 0xE0000000) == 0xE0000000 || dstIP == 0xFFFFFFFF { return }
+} else if (ipPacket[0] >> 4) == 6 && ipPacket[24] == 0xff { return }
+}
 if v.Cfg.Mode == "server" {
 bindAddrStr = fmt.Sprintf("%s:%d", v.Cfg.ServerBindAddr, v.Cfg.BasePort+i)
 } else {
@@ -473,6 +487,13 @@ var destAddr net.Addr
 seq := atomic.AddUint32(&v.TxSeq, 1) - 1
 idx := int(uint64(seq) % uint64(v.Cfg.PortCount))
 
+// Filter Multicast/Broadcast
+if len(ipPacket) >= 20 {
+if (ipPacket[0] >> 4) == 4 {
+dstIP := binary.BigEndian.Uint32(ipPacket[16:20])
+if (dstIP & 0xE0000000) == 0xE0000000 || dstIP == 0xFFFFFFFF { return }
+} else if (ipPacket[0] >> 4) == 6 && ipPacket[24] == 0xff { return }
+}
 if v.Cfg.Mode == "server" {
 if len(ipPacket) >= 20 {
 version := ipPacket[0] >> 4
@@ -708,7 +729,7 @@ for range tick.C {
 pr.mu.Lock()
 if pr.buffer.Len() > 0 {
 head := pr.buffer[0]
-if time.Since(head.T) > 150*time.Millisecond {
+if time.Since(head.T) > 50*time.Millisecond {
 logDebug("Reorderer: Force jump Seq %v", head.Seq)
 pr.nextSeq = head.Seq
 heap.Pop(&pr.buffer)
