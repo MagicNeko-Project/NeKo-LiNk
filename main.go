@@ -157,7 +157,7 @@ func (v *VPNInstance) Start() {
 		debugMode = true
 	}
 
-	log.Printf("[%s] NekoLink v5.20 (GOST归化版) 启动中 - 核心: %d, MTU: %d",
+	log.Printf("[%s] NekoLink v5.21 (Raw抢修版) 启动中 - 核心: %d, MTU: %d",
 		v.Cfg.InterfaceName, v.numWorkers, v.Cfg.MTU)
 
 	v.InitTUN()
@@ -168,8 +168,11 @@ func (v *VPNInstance) Start() {
 		go v.TUNReaderLoopUDP_Ordered() // 发送端保序
 		go v.udpReaderLoop_Ordered()    // 接收端保序 (v5.19 核心修复)
 	} else {
+		// Raw 模式：TUN 读取使用 numWorkers (8)，网络读取使用 ConnRaw 的实际数量 (4)
 		for i := 0; i < v.numWorkers; i++ {
 			go v.TUNReaderLoopRaw(i)
+		}
+		for i := 0; i < len(v.ConnRaw); i++ {
 			go v.rawReaderLoop(i)
 		}
 	}
