@@ -27,9 +27,6 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-echo ">>> [Debug] 正在自动优化配置文件..."
-$APP_BIN -migrate -c "$CONF"
-
 # 查找配置
 CONF="/etc/neko-link/config.json"
 if [ ! -f "$CONF" ]; then
@@ -40,6 +37,9 @@ if [ ! -f "$CONF" ]; then
         exit 1
     fi
 fi
+
+echo ">>> [Debug] 正在自动优化配置文件..."
+$APP_BIN -migrate -c "$CONF"
 
 echo -e "\033[0;32m>>> [Debug] NekoLink 启动！(配置路径: $CONF)\033[0m"
 echo ">>> (温馨提示: 按下 Ctrl+C 就可以停止调试啦喵~)"
