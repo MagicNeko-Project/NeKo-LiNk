@@ -139,6 +139,10 @@ func NewVPNInstance(cfg Config) *VPNInstance {
 	if v.numWorkers > 8 {
 		v.numWorkers = 8
 	}
+	if v.Cfg.Protocol == "raw" {
+		// Raw 模式需要更多的 Worker 来维持极致吞吐
+		v.numWorkers = 8 
+	}
 	v.aeadPool = make([]cipher.AEAD, v.numWorkers)
 	for i := 0; i < v.numWorkers; i++ {
 		v.aeadPool[i], _ = chacha20poly1305.NewX(keyHash[:])
@@ -153,7 +157,7 @@ func (v *VPNInstance) Start() {
 		debugMode = true
 	}
 
-	log.Printf("[%s] NekoLink v5.19 (真·定鼎终极版) 启动中 - 核心: %d, MTU: %d",
+	log.Printf("[%s] NekoLink v5.20 (GOST归化版) 启动中 - 核心: %d, MTU: %d",
 		v.Cfg.InterfaceName, v.numWorkers, v.Cfg.MTU)
 
 	v.InitTUN()
@@ -281,10 +285,8 @@ func (v *VPNInstance) initUDP() {
 	v.ConnUDP = conn
 
 	if v.IsIPv6 {
-		v.ConnBatchV6 = ipv6.NewPacketConn(conn)
 		log.Printf("[UDP] IPv6 模式已启用 (MTU建议 1400 以下)")
 	} else {
-		v.ConnBatchV4 = ipv4.NewPacketConn(conn)
 		log.Printf("[UDP] IPv4 模式运行中")
 	}
 }
@@ -405,94 +407,40 @@ func (v *VPNInstance) rawReaderLoop(idx int) {
 	}
 }
 
-// --- UDP 专用 TUN 读取与发送循环 (v5.18 严格保序版) ---
+// --- UDP 专用 TUN 读取与发送循环 (v5.20 归化版：单包保序) ---
 func (v *VPNInstance) TUNReaderLoopUDP_Ordered() {
-	buffs := make([][]byte, BatchSize)
-	for i := range buffs {
-		buffs[i] = make([]byte, BufSize)
-	}
-	sizes := make([]int, BatchSize)
+	buf := make([]byte, BufSize)
+	aead := v.aeadPool[0] // 使用主核心 AEAD
 
-	// 结果占位槽和内存回收缓存
-	encryptedBuffs := make([][]byte, BatchSize)
-	ptrCache := make([]*[]byte, BatchSize)
+	// 准备单包容器
+	buffs := [][]byte{buf}
+	sizes := []int{0}
 
 	for {
+		// 每次只读一个包，彻底消除 Micro-bursts
 		n, err := v.TunDev.Read(buffs, sizes, TunOffset)
 		if err != nil {
 			continue
 		}
-		if n == 0 {
+		if n == 0 || sizes[0] == 0 {
 			continue
 		}
 
-		// v5.18 核心：同步并行加工 (Fork-Join)
-		// 利用所有 worker 加密，但必须等这一批齐了再按序发出
-		var wg sync.WaitGroup
-		wg.Add(n)
-
-		for i := 0; i < n; i++ {
-			go func(idx int, size int, plain []byte) {
-				defer wg.Done()
-				if size == 0 {
-					return
-				}
-				dstPtr := bufPool.Get().(*[]byte)
-				ptrCache[idx] = dstPtr
-
-				// 均匀分配到 worker pool
-				aead := v.aeadPool[idx%len(v.aeadPool)]
-				encryptedBuffs[idx] = v.encryptInto(plain, aead, *dstPtr)
-			}(i, sizes[i], buffs[i][TunOffset:TunOffset+sizes[i]])
-		}
-
-		wg.Wait() // 关键：等大家都切完菜
-
-		// 顺序落地发送
 		addr := v.ClientRemoteUDP
 		if v.Cfg.Mode == "server" {
 			addr = v.ServerPeerAddr.Load()
 		}
-
-		if addr != nil {
-			// v5.19 极致平滑：每 8 个包一波均匀吐出，防止瞬间突发
-			const subBatchSize = 8
-			for i := 0; i < n; i += subBatchSize {
-				end := i + subBatchSize
-				if end > n {
-					end = n
-				}
-
-				msgsV4 := make([]ipv4.Message, 0, subBatchSize)
-				msgsV6 := make([]ipv6.Message, 0, subBatchSize)
-
-				for j := i; j < end; j++ {
-					if encryptedBuffs[j] == nil {
-						continue
-					}
-					if v.IsIPv6 {
-						msgsV6 = append(msgsV6, ipv6.Message{Buffers: [][]byte{encryptedBuffs[j]}, Addr: addr})
-					} else {
-						msgsV4 = append(msgsV4, ipv4.Message{Buffers: [][]byte{encryptedBuffs[j]}, Addr: addr})
-					}
-				}
-
-				if v.IsIPv6 && len(msgsV6) > 0 {
-					v.ConnBatchV6.WriteBatch(msgsV6, 0)
-				} else if !v.IsIPv6 && len(msgsV4) > 0 {
-					v.ConnBatchV4.WriteBatch(msgsV4, 0)
-				}
-			}
+		if addr == nil {
+			continue
 		}
 
-		// 清理与回收
-		for i := 0; i < n; i++ {
-			if ptrCache[i] != nil {
-				bufPool.Put(ptrCache[i])
-				ptrCache[i] = nil
-			}
-			encryptedBuffs[i] = nil
+		// 同步加密：不开启任何并发，保证节奏与内核完全一致
+		dstPtr := bufPool.Get().(*[]byte)
+		encrypted := v.encryptInto(buf[TunOffset:TunOffset+sizes[0]], aead, *dstPtr)
+		if encrypted != nil {
+			v.ConnUDP.WriteToUDP(encrypted, addr)
 		}
+		bufPool.Put(dstPtr)
 	}
 }
 
