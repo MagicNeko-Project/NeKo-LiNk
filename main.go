@@ -61,6 +61,7 @@ type Config struct {
 	// --- Transport Options ---
 	IPProtocolNum int  `json:"ip_protocol_num,omitempty"`
 	UseNATT       bool `json:"use_nat_t,omitempty"`
+	UseTCP        bool `json:"use_tcp,omitempty"`
 	UDPPort       int  `json:"udp_port,omitempty"`
 	Debug         bool `json:"debug,omitempty"`
 
@@ -103,8 +104,12 @@ func (c *Config) ParseLegacy() (changed bool) {
 	// 2. 协议迁移 (UDP/TCP/QUIC -> wg-raw)
 	oldProto := strings.ToLower(c.Protocol)
 	if oldProto == "udp" || oldProto == "tcp" || oldProto == "quic" || oldProto == "" {
+		if oldProto == "tcp" {
+			c.UseTCP = true
+			c.IPProtocolNum = 6
+		}
 		c.Protocol = "wg-raw"
-		log.Printf("[%s] 自动将旧版协议 %s 升级为 wg-raw", c.InterfaceName, oldProto)
+		log.Printf("[%s] 自动将旧版协议 %s 升级为 wg-raw (Fake TCP: %v)", c.InterfaceName, oldProto, c.UseTCP)
 		changed = true
 	}
 	
@@ -251,7 +256,7 @@ func generateWGKey() ([]byte, []byte) {
 
 func (v *VPNInstance) startWireGuardRaw() {
 	// 1. Create Bind
-	bind := NewRawBind(v.Cfg.IPProtocolNum, v.Cfg.UseNATT, v.Cfg.ListenPort, v.Cfg.PeerPort)
+	bind := NewRawBind(v.Cfg.IPProtocolNum, v.Cfg.UseNATT, v.Cfg.UseTCP, v.Cfg.ListenPort, v.Cfg.PeerPort)
 	
 	// 2. Client Mode: Set Remote
 	if v.Cfg.Mode == "client" {

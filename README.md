@@ -5,7 +5,8 @@
 
 ## ✨ 核心特性
 
-*   **Shadow WireGuard (wg-raw)**: 官方 WireGuard 内核，但**不走 UDP**。流量被巧妙地封装在自定义 IP 协议号（如 233）或伪装协议中，彻底规避针对 WireGuard 协议特征的识别。
+*   **Shadow WireGuard (wg-raw)**: 官方 WireGuard 内核，但**不走 UDP**。流量被巧妙地封装在自定义 IP 协议号（如 233）或 **TCP 伪装协议**中，彻底规避针对 WireGuard 协议特征的识别。
+*   **TCP 协议头伪装**: 当选择 `protocol: "tcp"` 时，流量将自动包裹一层真实的 TCP 协议头（包含 Seq/Ack/PSH-ACK 标志），在防火墙看来就是正常的 TCP 流量，具有极强的穿透性。
 *   **全自动“零配置”握手**: 彻底告别繁琐的密钥对生成与手工 Peer 配置！只需在两端设置相同的 `key` (密码)，NekoLink 会通过私有的 `0xFE` 握手协议自动交换临时密钥并配置隧道。
 *   **传送门接管 (Shadowing)**: 所有的流量接管对 WireGuard 工具完全透明。外部 `wg` 工具看到的 Endpoint 始终是 `127.0.0.1`，而真实的物理传输由 NekoLink 在底层通过劫持逻辑无感完成。
 *   **NAT-T 全程穿透**: 面对严苛的 NAT 环境，可选开启 UDP 封装模式，让自定义协议流量像普通 UDP 包一样滑过路由器，兼顾隐蔽性与兼容性。
