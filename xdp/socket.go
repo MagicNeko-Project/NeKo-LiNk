@@ -80,6 +80,13 @@ func GetShadowXEngine(ifaceName string) (*ShadowXEngine, error) {
 		RawAllowMap *ebpf.Map     `ebpf:"raw_allow_map"`
 	}
 
+	// Disable BTF for maps to support kernels without BTF support
+	spec.Types = nil
+	for _, m := range spec.Maps {
+		m.Key = nil
+		m.Value = nil
+	}
+
 	if err := spec.LoadAndAssign(&objs, nil); err != nil { return nil, err }
 
 	iface, err := net.InterfaceByName(ifaceName)
