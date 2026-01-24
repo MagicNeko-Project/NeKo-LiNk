@@ -12,6 +12,7 @@
 *   **Layer 3 虚拟化 (WireGuard-TUN)**: 基于官方 `wireguard/tun` 库，支持多队列和 GSO/GRO，提供目前 Go 生态中最顶级的 TUN 读写性能。
 *   **批处理传输 (UDP/IPv4 Batching)**: 引入 `x/net/ipv4` 的 `ReadBatch` 技术，一次系统调用处理一组数据包，极大降低高吞吐下的 CPU 中断和损耗。
 *   **调试监控系统 (Debug Mode)**: 支持通过 `-debug` 参数开启详细的包追踪日志，实时洞察数据包在隧道中的流转状态。
+*   **无感知代理 (Transparent Proxy)**: **(New!)** 客户端支持开启本地 SOCKS5 代理 (如 `127.0.0.1:1080`)。该代理的所有出站流量会自动绑定到 VPN 接口发送，无需配置系统全局路由，极大方便浏览器/TG等程序单独使用 VPN。
 *   **现代加密**: 全程使用 ChaCha20-Poly1305 (IETF) 进行加密和完整性校验，安全无忧。
 
 ## 🛠️ 快速开始 (Quick Start)
@@ -46,15 +47,16 @@ go build -o vpn main.go
 ```json
 {
   "server_addr": "1.2.3.4",        // 服务端 IP (Client 填 Server IP, Server 可填 [::])
-  "protocol": "udp",               // "udp" 或 "raw"
+  "protocol": "udp",               // "udp"(推荐), "tcp", "raw"
   "ip_protocol_num": 233,          // Raw 模式下的协议号
-  "base_port": 9000,               // UDP 起始端口
+  "base_port": 9000,               // UDP 起始端口 / TCP 监听端口
   "port_count": 4,                 //并发通道数量 (建议 4-8)
   "key": "your-secret-key-32-chars-needed!!", // 32字节密钥
   "local_addr": "10.0.0.1/24",     // 虚拟网卡 IP
   "mode": "server",                // "server" 或 "client"
   "interface_name": "tap0",        // 自定义网卡名称
-  "mtu": 1280                      // 推荐 1280 (IPv6安全值) 或 1400 (搭配自动MSS)
+  "mtu": 1280,                     // 推荐 1280 (IPv6安全值) 或 1400 (搭配自动MSS)
+  "socks_bind": "127.0.0.1:1080"   // (可选) 开启本地 SOCKS5 代理，流量将自动强制走 VPN
 }
 ```
 
@@ -116,9 +118,37 @@ sudo systemctl status neko-link
 ./update.sh
 ```
 
-### 7. 高阶用法 (Advanced Usage)
+### 7. 如何验证是否真的走了 Raw 协议？(Verification)
 
-#### 7.1 多实例运行 (Multi-Instance)
+您可以使用 `tcpdump` 抓包来验证流量是否真的通过了自定义协议号 (233) 传输，而不是伪装成了 UDP/TCP。
+
+在服务器或客户端执行：
+```bash
+# 假设您的物理网卡是 eth0 (请根据实际情况修改)
+# 抓取协议号为 233 的包
+sudo tcpdump -n -i eth0 proto 233
+```
+
+- **成功**: 屏幕上疯狂滚动 `IP 1.2.3.4 > 5.6.7.8: ip-proto-233 1400`，说明这是货真价实的 Raw IP 通讯！
+- **失败**: 没有任何输出，但 VPN 能通？那说明您可能还在跑 UDP 模式，请检查配置文件。
+
+### 8. TCP 模式与防火墙穿透 (TCP Mode & Optimization)
+如果您的网络环境封锁了 UDP (如某些公司内网或校园网)，可以将 `protocol` 设置为 `tcp`。
+
+NekoLink 的 TCP 模式已针对隧道场景进行了深度优化：
+*   **TCP_NODELAY**: 禁用 Nagle 算法，确保操作无延迟。
+*   **KeepAlive**: 30秒心跳保活，断线即刻重连。
+*   **Large Buffer**: 4MB 读写缓冲区，跑满千兆带宽无压力。
+
+只需将配置改为：
+```json
+"protocol": "tcp",
+"base_port": 443  // 伪装成 HTTPS 流量效果更佳
+```
+
+### 9. 高阶用法 (Advanced Usage)
+
+#### 9.1 多实例运行 (Multi-Instance)
 NekoLink 支持在一个进程中同时运行多个 VPN 实例（混合 Client 和 Server 均可）。
 只需将 `config.json` 的内容改为 **数组 `[]`** 格式即可：
 

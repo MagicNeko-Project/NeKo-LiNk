@@ -425,6 +425,15 @@ func (v *VPNInstance) TCPClientDial(addr string) {
 }
 func (v *VPNInstance) TCPHandler(c net.Conn) {
 	defer c.Close()
+
+	if tcpConn, ok := c.(*net.TCPConn); ok {
+		tcpConn.SetNoDelay(true) // Disable Nagle's Algo (Crucial for VPN!)
+		tcpConn.SetKeepAlive(true)
+		tcpConn.SetKeepAlivePeriod(30 * time.Second)
+		tcpConn.SetReadBuffer(4 * 1024 * 1024)
+		tcpConn.SetWriteBuffer(4 * 1024 * 1024)
+	}
+
 	header := make([]byte, 2)
 	for {
 		if _, err := io.ReadFull(c, header); err != nil { return }
