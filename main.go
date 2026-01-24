@@ -274,7 +274,7 @@ func (v *VPNInstance) startWireGuardRaw() {
 
 	// 5. Register Handshake Handler
 	// Packet: [0xFE] [Nonce(24)] [Cipher(Ver(1)+PubKey(32))]
-	bind.SetHandshakeCallback(func(pkt []byte, remote netip.Addr) bool {
+	bind.SetHandshakeCallback(func(pkt []byte, remote netip.AddrPort) bool {
 		// Safety check for initialized device
 		if v.wgDevice == nil { return false }
 
@@ -321,9 +321,10 @@ func (v *VPNInstance) startWireGuardRaw() {
 	// 8. Client: Initiate Handshake
 	if v.Cfg.Mode == "client" {
 		addr, _ := netip.ParseAddr(v.Cfg.PeerAddr)
+		addrPort := netip.AddrPortFrom(addr, uint16(v.Cfg.PeerPort))
 		go func() {
 			for {
-				v.sendHandshake(bind, addr, pub)
+				v.sendHandshake(bind, addrPort, pub)
 				time.Sleep(5 * time.Second) // Retry every 5s until connected (WG usually quiets down)
 			}
 		}()
@@ -333,7 +334,7 @@ func (v *VPNInstance) startWireGuardRaw() {
 	select {}
 }
 
-func (v *VPNInstance) sendHandshake(bind *RawBind, remote netip.Addr, myPub []byte) {
+func (v *VPNInstance) sendHandshake(bind *RawBind, remote netip.AddrPort, myPub []byte) {
 	// Construct [0xFE] [Nonce] [Cipher]
 	pkt := make([]byte, 1+NonceSize+33+Overhead)
 	pkt[0] = 0xFE
@@ -342,7 +343,7 @@ func (v *VPNInstance) sendHandshake(bind *RawBind, remote netip.Addr, myPub []by
 	nonce := pkt[1 : 1+NonceSize]
 	if _, err := rand.Read(nonce); err != nil { return }
 	
-	// Payload: [Ver(1)][PubKey] 
+	// Payload: [Ver(Verification Code/Ver)(1)][PubKey] 
 	plain := make([]byte, 33)
 	plain[0] = 1
 	copy(plain[1:], myPub)

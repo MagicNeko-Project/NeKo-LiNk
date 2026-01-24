@@ -41,7 +41,7 @@ type RawBind struct {
 	useNATT      bool
 	nattLocalPort int
 	nattRemotePort int
-	handshakeCb  func(data []byte, remote netip.Addr) bool
+	handshakeCb  func(data []byte, remote netip.AddrPort) bool
 	
 	// For Client mode fix: optionally force a remote address if set
 	clientRemote netip.Addr
@@ -56,7 +56,7 @@ func NewRawBind(proto int, useNATT bool, localPort, remotePort int) *RawBind {
 	}
 }
 
-func (b *RawBind) SetHandshakeCallback(cb func([]byte, netip.Addr) bool) {
+func (b *RawBind) SetHandshakeCallback(cb func([]byte, netip.AddrPort) bool) {
 	b.handshakeCb = cb
 }
 
@@ -121,7 +121,7 @@ func (b *RawBind) receiveUDP(packets [][]byte, sizes []int, eps []conn.Endpoint)
 		if b.handshakeCb != nil {
 			packetCopy := make([]byte, nRead)
 			copy(packetCopy, buf[:nRead])
-			go b.handshakeCb(packetCopy, ip)
+			go b.handshakeCb(packetCopy, addrPort)
 		}
 		return 0, nil
 	}
@@ -149,7 +149,7 @@ func (b *RawBind) receiveIPv4(packets [][]byte, sizes []int, eps []conn.Endpoint
 			// Copy buffer because we might overwrite it or it's reused
 			packetCopy := make([]byte, nRead)
 			copy(packetCopy, buf[:nRead])
-			go b.handshakeCb(packetCopy, ip)
+			go b.handshakeCb(packetCopy, netip.AddrPortFrom(ip, 0))
 		}
 		// Consume packet, don't pass to WireGuard
 		return 0, nil
@@ -175,7 +175,7 @@ func (b *RawBind) receiveIPv6(packets [][]byte, sizes []int, eps []conn.Endpoint
 		if b.handshakeCb != nil {
 			packetCopy := make([]byte, nRead)
 			copy(packetCopy, buf[:nRead])
-			go b.handshakeCb(packetCopy, ip)
+			go b.handshakeCb(packetCopy, netip.AddrPortFrom(ip, 0))
 		}
 		return 0, nil
 	}
@@ -227,17 +227,21 @@ func (b *RawBind) Send(bufs [][]byte, ep conn.Endpoint) error {
 }
 
 // SendRaw allows sending control packets (e.g. handshake) bypassing WireGuard
-func (b *RawBind) SendRaw(data []byte, remote netip.Addr) error {
+func (b *RawBind) SendRaw(data []byte, remote netip.AddrPort) error {
 	if b.useNATT {
 		if b.udpConn == nil { return net.ErrClosed }
-		addr := &net.UDPAddr{IP: remote.AsSlice(), Port: b.nattRemotePort}
+		port := int(remote.Port())
+		if port == 0 {
+			port = b.nattRemotePort
+		}
+		addr := &net.UDPAddr{IP: remote.Addr().AsSlice(), Port: port}
 		_, err := b.udpConn.WriteToUDP(data, addr)
 		return err
 	}
 
-	addr, _ := net.ResolveIPAddr("ip", remote.String())
+	addr, _ := net.ResolveIPAddr("ip", remote.Addr().String())
 	var c *net.IPConn
-	if remote.Is4() {
+	if remote.Addr().Is4() {
 		c = b.ipv4
 	} else {
 		c = b.ipv6
