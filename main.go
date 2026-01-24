@@ -281,23 +281,29 @@ func (v *VPNInstance) rawReaderLoop() {
 // --- TUN 读取循环 ---
 
 func (v *VPNInstance) TUNReaderLoop() {
-	buf := make([]byte, 65536)
-	sizes := make([]int, 1)
-	buffs := [][]byte{buf}
+	// wireguard-go TUN 需要足够的缓冲区槽位来进行批量读取
+	const batchSize = 16
+	buffs := make([][]byte, batchSize)
+	for i := range buffs {
+		buffs[i] = make([]byte, 65536)
+	}
+	sizes := make([]int, batchSize)
 
 	for {
 		n, err := v.TunDev.Read(buffs, sizes, TunOffset)
 		if err != nil {
 			log.Printf("TUN 读取错误: %v", err)
-			break
-		}
-		if n == 0 {
-			continue
+			continue // 不要 break，继续尝试读取
 		}
 
-		data := buf[TunOffset : TunOffset+sizes[0]]
-		logDebug("TUN-RX: %d bytes", sizes[0])
-		v.handleOutgoingPacket(data)
+		for i := 0; i < n; i++ {
+			if sizes[i] == 0 {
+				continue
+			}
+			data := buffs[i][TunOffset : TunOffset+sizes[i]]
+			logDebug("TUN-RX: %d bytes", sizes[i])
+			v.handleOutgoingPacket(data)
+		}
 	}
 }
 
