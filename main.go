@@ -630,8 +630,13 @@ func (v *VPNInstance) handleOutgoingPacket(ipPacket []byte) {
 		v.tracePacket("TUN-READ", ipPacket)
 	}
 
-	// Determine Routing
+	var destAddr net.Addr
 	var destConn net.Conn
+	var isBroadcast bool
+	seq := atomic.AddUint32(&v.TxSeq, 1) - 1
+	idx := int(uint64(seq) % uint64(v.Cfg.PortCount))
+
+	// Determine Routing
 	if v.Cfg.Mode == "server" {
 		if len(ipPacket) >= 20 {
 			version := ipPacket[0] >> 4
