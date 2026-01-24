@@ -93,32 +93,51 @@ func (b *RawBind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
 
 		engine, err := xdp.GetShadowXEngine(b.ifaceName)
 		if err != nil {
-			log.Printf("[eBPF] Failed to load Shared Shadow X Engine: %v. Falling back to User-space Raw Socket.", err)
+			log.Printf("[eBPF] Failed to load Shared Shadow X Engine: %v. Falling back.", err)
 			b.useEBPF = false
 		} else {
-			// Under eBPF, we just use a standard UDP socket.
-			addr := &net.UDPAddr{IP: net.IPv4zero, Port: b.nattLocalPort}
-			c, err := net.ListenUDP("udp", addr)
-			if err != nil {
-				return nil, 0, fmt.Errorf("failed to open UDP for eBPF mode: %w", err)
-			}
-
-			// Capture dynamic port
-			boundPort := uint16(c.LocalAddr().(*net.UDPAddr).Port)
-			ebpfCfg.LocalPort = boundPort
-
+			// Register immediately
 			if err := engine.Register(ebpfCfg); err != nil {
 				log.Printf("[eBPF] Failed to register config: %v. Falling back.", err)
-				c.Close()
 				engine.Close()
 				b.useEBPF = false
 			} else {
 				b.ebpfEngine = engine
 				b.ebpfCfg = ebpfCfg
-				c.SetReadBuffer(25 * 1024 * 1024)
-				c.SetWriteBuffer(25 * 1024 * 1024)
-				b.udpConn = c
-				return []conn.ReceiveFunc{b.receiveUDP}, boundPort, nil
+
+				// If TCP Mode (Fake-TCP), we MUST utilize the UDP socket path for eBPF to work (UDP <-> TCP)
+				if b.useTCP {
+					addr := &net.UDPAddr{IP: net.IPv4zero, Port: b.nattLocalPort}
+					c, err := net.ListenUDP("udp", addr)
+					if err != nil {
+						engine.Unregister(ebpfCfg)
+						engine.Close()
+						return nil, 0, fmt.Errorf("failed to open UDP for eBPF Fake-TCP: %w", err)
+					}
+					// Update port if dynamic
+					boundPort := uint16(c.LocalAddr().(*net.UDPAddr).Port)
+					if b.nattLocalPort == 0 {
+						// Re-register with correct port if we bound to 0
+						engine.Unregister(ebpfCfg)
+						ebpfCfg.LocalPort = boundPort
+						if err := engine.Register(ebpfCfg); err != nil {
+							c.Close()
+							engine.Close()
+							return nil, 0, fmt.Errorf("failed to re-register dynamic port: %v", err)
+						}
+						b.ebpfCfg = ebpfCfg
+					}
+					
+					c.SetReadBuffer(25 * 1024 * 1024)
+					c.SetWriteBuffer(25 * 1024 * 1024)
+					b.udpConn = c
+					return []conn.ReceiveFunc{b.receiveUDP}, boundPort, nil
+				}
+
+				// If Raw Mode (Mode 1), we DO NOT use UDP socket.
+				// We fall through to standard ListenIP below.
+				// eBPF here acts as a "Steer/Allow" filter in the kernel.
+				log.Printf("[eBPF] Raw 模式已激活 (协议 %d)，使用 Legacy ListenIP 通道。", b.protoNum)
 			}
 		}
 	}
@@ -323,7 +342,7 @@ func (b *RawBind) Send(bufs [][]byte, ep conn.Endpoint) error {
 	
 	if !target.Addr().IsValid() { return nil }
 
-	if b.useEBPF || b.useNATT {
+	if (b.useEBPF && b.useTCP) || b.useNATT {
 		if b.udpConn == nil { return net.ErrClosed }
 		addr := &net.UDPAddr{IP: target.Addr().AsSlice(), Port: int(target.Port())}
 		for _, buf := range bufs {
@@ -383,7 +402,7 @@ func (b *RawBind) Send(bufs [][]byte, ep conn.Endpoint) error {
 
 // SendRaw allows sending control packets (e.g. handshake) bypassing WireGuard
 func (b *RawBind) SendRaw(data []byte, remote netip.AddrPort) error {
-	if b.useEBPF || b.useNATT {
+	if (b.useEBPF && b.useTCP) || b.useNATT {
 		if b.udpConn == nil { return net.ErrClosed }
 		port := int(remote.Port())
 		if port == 0 {
