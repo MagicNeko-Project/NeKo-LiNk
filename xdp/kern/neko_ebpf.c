@@ -50,21 +50,18 @@ static __always_inline void full_ip_recompute(struct iphdr *ip) {
     ip->check = ~(__u16)csum;
 }
 
-// Moves 20 bytes: BASE...BASE+19 -> DEST...DEST+19
-// Verifier needs consistent bounds checks inside loop or static access
-// We use simple unroll with explicit check for simplicity and safety.
 static __always_inline int safe_move_ipv4_back(void *data_end, void *base, int dist) {
-    if ((void *)base + 20 > data_end) return -1;
-    // dist is typically 8 or 12. 
-    // Source: base + dist
-    // Dest:   base
-    // Verify source bounds?
-    // We are copying Source -> Dest.
+    if ((void *)base + 20 > data_end) {
+        bpf_printk("MoveBack: Base OOB");
+        return -1;
+    }
     unsigned char *src = (unsigned char *)base + dist;
     unsigned char *dst = (unsigned char *)base;
     
-    // Bounds check for source
-    if ((void *)src + 20 > data_end) return -1;
+    if ((void *)src + 20 > data_end) {
+        bpf_printk("MoveBack: Src OOB");
+        return -1;
+    }
     
     #pragma unroll
     for (int i = 0; i < 20; i++) {
@@ -74,14 +71,17 @@ static __always_inline int safe_move_ipv4_back(void *data_end, void *base, int d
 }
 
 static __always_inline int safe_move_ipv4_forward(void *data_end, void *base, int dist) {
-    // Source: base
-    // Dest:   base + dist
     unsigned char *src = (unsigned char *)base;
     unsigned char *dst = (unsigned char *)base + dist;
 
-    // Bounds check
-    if ((void *)dst + 20 > data_end) return -1;
-    if ((void *)src + 20 > data_end) return -1;
+    if ((void *)dst + 20 > data_end) {
+        bpf_printk("MoveFwd: Dst OOB");
+        return -1;
+    }
+    if ((void *)src + 20 > data_end) {
+        bpf_printk("MoveFwd: Src OOB");
+        return -1;
+    }
 
     #pragma unroll
     for (int i = 19; i >= 0; i--) {
@@ -104,10 +104,17 @@ int tc_shadow_ingress(struct __sk_buff *skb) {
     struct iphdr *ip = (struct iphdr *)((void *)eth + sizeof(*eth));
     if ((void *)ip + sizeof(*ip) > data_end) return TC_ACT_OK;
 
+    // bpf_printk("Ingress: Proto=%d", ip->protocol);
+
     // Mode 1: Proto-based (Raw-IP)
     struct shadow_config *cfg = bpf_map_lookup_elem(&proto_shadow_map, &ip->protocol);
     if (cfg && cfg->mode == 1) {
-        if (bpf_skb_adjust_room(skb, 8, BPF_ADJ_ROOM_NET, 0) < 0) return TC_ACT_OK;
+        bpf_printk("Ingress M1 Match! Proto=%d -> Restore Port %d", ip->protocol, bpf_ntohs(cfg->local_port));
+        
+        if (bpf_skb_adjust_room(skb, 8, BPF_ADJ_ROOM_NET, 0) < 0) {
+            bpf_printk("Ingress M1: Adjust room failed");
+            return TC_ACT_OK;
+        }
         
         data = (void *)(long)skb->data;
         data_end = (void *)(long)skb->data_end;
@@ -115,13 +122,15 @@ int tc_shadow_ingress(struct __sk_buff *skb) {
         if ((void *)eth + sizeof(*eth) > data_end) return TC_ACT_OK;
         
         void *gap_ptr = (void *)eth + sizeof(*eth);
-        if (safe_move_ipv4_back(data_end, gap_ptr, 8) < 0) return TC_ACT_OK;
+        if (safe_move_ipv4_back(data_end, gap_ptr, 8) < 0) {
+            bpf_printk("Ingress M1: Move failure");
+            return TC_ACT_OK;
+        }
         
         struct iphdr *new_ip = (struct iphdr *)gap_ptr;
-        // Verify IP bounds again
         if ((void *)new_ip + sizeof(*new_ip) > data_end) return TC_ACT_OK;
         
-        struct udphdr *udp = (struct udphdr *)((void *)new_ip + 20); // Assume IHL=5 used in move
+        struct udphdr *udp = (struct udphdr *)((void *)new_ip + 20);
         if ((void *)udp + sizeof(*udp) > data_end) return TC_ACT_OK;
         
         udp->dest = cfg->local_port;
@@ -133,6 +142,7 @@ int tc_shadow_ingress(struct __sk_buff *skb) {
         new_ip->tot_len = bpf_htons(bpf_ntohs(new_ip->tot_len) + 8);
         full_ip_recompute(new_ip);
         
+        bpf_printk("Ingress M1: Success restore UDP");
         return TC_ACT_OK;
     }
 
@@ -143,27 +153,22 @@ int tc_shadow_ingress(struct __sk_buff *skb) {
 
         cfg = bpf_map_lookup_elem(&port_shadow_map, &tcp->dest);
         if (cfg && cfg->mode == 2) {
+            bpf_printk("Ingress M2 Match! TCP Port %d", bpf_ntohs(tcp->dest));
+            
             __be16 s_p = tcp->source;
             __be16 d_p = tcp->dest;
             
-            // To shrink, we need to overwrite TCP with UDP, but maintain IP at start.
-            // Move IP forward by 12 bytes? 
-            // Correct approach for shrinking 12 bytes:
-            // 1. Move IP forward 12 bytes. 
-            //    Source: IP at [Eth+14]. Dest: [Eth+26].
-            //    It overwrites tcp[0..7].
-            //    Old TCP started at [Eth+34].
-            //    So new IP ends at [Eth+46]. 
-            //    New UDP (8 bytes) starts at [Eth+46].
-            //    Old UDP space was TCP space [Eth+34..Eth+54].
-            //    We effectively compacted.
-            
-            // Pre-move safety check
             void *ip_ptr = (void *)eth + sizeof(*eth);
-            if (safe_move_ipv4_forward(data_end, ip_ptr, 12) < 0) return TC_ACT_OK;
+            int ret_mv = safe_move_ipv4_forward(data_end, ip_ptr, 12);
+            if (ret_mv < 0) {
+                 bpf_printk("Ingress M2: Move failure %d", ret_mv);
+                 return TC_ACT_OK;
+            }
             
-            // Allow shrink
-            if (bpf_skb_adjust_room(skb, -12, BPF_ADJ_ROOM_NET, 0) < 0) return TC_ACT_OK;
+            if (bpf_skb_adjust_room(skb, -12, BPF_ADJ_ROOM_NET, 0) < 0) {
+                bpf_printk("Ingress M2: Shrink fail");
+                return TC_ACT_OK;
+            }
             
             data = (void *)(long)skb->data;
             data_end = (void *)(long)skb->data_end;
@@ -184,6 +189,7 @@ int tc_shadow_ingress(struct __sk_buff *skb) {
             new_ip->protocol = IPPROTO_UDP;
             new_ip->tot_len = bpf_htons(bpf_ntohs(new_ip->tot_len) - 12);
             full_ip_recompute(new_ip);
+            bpf_printk("Ingress M2: Success restore UDP");
         }
     }
 
@@ -212,18 +218,25 @@ int tc_shadow_egress(struct __sk_buff *skb) {
     struct shadow_config *cfg = bpf_map_lookup_elem(&port_shadow_map, &udp->source);
     if (!cfg) return TC_ACT_OK;
 
-    // Mode 1: Raw-IP (Delete UDP 8 bytes)
+    // Mode 1: Raw-IP
     if (cfg->mode == 1) {
-        // Move IP forward 8 bytes
+        bpf_printk("Egress M1 Match! SrcPort %d -> Proto %d", bpf_ntohs(udp->source), cfg->proto_num);
+
         void *ip_ptr = (void *)eth + sizeof(*eth);
-        if (safe_move_ipv4_forward(data_end, ip_ptr, 8) < 0) return TC_ACT_OK;
+        if (safe_move_ipv4_forward(data_end, ip_ptr, 8) < 0) {
+            bpf_printk("Egress M1: Move fail");
+            return TC_ACT_OK;
+        }
         
-        if (bpf_skb_adjust_room(skb, -8, BPF_ADJ_ROOM_NET, 0) < 0) return TC_ACT_OK;
+        if (bpf_skb_adjust_room(skb, -8, BPF_ADJ_ROOM_NET, 0) < 0) {
+            bpf_printk("Egress M1: Shrink fail");
+            return TC_ACT_OK;
+        }
         
         data = (void *)(long)skb->data;
         data_end = (void *)(long)skb->data_end;
         eth = (struct ethhdr *)data;
-        if ((void *)eth + sizeof(*eth) > data_end) return TC_ACT_OK; // Safe re-check
+        if ((void *)eth + sizeof(*eth) > data_end) return TC_ACT_OK; 
         
         ip = (struct iphdr *)((void *)eth + sizeof(*eth));
         if ((void *)ip + sizeof(*ip) > data_end) return TC_ACT_OK;
@@ -231,16 +244,22 @@ int tc_shadow_egress(struct __sk_buff *skb) {
         ip->protocol = (__u8)cfg->proto_num;
         ip->tot_len = bpf_htons(bpf_ntohs(ip->tot_len) - 8);
         full_ip_recompute(ip);
+        bpf_printk("Egress M1: Success stripped");
         return TC_ACT_OK;
     }
 
-    // Mode 2: Fake-TCP (Expand 12 bytes)
+    // Mode 2: Fake-TCP
     if (cfg->mode == 2) {
+        bpf_printk("Egress M2 Match! SrcPort %d", bpf_ntohs(udp->source));
+        
         __be16 s_p = udp->source;
         __be16 d_p = udp->dest;
         __u32 jitter = skb->tstamp; 
 
-        if (bpf_skb_adjust_room(skb, 12, BPF_ADJ_ROOM_NET, 0) < 0) return TC_ACT_OK;
+        if (bpf_skb_adjust_room(skb, 12, BPF_ADJ_ROOM_NET, 0) < 0) {
+             bpf_printk("Egress M2: Expand fail");
+             return TC_ACT_OK;
+        }
         
         data = (void *)(long)skb->data;
         data_end = (void *)(long)skb->data_end;
@@ -248,8 +267,10 @@ int tc_shadow_egress(struct __sk_buff *skb) {
         if ((void *)eth + sizeof(*eth) > data_end) return TC_ACT_OK;
         
         void *gap_ptr = (void *)eth + sizeof(*eth);
-        // Move IP back 12 bytes
-        if (safe_move_ipv4_back(data_end, gap_ptr, 12) < 0) return TC_ACT_OK;
+        if (safe_move_ipv4_back(data_end, gap_ptr, 12) < 0) {
+             bpf_printk("Egress M2: Move fail");
+             return TC_ACT_OK;
+        }
         
         struct iphdr *new_ip = (struct iphdr *)gap_ptr;
         if ((void *)new_ip + sizeof(*new_ip) > data_end) return TC_ACT_OK;
@@ -270,6 +291,7 @@ int tc_shadow_egress(struct __sk_buff *skb) {
         new_ip->protocol = IPPROTO_TCP;
         new_ip->tot_len = bpf_htons(bpf_ntohs(new_ip->tot_len) + 12);
         full_ip_recompute(new_ip);
+        bpf_printk("Egress M2: Success TCP-fied");
     }
 
     return TC_ACT_OK;
