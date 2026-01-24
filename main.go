@@ -153,17 +153,16 @@ func (v *VPNInstance) Start() {
 		debugMode = true
 	}
 
-	log.Printf("[%s] NekoLink v5.17 (去重平滑版) 启动中 - 核心: %d, MTU: %d",
+	log.Printf("[%s] NekoLink v5.18 (极致稳定定鼎版) 启动中 - 核心: %d, MTU: %d",
 		v.Cfg.InterfaceName, v.numWorkers, v.Cfg.MTU)
 
 	v.InitTUN()
 	v.InitNetwork()
 
-	// v5.17 结构化分离：UDP 和 Raw 使用完全独立的链路处理器
+	// v5.18 架构进化：Raw 模式保持高速竞争读取，UDP 模式改为严格保序方案
 	if v.Cfg.Protocol == "udp" {
-		for i := 0; i < v.numWorkers; i++ {
-			go v.TUNReaderLoopUDP(i)
-		}
+		// UDP 必须单协程读取 TUN 才能保证 100% 不乱序
+		go v.TUNReaderLoopUDP_Ordered()
 	} else {
 		for i := 0; i < v.numWorkers; i++ {
 			go v.TUNReaderLoopRaw(i)
@@ -388,77 +387,93 @@ func (v *VPNInstance) rawReaderLoop(idx int) {
 	}
 }
 
-// --- UDP 专用 TUN 读取与发送循环 (v5.17) ---
-func (v *VPNInstance) TUNReaderLoopUDP(workerID int) {
+// --- UDP 专用 TUN 读取与发送循环 (v5.18 严格保序版) ---
+func (v *VPNInstance) TUNReaderLoopUDP_Ordered() {
 	buffs := make([][]byte, BatchSize)
 	for i := range buffs {
 		buffs[i] = make([]byte, BufSize)
 	}
 	sizes := make([]int, BatchSize)
-	aead := v.aeadPool[workerID]
 
-	msgsV4 := make([]ipv4.Message, 0, BatchSize)
-	msgsV6 := make([]ipv6.Message, 0, BatchSize)
-	usedPtrs := make([]*[]byte, 0, BatchSize)
+	// 结果占位槽和内存回收缓存
+	encryptedBuffs := make([][]byte, BatchSize)
+	ptrCache := make([]*[]byte, BatchSize)
 
 	for {
 		n, err := v.TunDev.Read(buffs, sizes, TunOffset)
 		if err != nil {
 			continue
 		}
+		if n == 0 {
+			continue
+		}
 
+		// v5.18 核心：同步并行加工 (Fork-Join)
+		// 利用所有 worker 加密，但必须等这一批齐了再按序发出
+		var wg sync.WaitGroup
+		wg.Add(n)
+
+		for i := 0; i < n; i++ {
+			go func(idx int, size int, plain []byte) {
+				defer wg.Done()
+				if size == 0 {
+					return
+				}
+				dstPtr := bufPool.Get().(*[]byte)
+				ptrCache[idx] = dstPtr
+
+				// 均匀分配到 worker pool
+				aead := v.aeadPool[idx%len(v.aeadPool)]
+				encryptedBuffs[idx] = v.encryptInto(plain, aead, *dstPtr)
+			}(i, sizes[i], buffs[i][TunOffset:TunOffset+sizes[i]])
+		}
+
+		wg.Wait() // 关键：等大家都切完菜
+
+		// 顺序落地发送
 		addr := v.ClientRemoteUDP
 		if v.Cfg.Mode == "server" {
 			addr = v.ServerPeerAddr.Load()
 		}
-		if addr == nil {
-			continue
+
+		if addr != nil {
+			// v5.17 平滑发送：每 16 个包一波均匀吐出
+			const subBatchSize = 16
+			for i := 0; i < n; i += subBatchSize {
+				end := i + subBatchSize
+				if end > n {
+					end = n
+				}
+
+				msgsV4 := make([]ipv4.Message, 0, subBatchSize)
+				msgsV6 := make([]ipv6.Message, 0, subBatchSize)
+
+				for j := i; j < end; j++ {
+					if encryptedBuffs[j] == nil {
+						continue
+					}
+					if v.IsIPv6 {
+						msgsV6 = append(msgsV6, ipv6.Message{Buffers: [][]byte{encryptedBuffs[j]}, Addr: addr})
+					} else {
+						msgsV4 = append(msgsV4, ipv4.Message{Buffers: [][]byte{encryptedBuffs[j]}, Addr: addr})
+					}
+				}
+
+				if v.IsIPv6 && len(msgsV6) > 0 {
+					v.ConnBatchV6.WriteBatch(msgsV6, 0)
+				} else if !v.IsIPv6 && len(msgsV4) > 0 {
+					v.ConnBatchV4.WriteBatch(msgsV4, 0)
+				}
+			}
 		}
 
-		msgsV4 = msgsV4[:0]
-		msgsV6 = msgsV6[:0]
-		usedPtrs = usedPtrs[:0]
-
+		// 清理与回收
 		for i := 0; i < n; i++ {
-			if sizes[i] == 0 {
-				continue
+			if ptrCache[i] != nil {
+				bufPool.Put(ptrCache[i])
+				ptrCache[i] = nil
 			}
-			dstPtr := bufPool.Get().(*[]byte)
-			encrypted := v.encryptInto(buffs[i][TunOffset:TunOffset+sizes[i]], aead, *dstPtr)
-			if encrypted != nil {
-				if v.IsIPv6 {
-					msgsV6 = append(msgsV6, ipv6.Message{Buffers: [][]byte{encrypted}, Addr: addr})
-				} else {
-					msgsV4 = append(msgsV4, ipv4.Message{Buffers: [][]byte{encrypted}, Addr: addr})
-				}
-				usedPtrs = append(usedPtrs, dstPtr)
-			} else {
-				bufPool.Put(dstPtr)
-			}
-		}
-
-		// v5.17 平滑发送：将大 Batch 切成 16 个一组的小 Burst
-		const subBatchSize = 16
-		if v.IsIPv6 {
-			for i := 0; i < len(msgsV6); i += subBatchSize {
-				end := i + subBatchSize
-				if end > len(msgsV6) {
-					end = len(msgsV6)
-				}
-				v.ConnBatchV6.WriteBatch(msgsV6[i:end], 0)
-			}
-		} else {
-			for i := 0; i < len(msgsV4); i += subBatchSize {
-				end := i + subBatchSize
-				if end > len(msgsV4) {
-					end = len(msgsV4)
-				}
-				v.ConnBatchV4.WriteBatch(msgsV4[i:end], 0)
-			}
-		}
-
-		for _, p := range usedPtrs {
-			bufPool.Put(p)
+			encryptedBuffs[i] = nil
 		}
 	}
 }
