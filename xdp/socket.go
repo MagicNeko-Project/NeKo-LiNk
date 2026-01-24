@@ -126,9 +126,9 @@ func GetShadowXEngine(ifaceName string) (*ShadowXEngine, error) {
 			log.Printf("[eBPF] Failed to pin ingress: %v", err)
 		}
 		
-		// Use 'pinned' keyword instead of 'obj' for pinned programs
 		exec.Command("tc", "filter", "replace", "dev", ifaceName, "egress", "bpf", "da", "pinned", pinPath+"/egp").Run()
 		exec.Command("tc", "filter", "replace", "dev", ifaceName, "ingress", "bpf", "da", "pinned", pinPath+"/igp").Run()
+		log.Printf("[eBPF] Legacy TC attached on %s via shell commands", ifaceName)
 	}
 
 	engineRegistry[ifaceName] = e
@@ -146,17 +146,29 @@ func (e *ShadowXEngine) Register(cfg ShadowXConfig) error {
 	}
 
 	port := htons(cfg.LocalPort)
+	
+	// Check for Port Collision
+	var existing shadowConfig
+	if err := e.portMap.Lookup(&port, &existing); err == nil {
+		log.Printf("[eBPF] ⚠️ 警告: 端口 %d 已被其它实例注册 (模式 %d)，即将覆盖配置喵！", cfg.LocalPort, existing.Mode)
+	}
+
 	if err := e.portMap.Put(&port, &conf); err != nil {
 		return fmt.Errorf("failed to register port %d: %v", cfg.LocalPort, err)
 	}
 
 	if cfg.Mode == 1 { // Raw-IP
 		proto := uint8(cfg.RawProto)
+		// Check for Proto Collision
+		if err := e.protoMap.Lookup(&proto, &existing); err == nil {
+			log.Printf("[eBPF] ⚠️ 警告: 协议号 %d 已被其它实例占用 (端口 %d)，冲突可能导致入站识别失败喵！", cfg.RawProto, ntohs(existing.LocalPort))
+		}
 		if err := e.protoMap.Put(&proto, &conf); err != nil {
 			return fmt.Errorf("failed to register proto %d: %v", cfg.RawProto, err)
 		}
 	}
 
+	log.Printf("[eBPF] 实例注册成功: 模式=%d, 端口=%d, 协议=%d", cfg.Mode, cfg.LocalPort, cfg.RawProto)
 	return nil
 }
 
@@ -171,6 +183,7 @@ func (e *ShadowXEngine) Unregister(cfg ShadowXConfig) {
 		proto := uint8(cfg.RawProto)
 		e.protoMap.Delete(&proto)
 	}
+	log.Printf("[eBPF] 实例已注销 (端口 %d)", cfg.LocalPort)
 }
 
 func (e *ShadowXEngine) Close() {
@@ -178,7 +191,6 @@ func (e *ShadowXEngine) Close() {
 	e.refCount--
 	if e.refCount <= 0 {
 		if e.isLegacy {
-			// Clean up legacy TC
 			exec.Command("tc", "filter", "del", "dev", e.ifaceName, "egress").Run()
 			exec.Command("tc", "filter", "del", "dev", e.ifaceName, "ingress").Run()
 			exec.Command("rm", "-rf", fmt.Sprintf("/sys/fs/bpf/neko_%s", e.ifaceName)).Run()
@@ -187,10 +199,15 @@ func (e *ShadowXEngine) Close() {
 			if e.tcLinkIngress != nil { e.tcLinkIngress.Close() }
 		}
 		delete(engineRegistry, e.ifaceName)
+		log.Printf("[eBPF] 共享引擎已关闭并从接口 %s 卸载", e.ifaceName)
 	}
 	registryMutex.Unlock()
 }
 
 func htons(v uint16) uint16 {
+	return (v << 8) | (v >> 8)
+}
+
+func ntohs(v uint16) uint16 {
 	return (v << 8) | (v >> 8)
 }
