@@ -483,6 +483,7 @@ func (v *VPNInstance) writeTUN(data []byte) {
 
 func main() {
 	cfgPath := flag.String("c", "config.json", "Config path")
+	flag.BoolVar(&debugMode, "debug", false, "Enable debug mode")
 	flag.Parse()
 
 	data, err := os.ReadFile(*cfgPath)
