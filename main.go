@@ -172,7 +172,7 @@ func (v *VPNInstance) Start() {
 	}
 
 	v.InitTUN()
-	v.InitTUN()
+
 	// v.Reorderer.WriteFunc = v.IfaceWrite // Removed, direct call now
 
 	v.InitNetwork()
