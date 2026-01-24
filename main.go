@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -20,9 +21,10 @@ import (
 	"golang.zx2c4.com/wireguard/tun"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/net/ipv4"
+	"golang.org/x/net/ipv6"
 )
 
-// --- 全局调试开关 ---
+// --- 全局分发 ---
 var debugMode bool
 
 func logDebug(format string, v ...interface{}) {
@@ -82,11 +84,10 @@ const (
 	BatchSize = 256
 )
 
-// --- 内存池 (全局) ---
+// --- 内存池 ---
 
 var bufPool = sync.Pool{
 	New: func() interface{} {
-		// 预留前缀空间给发送逻辑
 		b := make([]byte, BufSize)
 		return &b
 	},
@@ -100,12 +101,14 @@ type VPNInstance struct {
 	TunDev tun.Device
 	AEAD   cipher.AEAD
 
-	// 多核加密 - 每个核一个 AEAD 实例
+	// 多核加密
 	aeadPool []cipher.AEAD
 
-	// UDP 模式
+	// UDP 模式 (双协议支持)
 	ConnUDP         *net.UDPConn
-	ConnBatch       *ipv4.PacketConn
+	ConnBatchV4     *ipv4.PacketConn
+	ConnBatchV6     *ipv6.PacketConn
+	IsIPv6          bool
 	ClientRemoteUDP *net.UDPAddr
 	ServerPeerAddr  atomic.Pointer[net.UDPAddr]
 
@@ -115,7 +118,7 @@ type VPNInstance struct {
 	ServerPeerIP   atomic.Pointer[net.IPAddr]
 	rawSendIdx     uint32
 
-	// 性能优化
+	// 性能
 	nonceCounter uint64
 	SessionID    uint32
 	numWorkers   int
@@ -126,15 +129,12 @@ func NewVPNInstance(cfg Config) *VPNInstance {
 	v := &VPNInstance{Cfg: cfg}
 
 	keyHash := sha256.Sum256([]byte(cfg.Key))
-
-	// 主 AEAD (解密用)
 	var err error
 	v.AEAD, err = chacha20poly1305.NewX(keyHash[:])
 	if err != nil {
 		log.Fatalf("加密初始化失败: %v", err)
 	}
 
-	// 多核加密池
 	v.numWorkers = runtime.NumCPU()
 	if v.numWorkers > 8 {
 		v.numWorkers = 8
@@ -145,7 +145,6 @@ func NewVPNInstance(cfg Config) *VPNInstance {
 	}
 
 	v.SessionID = uint32(os.Getpid()) ^ uint32(keyHash[0])<<24
-
 	return v
 }
 
@@ -154,7 +153,7 @@ func (v *VPNInstance) Start() {
 		debugMode = true
 	}
 
-	log.Printf("[%s] NekoLink v5.6 (稳定性能版) 启动中 - 核心: %d, MTU: %d",
+	log.Printf("[%s] NekoLink v5.7 (全协议版) 启动中 - 核心: %d, MTU: %d",
 		v.Cfg.InterfaceName, v.numWorkers, v.Cfg.MTU)
 
 	v.InitTUN()
@@ -180,32 +179,30 @@ func (v *VPNInstance) InitTUN() {
 	runCmd("ip", "link", "set", realName, "mtu", fmt.Sprintf("%d", v.Cfg.MTU))
 	runCmd("ip", "link", "set", realName, "up")
 
-	runCmd("sysctl", "-w", "net.ipv4.conf.all.rp_filter=0")
-	runCmd("sysctl", "-w", fmt.Sprintf("net.ipv4.conf.%s.rp_filter=0", realName))
+	// IPv4 转发优化
+	runCmdQuiet("sysctl", "-w", "net.ipv4.conf.all.rp_filter=0")
+	runCmdQuiet("sysctl", "-w", fmt.Sprintf("net.ipv4.conf.%s.rp_filter=0", realName))
+	
+	// IPv6 基础支持
+	runCmdQuiet("sysctl", "-w", "net.ipv6.conf.all.forwarding=1")
 
 	v.setupNFTables(realName)
-
-	log.Printf("[%s] TUN 接口准备就绪 (Nya~)", realName)
 }
 
 func (v *VPNInstance) setupNFTables(iface string) {
-	// 1. 基础表 (幂等)
 	runCmd("nft", "add", "table", "inet", "nekolink")
 
-	// 2. MSS 钳制链 (处理多实例冲突)
 	chainMSS := fmt.Sprintf("mss_%s", iface)
-	// 先尝试删除可能存在的同名但定义不同的链
 	runCmdQuiet("nft", "delete", "chain", "inet", "nekolink", chainMSS)
 	runCmd("nft", "add", "chain", "inet", "nekolink", chainMSS,
 		"{ type filter hook forward priority mangle; policy accept; }")
 	runCmd("nft", "flush", "chain", "inet", "nekolink", chainMSS)
 
+	// 同时钳制 v4 和 v6 的 TCP MSS
 	runCmd("nft", "add", "rule", "inet", "nekolink", chainMSS,
 		"iifname", iface, "tcp", "flags", "syn", "tcp", "option", "maxseg", "size", "set", "rt", "mtu")
 	runCmd("nft", "add", "rule", "inet", "nekolink", chainMSS,
 		"oifname", iface, "tcp", "flags", "syn", "tcp", "option", "maxseg", "size", "set", "rt", "mtu")
-
-	log.Printf("[%s] MSS 钳制已启用", iface)
 
 	if v.Cfg.Mode == "server" {
 		v.setupSecurityRules(iface)
@@ -213,7 +210,6 @@ func (v *VPNInstance) setupNFTables(iface string) {
 }
 
 func (v *VPNInstance) setupSecurityRules(iface string) {
-	// 为多实例使用接口专有表，避免互相 flush 规则
 	tableName := fmt.Sprintf("nekolink_sec_%s", iface)
 	runCmd("nft", "add", "table", "inet", tableName)
 
@@ -221,21 +217,16 @@ func (v *VPNInstance) setupSecurityRules(iface string) {
 		"{ type filter hook input priority filter; policy accept; }")
 	runCmd("nft", "flush", "chain", "inet", tableName, "input")
 
-	runCmd("nft", "add", "rule", "inet", tableName, "input",
-		"ct", "state", "established,related", "accept")
-	runCmd("nft", "add", "rule", "inet", tableName, "input",
-		"iifname", "lo", "accept")
-	runCmd("nft", "add", "rule", "inet", tableName, "input",
-		"meta", "l4proto", "icmp", "accept")
+	runCmd("nft", "add", "rule", "inet", tableName, "input", "ct", "state", "established,related", "accept")
+	runCmd("nft", "add", "rule", "inet", tableName, "input", "iifname", "lo", "accept")
+	runCmd("nft", "add", "rule", "inet", tableName, "input", "meta", "l4proto", "{ icmp, icmpv6 }", "accept")
 
 	if v.Cfg.Protocol == "raw" {
-		protoNum := fmt.Sprintf("%d", v.Cfg.IPProtocolNum)
-		runCmd("nft", "add", "rule", "inet", tableName, "input", "meta", "l4proto", protoNum, "accept")
-		log.Printf("[%s] 安全防护已开启 (Proto: %s)", iface, protoNum)
+		protoNum := v.Cfg.IPProtocolNum
+		runCmd("nft", "add", "rule", "inet", tableName, "input", "meta", "l4proto", fmt.Sprintf("%d", protoNum), "accept")
 	} else {
-		port := fmt.Sprintf("%d", v.Cfg.BasePort)
-		runCmd("nft", "add", "rule", "inet", tableName, "input", "udp", "dport", port, "accept")
-		log.Printf("[%s] 安全防护已开启 (Port: %s)", iface, port)
+		port := v.Cfg.BasePort
+		runCmd("nft", "add", "rule", "inet", tableName, "input", "udp", "dport", fmt.Sprintf("%d", port), "accept")
 	}
 
 	runCmd("nft", "add", "rule", "inet", tableName, "input", "ct", "state", "invalid", "drop")
@@ -255,6 +246,21 @@ func (v *VPNInstance) initUDP() {
 	bindAddr := ":0"
 	if v.Cfg.Mode == "server" {
 		bindAddr = fmt.Sprintf("%s:%d", v.Cfg.ServerBindAddr, v.Cfg.BasePort)
+	} else {
+		// 客户端模式检测远端地址类型
+		rAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", v.Cfg.RemoteIP, v.Cfg.RemotePort))
+		if err == nil {
+			v.ClientRemoteUDP = rAddr
+			if strings.Contains(rAddr.IP.String(), ":") {
+				v.IsIPv6 = true
+				bindAddr = "[::]:0"
+			}
+		}
+	}
+
+	// 如果服务端配置了 IPv6 绑定
+	if v.Cfg.Mode == "server" && strings.Contains(v.Cfg.ServerBindAddr, ":") {
+		v.IsIPv6 = true
 	}
 
 	lAddr, _ := net.ResolveUDPAddr("udp", bindAddr)
@@ -266,27 +272,41 @@ func (v *VPNInstance) initUDP() {
 	conn.SetReadBuffer(32 << 20)
 	conn.SetWriteBuffer(32 << 20)
 	v.ConnUDP = conn
-	v.ConnBatch = ipv4.NewPacketConn(conn)
 
-	if v.Cfg.Mode == "client" {
-		rAddr, _ := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", v.Cfg.RemoteIP, v.Cfg.RemotePort))
-		v.ClientRemoteUDP = rAddr
+	if v.IsIPv6 {
+		v.ConnBatchV6 = ipv6.NewPacketConn(conn)
+		log.Printf("[UDP] IPv6 模式已启用 (MTU建议 1400 以下)")
+	} else {
+		v.ConnBatchV4 = ipv4.NewPacketConn(conn)
+		log.Printf("[UDP] IPv4 模式运行中")
 	}
 
 	go v.udpReaderLoop()
 }
 
 func (v *VPNInstance) initRaw() {
-	protoStr := fmt.Sprintf("ip4:%d", v.Cfg.IPProtocolNum)
 	numConns := 4
 	if runtime.NumCPU() < 4 {
 		numConns = runtime.NumCPU()
 	}
 
+	// 检测 IP 类型
+	testIP := v.Cfg.RemoteIP
+	if v.Cfg.Mode == "server" {
+		testIP = v.Cfg.ServerBindAddr
+	}
+	
+	protoStr := fmt.Sprintf("ip4:%d", v.Cfg.IPProtocolNum)
+	if strings.Contains(testIP, ":") {
+		v.IsIPv6 = true
+		protoStr = fmt.Sprintf("ip6:%d", v.Cfg.IPProtocolNum)
+		log.Printf("[RAW] IPv6 自定义协议模式 (Proto: %d)", v.Cfg.IPProtocolNum)
+	}
+
 	v.ConnRaw = make([]*net.IPConn, numConns)
 	for i := 0; i < numConns; i++ {
 		var lAddr *net.IPAddr
-		if v.Cfg.Mode == "server" && v.Cfg.ServerBindAddr != "0.0.0.0" {
+		if v.Cfg.Mode == "server" && v.Cfg.ServerBindAddr != "0.0.0.0" && v.Cfg.ServerBindAddr != "[::]" {
 			lAddr, _ = net.ResolveIPAddr("ip", v.Cfg.ServerBindAddr)
 		}
 		conn, err := net.ListenIP(protoStr, lAddr)
@@ -307,28 +327,41 @@ func (v *VPNInstance) initRaw() {
 // --- 读取循环 ---
 
 func (v *VPNInstance) udpReaderLoop() {
+	if v.IsIPv6 {
+		v.udpReaderLoopV6()
+		return
+	}
 	msgs := make([]ipv4.Message, BatchSize)
 	for i := range msgs {
 		msgs[i].Buffers = [][]byte{make([]byte, BufSize)}
 	}
-
 	for {
-		n, err := v.ConnBatch.ReadBatch(msgs, 0)
-		if err != nil {
-			continue
-		}
-
+		n, err := v.ConnBatchV4.ReadBatch(msgs, 0)
+		if err != nil { continue }
 		for i := 0; i < n; i++ {
-			msg := &msgs[i]
-			if msg.N == 0 {
-				continue
-			}
+			if msgs[i].N == 0 { continue }
 			if v.Cfg.Mode == "server" {
-				if addr, ok := msg.Addr.(*net.UDPAddr); ok {
-					v.ServerPeerAddr.Store(addr)
-				}
+				if addr, ok := msgs[i].Addr.(*net.UDPAddr); ok { v.ServerPeerAddr.Store(addr) }
 			}
-			v.handleIncomingPacket(msg.Buffers[0][:msg.N])
+			v.handleIncomingPacket(msgs[i].Buffers[0][:msgs[i].N])
+		}
+	}
+}
+
+func (v *VPNInstance) udpReaderLoopV6() {
+	msgs := make([]ipv6.Message, BatchSize)
+	for i := range msgs {
+		msgs[i].Buffers = [][]byte{make([]byte, BufSize)}
+	}
+	for {
+		n, err := v.ConnBatchV6.ReadBatch(msgs, 0)
+		if err != nil { continue }
+		for i := 0; i < n; i++ {
+			if msgs[i].N == 0 { continue }
+			if v.Cfg.Mode == "server" {
+				if addr, ok := msgs[i].Addr.(*net.UDPAddr); ok { v.ServerPeerAddr.Store(addr) }
+			}
+			v.handleIncomingPacket(msgs[i].Buffers[0][:msgs[i].N])
 		}
 	}
 }
@@ -338,87 +371,65 @@ func (v *VPNInstance) rawReaderLoop(idx int) {
 	buf := make([]byte, BufSize)
 	for {
 		n, addr, err := conn.ReadFromIP(buf)
-		if err != nil {
-			continue
-		}
-		if n < NonceSize+Overhead {
-			continue
-		}
-		if v.Cfg.Mode == "server" {
-			v.ServerPeerIP.Store(addr)
-		}
+		if err != nil { continue }
+		if n < NonceSize+Overhead { continue }
+		if v.Cfg.Mode == "server" { v.ServerPeerIP.Store(addr) }
 		v.handleIncomingPacket(buf[:n])
 	}
 }
 
-// --- TUN 处理 (多核并行) ---
+// --- 写批处理器 (解决包冲突) ---
 
 func (v *VPNInstance) TUNReaderLoop(workerID int) {
 	buffs := make([][]byte, BatchSize)
-	for i := range buffs {
-		buffs[i] = make([]byte, BufSize)
-	}
+	for i := range buffs { buffs[i] = make([]byte, BufSize) }
 	sizes := make([]int, BatchSize)
-
 	aead := v.aeadPool[workerID]
-	sendMsgs := make([]ipv4.Message, 0, BatchSize)
-	
-	// 用于存放已加密数据的缓冲区指针
+
+	// 准备批处理容器
+	msgsV4 := make([]ipv4.Message, 0, BatchSize)
+	msgsV6 := make([]ipv6.Message, 0, BatchSize)
 	usedPtrs := make([]*[]byte, 0, BatchSize)
 
 	for {
 		n, err := v.TunDev.Read(buffs, sizes, TunOffset)
-		if err != nil {
-			continue
-		}
+		if err != nil { continue }
 
 		if v.Cfg.Protocol == "udp" {
 			addr := v.ClientRemoteUDP
-			if v.Cfg.Mode == "server" {
-				addr = v.ServerPeerAddr.Load()
-			}
-			if addr == nil {
-				continue
-			}
+			if v.Cfg.Mode == "server" { addr = v.ServerPeerAddr.Load() }
+			if addr == nil { continue }
 
-			sendMsgs = sendMsgs[:0]
+			msgsV4 = msgsV4[:0]
+			msgsV6 = msgsV6[:0]
 			usedPtrs = usedPtrs[:0]
 
 			for i := 0; i < n; i++ {
-				if sizes[i] == 0 {
-					continue
-				}
-				
-				// 从池中获取缓冲区并加密
+				if sizes[i] == 0 { continue }
 				dstPtr := bufPool.Get().(*[]byte)
-				data := buffs[i][TunOffset : TunOffset+sizes[i]]
-				
-				encrypted := v.encryptInto(data, aead, *dstPtr)
+				encrypted := v.encryptInto(buffs[i][TunOffset:TunOffset+sizes[i]], aead, *dstPtr)
 				if encrypted != nil {
-					sendMsgs = append(sendMsgs, ipv4.Message{
-						Buffers: [][]byte{encrypted},
-						Addr:    addr,
-					})
+					if v.IsIPv6 {
+						msgsV6 = append(msgsV6, ipv6.Message{Buffers: [][]byte{encrypted}, Addr: addr})
+					} else {
+						msgsV4 = append(msgsV4, ipv4.Message{Buffers: [][]byte{encrypted}, Addr: addr})
+					}
 					usedPtrs = append(usedPtrs, dstPtr)
 				} else {
 					bufPool.Put(dstPtr)
 				}
 			}
 
-			if len(sendMsgs) > 0 {
-				v.ConnBatch.WriteBatch(sendMsgs, 0)
-				// 发送完成后归还缓冲区
-				for _, ptr := range usedPtrs {
-					bufPool.Put(ptr)
-				}
+			if v.IsIPv6 && len(msgsV6) > 0 {
+				v.ConnBatchV6.WriteBatch(msgsV6, 0)
+			} else if !v.IsIPv6 && len(msgsV4) > 0 {
+				v.ConnBatchV4.WriteBatch(msgsV4, 0)
 			}
+			for _, p := range usedPtrs { bufPool.Put(p) }
+
 		} else {
-			// Raw 模式
 			for i := 0; i < n; i++ {
-				if sizes[i] == 0 {
-					continue
-				}
-				v.sendRawOptimized(buffs[i][TunOffset:TunOffset+sizes[i]], aead)
+				if sizes[i] > 0 { v.sendRawOptimized(buffs[i][TunOffset:TunOffset+sizes[i]], aead) }
 			}
 		}
 	}
@@ -426,19 +437,12 @@ func (v *VPNInstance) TUNReaderLoop(workerID int) {
 
 func (v *VPNInstance) encryptInto(plain []byte, aead cipher.AEAD, dst []byte) []byte {
 	outSize := NonceSize + len(plain) + Overhead
-	if len(dst) < outSize {
-		return nil
-	}
-	
+	if len(dst) < outSize { return nil }
 	nonce := dst[:NonceSize]
-	nonceVal := atomic.AddUint64(&v.nonceCounter, 1)
-	binary.BigEndian.PutUint64(nonce[0:8], nonceVal)
+	vVal := atomic.AddUint64(&v.nonceCounter, 1)
+	binary.BigEndian.PutUint64(nonce[0:8], vVal)
 	binary.BigEndian.PutUint32(nonce[8:12], v.SessionID)
-	// 其余填充 0
-	for i := 12; i < NonceSize; i++ {
-		nonce[i] = 0
-	}
-
+	for i := 12; i < NonceSize; i++ { nonce[i] = 0 }
 	aead.Seal(dst[NonceSize:NonceSize], nonce, plain, nil)
 	return dst[:outSize]
 }
@@ -446,12 +450,9 @@ func (v *VPNInstance) encryptInto(plain []byte, aead cipher.AEAD, dst []byte) []
 func (v *VPNInstance) sendRawOptimized(plain []byte, aead cipher.AEAD) {
 	dstPtr := bufPool.Get().(*[]byte)
 	encrypted := v.encryptInto(plain, aead, *dstPtr)
-	
 	if encrypted != nil {
 		addr := v.ClientRemoteIP
-		if v.Cfg.Mode == "server" {
-			addr = v.ServerPeerIP.Load()
-		}
+		if v.Cfg.Mode == "server" { addr = v.ServerPeerIP.Load() }
 		if addr != nil {
 			idx := atomic.AddUint32(&v.rawSendIdx, 1) % uint32(len(v.ConnRaw))
 			v.ConnRaw[idx].WriteToIP(encrypted, addr)
@@ -461,16 +462,9 @@ func (v *VPNInstance) sendRawOptimized(plain []byte, aead cipher.AEAD) {
 }
 
 func (v *VPNInstance) handleIncomingPacket(enc []byte) {
-	if len(enc) < NonceSize+Overhead {
-		return
-	}
-	nonce := enc[:NonceSize]
-	cipherText := enc[NonceSize:]
-
-	plain, err := v.AEAD.Open(cipherText[:0], nonce, cipherText, nil)
-	if err == nil && len(plain) > 0 {
-		v.writeTUN(plain)
-	}
+	if len(enc) < NonceSize+Overhead { return }
+	plain, err := v.AEAD.Open(enc[NonceSize:NonceSize], enc[:NonceSize], enc[NonceSize:], nil)
+	if err == nil && len(plain) > 0 { v.writeTUN(plain) }
 }
 
 func (v *VPNInstance) writeTUN(data []byte) {
@@ -483,43 +477,26 @@ func (v *VPNInstance) writeTUN(data []byte) {
 
 func main() {
 	cfgPath := flag.String("c", "config.json", "Config path")
-	flag.BoolVar(&debugMode, "debug", false, "Enable debug mode")
+	debug := flag.Bool("debug", false, "Debug mode")
 	flag.Parse()
+	debugMode = *debug
 
-	data, err := os.ReadFile(*cfgPath)
-	if err != nil {
-		log.Fatal(err)
-	}
-
+	data, _ := os.ReadFile(*cfgPath)
 	var configs []Config
 	if err := json.Unmarshal(data, &configs); err != nil {
 		var single Config
-		if err2 := json.Unmarshal(data, &single); err2 == nil {
-			configs = append(configs, single)
-		} else {
-			log.Fatal(err)
-		}
+		if err2 := json.Unmarshal(data, &single); err2 == nil { configs = append(configs, single) }
 	}
 
-	for _, cfg := range configs {
-		NewVPNInstance(cfg).Start()
-	}
-
+	for _, cfg := range configs { NewVPNInstance(cfg).Start() }
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
 	<-c
-	log.Println("Bye~")
 }
 
 func runCmd(name string, args ...string) {
-	cmd := exec.Command(name, args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		log.Printf("[Warn] Cmd fail: %s %v -> %v", name, args, err)
-	}
+	exec.Command(name, args...).Run()
 }
-
 func runCmdQuiet(name string, args ...string) {
 	exec.Command(name, args...).Run()
 }
