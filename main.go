@@ -23,6 +23,7 @@ import (
 	"golang.zx2c4.com/wireguard/tun"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/net/ipv4"
+	"golang.org/x/net/ipv6"
 )
 
 // --- Global Flags ---
@@ -189,7 +190,30 @@ func (v *VPNInstance) InitTUN() {
 	runCmd("sysctl", "-w", "net.ipv4.conf.default.rp_filter=0")
 	runCmd("sysctl", "-w", fmt.Sprintf("net.ipv4.conf.%s.rp_filter=0", realName))
 
+	// Setup MSS Clamping (NFTables)
+	v.setupNFTables(realName)
+
 	log.Printf("[%s] Interface Up & L3 Optimized (Nya~)", realName)
+}
+
+func (v *VPNInstance) setupNFTables(iface string) {
+	// Ensure table exists
+	runCmd("nft", "add", "table", "inet", "nekolink")
+	
+	// Create dedicated chain for this interface (hook forward)
+	chainName := fmt.Sprintf("mss_%s", iface)
+	runCmd("nft", "add", "chain", "inet", "nekolink", chainName, "{ type filter hook forward priority 0; policy accept; }")
+	
+	// Flush old rules in this chain
+	runCmd("nft", "flush", "chain", "inet", "nekolink", chainName)
+	
+	// Add Clamping Rules
+	// Inbound
+	runCmd("nft", "add", "rule", "inet", "nekolink", chainName, "iifname", iface, "tcp", "flags", "syn", "tcp", "option", "maxseg", "size", "set", "rt", "mtu")
+	// Outbound
+	runCmd("nft", "add", "rule", "inet", "nekolink", chainName, "oifname", iface, "tcp", "flags", "syn", "tcp", "option", "maxseg", "size", "set", "rt", "mtu")
+	
+	log.Printf("[%s] NFTables MSS Clamping Applied", iface)
 }
 
 func (v *VPNInstance) IfaceWrite(data []byte) {
@@ -282,6 +306,13 @@ func (v *VPNInstance) InitNetwork() {
 			c.SetWriteBuffer(16 << 20)
 			v.ConnUDP[i] = c
 			v.ConnBatch[i] = ipv4.NewPacketConn(c)
+
+			// Optimize IPv6 Priority (DSCP: EF / 46 -> 0xB8)
+			// This simulates VoLTE voice traffic for lower latency on mobile networks.
+			p6 := ipv6.NewPacketConn(c)
+			if err := p6.SetTrafficClass(0xB8); err != nil {
+				logDebug("IPv6 TrafficClass Warn: %v", err)
+			}
 
 			if v.Cfg.Mode == "client" {
 				rAddrStr := fmt.Sprintf("%s:%d", v.Cfg.RemoteIP, v.Cfg.RemotePort+i)
