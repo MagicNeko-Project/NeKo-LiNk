@@ -411,20 +411,26 @@ func (v *VPNInstance) copyAddr(addr net.Addr) net.Addr {
 }
 
 func (v *VPNInstance) RawListenerLoop(c *net.IPConn) {
+	var rxCount uint64
+	// Raw 模式：每次读取使用独立缓冲区，避免 ProcessPacket 解密时的并发竞争
+	buf := make([]byte, 65536)
 	for {
-		bufPtr := bufPool.Get().(*[]byte)
-		buf := *bufPtr
 		n, src, err := c.ReadFromIP(buf)
 		if err != nil {
-			bufPool.Put(bufPtr)
+			log.Printf("RawListenerLoop error: %v", err)
 			return
 		}
 		if n < 4 {
-			bufPool.Put(bufPtr)
 			continue
 		}
-		v.ProcessPacket(buf[4:n], src, 0)
-		bufPool.Put(bufPtr)
+		rxCount++
+		if debugMode && rxCount%1000 == 0 {
+			log.Printf("[RAW] RX packets: %d", rxCount)
+		}
+		// 必须拷贝数据，因为 buf 会被下次读取覆盖
+		pktCopy := make([]byte, n-4)
+		copy(pktCopy, buf[4:n])
+		v.ProcessPacket(pktCopy, src, 0)
 	}
 }
 
