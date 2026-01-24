@@ -330,13 +330,22 @@ func (v *VPNInstance) TUNReaderLoop() {
 		}
 
 		if v.Cfg.Protocol == "udp" {
-			// 服务端模式下，先检查是否有客户端连接
-			if v.Cfg.Mode == "server" && v.ServerPeerAddr == nil {
-				continue // 尚无客户端，跳过
-			}
-
 			// UDP 批处理模式
 			sendMsgs = sendMsgs[:0]
+			
+			// 获取目标地址
+			var addr net.Addr
+			if v.Cfg.Mode == "client" {
+				addr = v.ClientRemoteUDP
+			} else {
+				addr = v.ServerPeerAddr
+			}
+			
+			// 无客户端时跳过发送（但已消费 TUN 数据）
+			if addr == nil {
+				continue
+			}
+
 			for i := 0; i < n; i++ {
 				if sizes[i] == 0 {
 					continue
@@ -344,18 +353,10 @@ func (v *VPNInstance) TUNReaderLoop() {
 				data := buffs[i][TunOffset : TunOffset+sizes[i]]
 				encrypted := v.encryptPacket(data)
 				if encrypted != nil {
-					var addr net.Addr
-					if v.Cfg.Mode == "client" {
-						addr = v.ClientRemoteUDP
-					} else {
-						addr = v.ServerPeerAddr
-					}
-					if addr != nil {
-						sendMsgs = append(sendMsgs, ipv4.Message{
-							Buffers: [][]byte{encrypted},
-							Addr:    addr,
-						})
-					}
+					sendMsgs = append(sendMsgs, ipv4.Message{
+						Buffers: [][]byte{encrypted},
+						Addr:    addr,
+					})
 				}
 			}
 			if len(sendMsgs) > 0 {
