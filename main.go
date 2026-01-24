@@ -129,6 +129,7 @@ type VPNInstance struct {
 
 type PeerRoute struct {
 	Addr     net.Addr
+	Conn     net.Conn // TCP connection for this peer (if TCP mode)
 	LocalIdx int
 }
 
@@ -357,8 +358,10 @@ func (v *VPNInstance) InitNetwork() {
 		v.ConnRaw = c
 		if v.Cfg.Mode == "client" {
 			v.ClientRemoteIP, _ = net.ResolveIPAddr("ip", v.Cfg.RemoteIP)
-            // Start UDP Listener for Local WG
-            go v.WGRawClientStart()
+			// Start UDP Listener for Local WG ONLY if protocol is wg-raw
+			if v.Cfg.Protocol == "wg-raw" {
+				go v.WGRawClientStart()
+			}
 		}
 		go v.RawListenerLoop(c)
 	}
@@ -409,7 +412,7 @@ func (v *VPNInstance) UDPListenerLoop(idx int, pc *ipv4.PacketConn) {
 			msg := &msgs[i]
 			// 修正：必须要深度拷贝地址，防止并发覆盖
 			srcAddr := v.copyAddr(msg.Addr)
-			v.ProcessPacket((*bufPtrs[i])[:msg.N], srcAddr, idx)
+			v.ProcessPacket((*bufPtrs[i])[:msg.N], srcAddr, idx, nil)
 		}
 	}
 }
@@ -503,7 +506,7 @@ func (v *VPNInstance) RawListenerLoop(c *net.IPConn) {
 			bufPool.Put(bufPtr)
 			continue
 		}
-		v.ProcessPacket(buf[4:n], src, 0)
+		v.ProcessPacket(buf[4:n], src, 0, nil)
 		bufPool.Put(bufPtr)
 	}
 }
@@ -558,12 +561,12 @@ func (v *VPNInstance) TCPHandler(c net.Conn) {
 			bufPool.Put(bufPtr)
 			return
 		}
-		v.ProcessPacket(body, v.copyAddr(c.RemoteAddr()), 0)
+		v.ProcessPacket(body, v.copyAddr(c.RemoteAddr()), 0, c)
 		bufPool.Put(bufPtr)
 	}
 }
 
-func (v *VPNInstance) ProcessPacket(encrypted []byte, srcAddr net.Addr, idx int) {
+func (v *VPNInstance) ProcessPacket(encrypted []byte, srcAddr net.Addr, idx int, conn net.Conn) {
 	if len(encrypted) < NonceSize+Overhead { return }
 	nonce := encrypted[:NonceSize]
 	ciphertext := encrypted[NonceSize:]
@@ -589,7 +592,7 @@ func (v *VPNInstance) ProcessPacket(encrypted []byte, srcAddr net.Addr, idx int)
 		if version == 4 {
 			srcIP := binary.BigEndian.Uint32(ipPacket[12:16])
 			if srcIP != 0 {
-				v.PeerMap.Store(srcIP, PeerRoute{Addr: srcAddr, LocalIdx: idx})
+				v.PeerMap.Store(srcIP, PeerRoute{Addr: srcAddr, Conn: conn, LocalIdx: idx})
 			}
 		}
 	}
@@ -627,12 +630,8 @@ func (v *VPNInstance) handleOutgoingPacket(ipPacket []byte) {
 		v.tracePacket("TUN-READ", ipPacket)
 	}
 
-	var destAddr net.Addr
-	var isBroadcast bool
-	seq := atomic.AddUint32(&v.TxSeq, 1) - 1
-	idx := int(uint64(seq) % uint64(v.Cfg.PortCount))
-
 	// Determine Routing
+	var destConn net.Conn
 	if v.Cfg.Mode == "server" {
 		if len(ipPacket) >= 20 {
 			version := ipPacket[0] >> 4
@@ -647,6 +646,7 @@ func (v *VPNInstance) handleOutgoingPacket(ipPacket []byte) {
 					if val, ok := v.PeerMap.Load(dstIP); ok {
 						route := val.(PeerRoute)
 						destAddr = route.Addr
+						destConn = route.Conn
 						idx = route.LocalIdx
 					} else if debugMode {
 						v.logDebug("ROUTING: No peer for target, dropping...")
@@ -694,25 +694,30 @@ func (v *VPNInstance) handleOutgoingPacket(ipPacket []byte) {
 			route := value.(PeerRoute)
 			rAddr := route.Addr.String()
 			if !sent[rAddr] {
-				v.SendPacket(dst, route.LocalIdx, route.Addr)
+				v.SendPacket(dst, route.LocalIdx, route.Addr, route.Conn)
 				sent[rAddr] = true
 			}
 			return true
 		})
 	} else {
 		// Unicast / Client Send
-		v.SendPacket(dst, idx, destAddr)
+		v.SendPacket(dst, idx, destAddr, destConn)
 	}
 
 	bufPool.Put(ptPtr)
 	bufPool.Put(dstPtr)
 }
 
-func (v *VPNInstance) SendPacket(data []byte, idx int, destAddr net.Addr) {
+func (v *VPNInstance) SendPacket(data []byte, idx int, destAddr net.Addr, conn net.Conn) {
 	if v.Cfg.Protocol == "tcp" {
-		v.TCPMutex.Lock()
-		c := v.ConnTCP
-		v.TCPMutex.Unlock()
+		var c net.Conn
+		if conn != nil {
+			c = conn
+		} else {
+			v.TCPMutex.Lock()
+			c = v.ConnTCP
+			v.TCPMutex.Unlock()
+		}
 		if c == nil { return }
 		l := len(data)
 		h := make([]byte, 2)
