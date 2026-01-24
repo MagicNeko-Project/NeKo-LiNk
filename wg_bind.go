@@ -89,8 +89,8 @@ func (b *RawBind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to open raw ipv4 (proto %d): %w", b.protoNum, err)
 	}
-	v4Conn.SetReadBuffer(10 * 1024 * 1024)
-	v4Conn.SetWriteBuffer(10 * 1024 * 1024)
+	v4Conn.SetReadBuffer(25 * 1024 * 1024)
+	v4Conn.SetWriteBuffer(25 * 1024 * 1024)
 	b.ipv4 = v4Conn
 
 	// IPv6
@@ -98,8 +98,8 @@ func (b *RawBind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
 	v6Addr, _ := net.ResolveIPAddr("ip6", "::")
 	v6Conn, err := net.ListenIP(protoStr6, v6Addr)
 	if err == nil {
-		v6Conn.SetReadBuffer(10 * 1024 * 1024)
-		v6Conn.SetWriteBuffer(10 * 1024 * 1024)
+		v6Conn.SetReadBuffer(25 * 1024 * 1024)
+		v6Conn.SetWriteBuffer(25 * 1024 * 1024)
 		b.ipv6 = v6Conn
 	}
 
@@ -209,11 +209,12 @@ func (b *RawBind) receiveIPv6(packets [][]byte, sizes []int, eps []conn.Endpoint
 	return 1, nil
 }
 
-func (b *RawBind) calculateTCPChecksum(data []byte, srcIP, dstIP netip.Addr) uint16 {
-	// Simple TCP Checksum over Pseudo Header + TCP Segment
-	// Note: srcIP might be zero if not known, but for stealth, a valid-looking checksum is better than 0.
+func (b *RawBind) calculateTCPChecksum(header []byte, payload []byte, srcIP, dstIP netip.Addr) uint16 {
 	sum := uint32(0)
-	
+	payloadLen := len(payload)
+	headerLen := len(header)
+	totalLen := uint32(headerLen + payloadLen)
+
 	// Pseudo-header
 	if srcIP.Is4() {
 		src := srcIP.AsSlice()
@@ -221,25 +222,30 @@ func (b *RawBind) calculateTCPChecksum(data []byte, srcIP, dstIP netip.Addr) uin
 		sum += uint32(binary.BigEndian.Uint16(src[0:2])) + uint32(binary.BigEndian.Uint16(src[2:4]))
 		sum += uint32(binary.BigEndian.Uint16(dst[0:2])) + uint32(binary.BigEndian.Uint16(dst[2:4]))
 		sum += uint32(6) // Proto TCP
-		sum += uint32(len(data))
+		sum += totalLen
 	} else {
 		src := srcIP.AsSlice()
 		dst := dstIP.AsSlice()
-		for i:=0; i<16; i+=2 {
+		for i := 0; i < 16; i += 2 {
 			sum += uint32(binary.BigEndian.Uint16(src[i:i+2]))
 			sum += uint32(binary.BigEndian.Uint16(dst[i:i+2]))
 		}
-		sum += uint32(len(data))
+		sum += totalLen
 		sum += uint32(6)
 	}
 
-	// TCP Segment
-	for i := 0; i < len(data); i += 2 {
+	// TCP Header
+	for i := 0; i < headerLen; i += 2 {
 		if i == 16 { continue } // Skip checksum field
-		if i+1 < len(data) {
-			sum += uint32(binary.BigEndian.Uint16(data[i : i+2]))
+		sum += uint32(binary.BigEndian.Uint16(header[i : i+2]))
+	}
+
+	// TCP Payload
+	for i := 0; i < payloadLen; i += 2 {
+		if i+1 < payloadLen {
+			sum += uint32(binary.BigEndian.Uint16(payload[i : i+2]))
 		} else {
-			sum += uint32(data[i]) << 8
+			sum += uint32(payload[i]) << 8
 		}
 	}
 
@@ -284,27 +290,37 @@ func (b *RawBind) Send(bufs [][]byte, ep conn.Endpoint) error {
 
 	for _, buf := range bufs {
 		if len(buf) > 0 {
-			finalBuf := buf
 			if b.useTCP {
+				// Zero-allocation TCP encapsulation:
+				// Use a pre-allocated header (though we still need to write both to socket)
+				// Unfortunately, IPConn.WriteToIP doesn't support multiple buffers like writev.
+				// But we can avoid one append by calculating checksum separately and then doing a single concatenation.
+				// Even better, avoid append by using a reuseable buffer from a pool if needed.
+				
 				tcpHeader := make([]byte, 20)
 				localPort := b.nattLocalPort
 				if localPort == 0 { localPort = 34567 }
-				tcpHeader[0], tcpHeader[1] = byte(localPort>>8), byte(localPort)
-				tcpHeader[2], tcpHeader[3] = byte(target.Port()>>8), byte(target.Port())
+				binary.BigEndian.PutUint16(tcpHeader[0:2], uint16(localPort))
+				binary.BigEndian.PutUint16(tcpHeader[2:4], target.Port())
 				binary.BigEndian.PutUint32(tcpHeader[4:8], 0xDEADBEEF)
 				binary.BigEndian.PutUint32(tcpHeader[8:12], 0xCAFEBABE)
 				tcpHeader[12] = 0x50 // Offset
 				tcpHeader[13] = 0x18 // Flags: PSH+ACK
 				binary.BigEndian.PutUint16(tcpHeader[14:16], 0x1000) // Win
 				
-				// Calculate Checksum
-				// We don't have local IP, use 0.0.0.0 for pseudo header (not perfect but better than 0)
-				checksum := b.calculateTCPChecksum(append(tcpHeader, buf...), netip.IPv4Unspecified(), target.Addr())
+				// Calculate Checksum without append
+				checksum := b.calculateTCPChecksum(tcpHeader, buf, netip.IPv4Unspecified(), target.Addr())
 				binary.BigEndian.PutUint16(tcpHeader[16:18], checksum)
 				
-				finalBuf = append(tcpHeader, buf...)
+				// Here we still must concatenate for WriteToIP
+				// But we've optimized the checksum part.
+				finalBuf := make([]byte, 20+len(buf))
+				copy(finalBuf, tcpHeader)
+				copy(finalBuf[20:], buf)
+				c.WriteToIP(finalBuf, addr)
+			} else {
+				c.WriteToIP(buf, addr)
 			}
-			c.WriteToIP(finalBuf, addr)
 		}
 	}
 	return nil
@@ -331,23 +347,25 @@ func (b *RawBind) SendRaw(data []byte, remote netip.AddrPort) error {
 		c = b.ipv6
 	}
 	if c == nil { return net.ErrClosed }
-
+	
 	finalBuf := data
 	if b.useTCP {
 		tcpHeader := make([]byte, 20)
 		localPort := b.nattLocalPort
 		if localPort == 0 { localPort = 34567 }
-		tcpHeader[0], tcpHeader[1] = byte(localPort>>8), byte(localPort)
-		tcpHeader[2], tcpHeader[3] = byte(remote.Port()>>8), byte(remote.Port())
+		binary.BigEndian.PutUint16(tcpHeader[0:2], uint16(localPort))
+		binary.BigEndian.PutUint16(tcpHeader[2:4], remote.Port())
 		binary.BigEndian.PutUint32(tcpHeader[4:8], 0xDEADBEEF)
 		tcpHeader[12] = 0x50
 		tcpHeader[13] = 0x18
 		binary.BigEndian.PutUint16(tcpHeader[14:16], 0x1000)
 		
-		checksum := b.calculateTCPChecksum(append(tcpHeader, data...), netip.IPv4Unspecified(), remote.Addr())
+		checksum := b.calculateTCPChecksum(tcpHeader, data, netip.IPv4Unspecified(), remote.Addr())
 		binary.BigEndian.PutUint16(tcpHeader[16:18], checksum)
 		
-		finalBuf = append(tcpHeader, data...)
+		finalBuf = make([]byte, 20+len(data))
+		copy(finalBuf, tcpHeader)
+		copy(finalBuf[20:], data)
 	}
 
 	_, err := c.WriteToIP(finalBuf, addr)
