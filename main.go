@@ -123,6 +123,13 @@ type VPNInstance struct {
 	WGNat sync.Map // Map[string]*net.UDPConn (NAT for wg-raw server)
 	
 	ReplayFilter *AntiReplay
+	RxChan       chan RxPacket // Async packet processing channel
+}
+
+type RxPacket struct {
+	Data    []byte
+	SrcAddr net.Addr
+	Conn    net.Conn
 }
 
 type PeerRoute struct {
@@ -155,6 +162,7 @@ func NewVPNInstance(cfg Config) *VPNInstance {
 	v.SessionID = binary.BigEndian.Uint32(b)
 	
 	v.ReplayFilter = NewAntiReplay(2048)
+	v.RxChan = make(chan RxPacket, 4096) // Large buffer to prevent blocking
 	
 	return v
 }
@@ -183,6 +191,12 @@ func (v *VPNInstance) Start() {
 	if v.Cfg.Mode == "client" {
 		go v.KeepaliveLoop()
 	}
+	
+	// Start async packet processor workers
+	for i := 0; i < 4; i++ {
+		go v.packetWorker()
+	}
+	
 	go v.TUNReaderLoop()
 }
 
@@ -405,8 +419,24 @@ func (v *VPNInstance) UDPListenerLoop(pc *ipv4.PacketConn) {
 		for i := 0; i < nMsgs; i++ {
 			msg := &msgs[i]
 			srcAddr := v.copyAddr(msg.Addr)
-			v.ProcessPacket((*bufPtrs[i])[:msg.N], srcAddr, nil)
+			// Non-blocking send to channel (async processing)
+			dataCopy := make([]byte, msg.N)
+			copy(dataCopy, (*bufPtrs[i])[:msg.N])
+			select {
+			case v.RxChan <- RxPacket{Data: dataCopy, SrcAddr: srcAddr}:
+			default:
+				// Channel full, drop packet (back-pressure)
+				if debugMode {
+					v.logDebug("RxChan FULL, dropping packet")
+				}
+			}
 		}
+	}
+}
+
+func (v *VPNInstance) packetWorker() {
+	for pkt := range v.RxChan {
+		v.ProcessPacket(pkt.Data, pkt.SrcAddr, pkt.Conn)
 	}
 }
 
@@ -596,8 +626,9 @@ func (v *VPNInstance) ProcessPacket(encrypted []byte, srcAddr net.Addr, conn net
 	if v.ReplayFilter.Check(sessionID, seq) {
 		v.IfaceWrite(dataCopy)
 	} else {
-		// Log duplicate or old packet?
-		// v.logDebug("AntiReplay: Drop S:%d Seq:%d", sessionID, seq)
+		if debugMode {
+			v.logDebug("AntiReplay: Drop S:%d Seq:%d (Dup/Old)", sessionID, seq)
+		}
 	}
 }
 
@@ -867,6 +898,7 @@ func (a *AntiReplay) Check(session uint32, seq uint32) bool {
 		// New largest sequence
 		// Shift window by diff
 		if diff >= int64(a.windowSize) {
+			if debugMode { log.Printf("AntiReplay: Window Reset (Jump %d) Seq %d -> %d", diff, a.lastSeq, seq) }
 			a.resetBitmap()
 		} else {
 			a.shift(uint32(diff))
@@ -880,6 +912,7 @@ func (a *AntiReplay) Check(session uint32, seq uint32) bool {
 	// Old sequence (diff <= 0)
 	diffAbs := -diff
 	if diffAbs >= int64(a.windowSize) {
+		if debugMode { log.Printf("AntiReplay: Too Old (Diff %d) Seq %d Last %d", diffAbs, seq, a.lastSeq) }
 		return false // Too old
 	}
 
@@ -889,6 +922,7 @@ func (a *AntiReplay) Check(session uint32, seq uint32) bool {
 	mask := uint64(1) << bit
 
 	if (a.bitmap[block] & mask) != 0 {
+		if debugMode { log.Printf("AntiReplay: Dup Seq %d", seq) }
 		return false // Duplicate
 	}
 
