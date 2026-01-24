@@ -63,6 +63,7 @@ type Config struct {
 	UseNATT       bool `json:"use_nat_t,omitempty"`
 	UseTCP        bool `json:"use_tcp,omitempty"`
 	UseEBPF       bool `json:"use_ebpf,omitempty"`
+	EBPFDevice    string `json:"ebpf_device,omitempty"`
 	UDPPort       int  `json:"udp_port,omitempty"`
 	Debug         bool `json:"debug,omitempty"`
 
@@ -114,6 +115,21 @@ func (c *Config) ParseLegacy() (changed bool) {
 		log.Printf("[%s] 自动将旧版协议 %s 升级为 wg-raw (Fake TCP: %v, eBPF: %v)", c.InterfaceName, oldProto, c.UseTCP, c.UseEBPF)
 		changed = true
 	}
+
+	// 2.1 EBPF 设备冲突解决
+	// 如果开启了 EBPF 但还没指定 EBPFDevice，且 InterfaceName 看起来像个物理网卡名
+	if c.UseEBPF && c.EBPFDevice == "" {
+		isPhysical := strings.HasPrefix(c.InterfaceName, "eth") || 
+					  strings.HasPrefix(c.InterfaceName, "en") || 
+					  strings.HasPrefix(c.InterfaceName, "wl")
+		
+		if isPhysical {
+			c.EBPFDevice = c.InterfaceName
+			c.InterfaceName = "neko0" // 虚拟网卡换个名字
+			log.Printf("[EBPF] 检测到接口冲突，已自动调整：物理网卡=%s, 虚拟网卡=%s", c.EBPFDevice, c.InterfaceName)
+			changed = true
+		}
+	}
 	
 	// 3. 默认值设置
 	if c.IPProtocolNum == 0 {
@@ -149,6 +165,10 @@ func (c *Config) ParseLegacy() (changed bool) {
 	}
 	if c.InterfaceName == "" {
 		c.InterfaceName = "neko0"
+		changed = true
+	}
+	if c.UseEBPF && c.EBPFDevice == "" {
+		c.EBPFDevice = "eth0" // 默认物理网卡
 		changed = true
 	}
 	return
@@ -258,7 +278,7 @@ func generateWGKey() ([]byte, []byte) {
 
 func (v *VPNInstance) startWireGuardRaw() {
 	// 1. Create Bind
-	bind := NewRawBind(v.Cfg.IPProtocolNum, v.Cfg.UseNATT, v.Cfg.UseTCP, v.Cfg.UseEBPF, v.Cfg.InterfaceName, v.Cfg.ListenPort, v.Cfg.PeerPort)
+	bind := NewRawBind(v.Cfg.IPProtocolNum, v.Cfg.UseNATT, v.Cfg.UseTCP, v.Cfg.UseEBPF, v.Cfg.EBPFDevice, v.Cfg.ListenPort, v.Cfg.PeerPort)
 	
 	// 2. Client Mode: Set Remote
 	if v.Cfg.Mode == "client" {
