@@ -159,7 +159,8 @@ var serverConnMx sync.RWMutex
 
 func (v *VPNInstance) startQuicServer() {
 	tlsConf := GenerateTLSConfig(true)
-	listener, err := quic.ListenAddr(v.Cfg.ServerBindAddr, tlsConf, &quic.Config{
+	bindAddr := fmt.Sprintf("%s:%d", v.Cfg.ServerBindAddr, v.Cfg.BasePort)
+	listener, err := quic.ListenAddr(bindAddr, tlsConf, &quic.Config{
 		MaxIdleTimeout:      30 * time.Second,
 		EnableDatagrams:     true,
 		InitialStreamReceiveWindow:     1024 * 1024,
@@ -169,7 +170,7 @@ func (v *VPNInstance) startQuicServer() {
 		log.Fatalf("QUIC Listen 失败: %v", err)
 	}
 	v.quicListener = listener
-	log.Printf("[QUIC] Server 监听于 %s (TLS 1.3)", v.Cfg.ServerBindAddr)
+	log.Printf("[QUIC] Server 监听于 %s (TLS 1.3)", bindAddr)
 
 	for {
 		conn, err := listener.Accept(context.Background())
