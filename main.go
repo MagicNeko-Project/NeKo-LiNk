@@ -102,9 +102,10 @@ func (c *Config) ParseLegacy() (changed bool) {
 	// 2. 基本字段兼容 (兼容之前的老代码可能还在直接用 RemoteIP 等逻辑)
 	// (如果有其它代码引用了旧字段，可以在这里同步，但建议全部改为引用新字段)
 	
-	// 2. 协议迁移 (UDP/TCP/QUIC/Raw -> wg-raw)
+	// 2. 协议迁移 (UDP/TCP/QUIC -> wg-raw)
+	// 注意：这里移除了 "raw"，因为主人希望保留原有的 legacy raw 模式。
 	oldProto := strings.ToLower(c.Protocol)
-	if oldProto == "udp" || oldProto == "tcp" || oldProto == "quic" || oldProto == "raw" || oldProto == "" {
+	if oldProto == "udp" || oldProto == "tcp" || oldProto == "quic" || oldProto == "" {
 		if oldProto == "tcp" {
 			c.UseTCP = true
 			c.IPProtocolNum = 6
