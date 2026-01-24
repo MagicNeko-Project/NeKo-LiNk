@@ -5,14 +5,22 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
-// --- Maps (仅 Raw Allow) ---
+// --- Legacy Map Definition (No BTF) ---
 
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(key_size, sizeof(__u8));  // IP Proto
-    __uint(value_size, sizeof(__u8)); // Placeholder
-    __uint(max_entries, 16);
-} raw_allow_map SEC(".maps");
+struct bpf_map_def {
+	unsigned int type;
+	unsigned int key_size;
+	unsigned int value_size;
+	unsigned int max_entries;
+	unsigned int map_flags;
+};
+
+struct bpf_map_def SEC("maps") raw_allow_map = {
+	.type = BPF_MAP_TYPE_HASH,
+	.key_size = sizeof(__u8),
+	.value_size = sizeof(__u8),
+	.max_entries = 16,
+};
 
 // --- 入站处理 (Ingress) ---
 
