@@ -76,6 +76,12 @@ int xdp_prog(struct xdp_md *ctx) {
             return bpf_redirect_map(&xsks_map, ctx->rx_queue_index, 0);
         }
     }
+    
+    // MODE 0: Promiscuous (Redirect ALL IP)
+    // Used for Veth interface where we want to capture everything from Host
+    else if (*mode == 0) {
+        return bpf_redirect_map(&xsks_map, ctx->rx_queue_index, 0);
+    }
 
     return XDP_PASS;
 }
