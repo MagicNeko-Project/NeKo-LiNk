@@ -878,7 +878,13 @@ func (v *VPNInstance) sendPhantomPacket(plain []byte, remote netip.AddrPort) {
 	
 	// Encrypt
 	nonce := make([]byte, NonceSize)
-	rand.Read(nonce) // Or atomic counter
+
+	// Structure Nonce: [Seq (8)] + [SessionID (4)] + [Padding (12)]
+	// This matches the expectation of the Reordering Logic on the receiver side.
+	vVal := atomic.AddUint64(&v.nonceCounter, 1)
+	binary.BigEndian.PutUint64(nonce[0:8], vVal)
+	binary.BigEndian.PutUint32(nonce[8:12], v.SessionID)
+	// Remaining bytes are 0 (make initializes to 0)
 	
 	// Cipher = Nonce + AEAD(plain)
 	cipherText := v.AEAD.Seal(nil, nonce, plain, nil)
