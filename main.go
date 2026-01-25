@@ -1082,61 +1082,16 @@ func (v *VPNInstance) XDPReaderLoop(idx int) {
 		for _, pkt := range pkts {
 			// Parse Ethernet
 			if len(pkt) < 14 { continue }
-			ethType := binary.BigEndian.Uint16(pkt[12:14])
 		
-		// 1. Handle ARP (0x0806)
-		if ethType == 0x0806 {
-			// Basic ARP Reply for ANY request coming to us
-			// We act as the "Link Peer".
-			// ARP Packet: Htype(2) Ptype(2) Hlen(1) Plen(1) Op(2) Sha(6) Spa(4) Tha(6) Tpa(4)
-			if len(pkt) < 14+28 { continue }
-			arpOff := 14
-			op := binary.BigEndian.Uint16(pkt[arpOff+6:arpOff+8])
-			
-			if op == 1 { // ARP Request
-				// log.Printf("[ARP] Got Request, sending Reply")
-				
-				// Construct Reply
-				reply := make([]byte, 42) // 14 Eth + 28 ARP
-				
-				// Ethernet Header
-				// Dst = Src of Request
-				copy(reply[0:6], pkt[6:12]) 
-				// Src = My Dummy MAC (02:00:00:00:00:01)
-				copy(reply[6:12], []byte{0x02,0x00,0x00,0x00,0x00,0x01})
-				reply[12], reply[13] = 0x08, 0x06
-				
-				// ARP Payload
-				copy(reply[14:16], pkt[14:16]) // Htype
-				copy(reply[16:18], pkt[16:18]) // Ptype
-				reply[18], reply[19] = pkt[18], pkt[19] // Hlen, Plen
-				binary.BigEndian.PutUint16(reply[20:22], 2) // Op = Reply
-				
-				// Sender MAC (My Dummy)
-				copy(reply[22:28], []byte{0x02,0x00,0x00,0x00,0x00,0x01})
-				// Sender IP (Copy from Target IP of Request)
-				// We reply to "Who has IP X?" with "I have IP X". 
-				// This effectively claims ALL IPs routed to us.
-				copy(reply[28:32], pkt[38:42]) 
-				
-				// Target MAC (Requester MAC)
-				copy(reply[32:38], pkt[22:28])
-				// Target IP (Requester IP)
-				copy(reply[38:42], pkt[28:32])
-				
-				v.Xsk.Transmit(reply)
-			}
-			continue
-		}
-
-			// 2. Encrypt and Send for Veth Mode
-			// Strip Ethernet
-			ipv4 := pkt[14:]
+			// 2. Encrypt and Send (L2 Tunnel Mode - Ethernet over IP)
+			// We tunnel the FULL Ethernet Frame (including Header)
+			// No more ARP Responder needed - ARP is tunneled too!
+			payload := pkt
 			
 			// Encrypt
 			nonce := make([]byte, NonceSize)
 			rand.Read(nonce)
-			cipherText := v.AEAD.Seal(nil, nonce, ipv4, nil)
+			cipherText := v.AEAD.Seal(nil, nonce, payload, nil)
 			finalPayload := append(nonce, cipherText...)
 			
 			// Send via ConnRaw
@@ -1257,31 +1212,11 @@ func (v *VPNInstance) handleIncomingPacket(enc []byte) {
 
 func (v *VPNInstance) writeTUN(data []byte) {
 	// Raw Mode Tx Path: Internet -> Decrypted -> Here -> XDP -> veth_app
-	// We need to add Ethernet Header before writing to XDP (veth expects TCP/IP inside Ethernet)
-	// Construct Dummy Ethernet Header:
-	// Src: Random/Fixed, Dst: Broadcast/Fixed?
-	// Veth pair usually doesn't care much about MAC learning if routed, but let's be safe.
-	// Proto: 0x0800 (IPv4) or 0x86DD (IPv6)
-	
-	proto := uint16(0x0800)
-	if len(data) > 0 && (data[0] >> 4) == 6 {
-		proto = 0x86DD
-	}
-	
-	etherFrame := make([]byte, 14+len(data))
-	// Dst MAC (Dummy)
-	etherFrame[0], etherFrame[1], etherFrame[2] = 0xff, 0xff, 0xff
-	etherFrame[3], etherFrame[4], etherFrame[5] = 0xff, 0xff, 0xff
-	// Src MAC (Dummy)
-	etherFrame[6], etherFrame[7], etherFrame[8] = 0x02, 0x00, 0x00
-	etherFrame[9], etherFrame[10], etherFrame[11] = 0x00, 0x00, 0x01
-	// EtherType
-	binary.BigEndian.PutUint16(etherFrame[12:14], proto)
-	
-	copy(etherFrame[14:], data)
+	// L2 Tunnel Mode: "data" is ALREADY a full Ethernet Frame.
+	// We just transmit it directly.
 	
 	if v.Xsk != nil {
-		v.Xsk.Transmit(etherFrame)
+		v.Xsk.Transmit(data)
 	}
 }
 

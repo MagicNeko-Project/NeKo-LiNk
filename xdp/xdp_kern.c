@@ -41,39 +41,37 @@ int xdp_prog(struct xdp_md *ctx) {
     struct ethhdr *eth = data;
     if (data + sizeof(*eth) > data_end) return XDP_PASS;
     
-    // Check Protocol
-    // Allow IP (0x0800)
-    if (eth->h_proto == __constant_htons(ETH_P_IP)) {
-        struct iphdr *ip = data + sizeof(*eth);
-        if ((void *)(ip + 1) > data_end) return XDP_PASS;
-        
-        // IP Logic continues below
-    } else if (eth->h_proto == __constant_htons(ETH_P_ARP)) {
-        // ARP (0x0806)
-        // Only allow in Mode 0 (Promiscuous)
-        // We will check map below
-    } else {
-        return XDP_PASS;
-    }
+    // Check Protocol: We need to filter for specific modes, BUT Mode 0 = All.
+    // So we can't filter globally at the top.
     
-    // Legacy IP Pointer logic (moved inside if, but we need it for Mode 1/2 checks)
-    // Refactor: Extract IP only if IP
-    struct iphdr *ip = NULL;
-    if (eth->h_proto == __constant_htons(ETH_P_IP)) {
-         ip = data + sizeof(*eth);
-    }
-
-    // Load Config
+    // Load Config first
     int key_mode = 0;
     int key_val = 1;
     int *mode = bpf_map_lookup_elem(&config_map, &key_mode);
     int *val = bpf_map_lookup_elem(&config_map, &key_val); // Port (Host) or Proto
     
     if (!mode || !val) return XDP_PASS;
+    
+    // MODE 0: Promiscuous (Redirect ALL)
+    if (*mode == 0) {
+         return bpf_redirect_map(&xsks_map, ctx->rx_queue_index, 0);
+    }
+
+    struct ethhdr *eth = data;
+    if (data + sizeof(*eth) > data_end) return XDP_PASS;
+
+    // Filter Logic for Mode 1 & 2 (IP Only)
+    struct iphdr *ip = NULL;
+    if (eth->h_proto == __constant_htons(ETH_P_IP)) {
+        ip = data + sizeof(*eth);
+        if ((void *)(ip + 1) > data_end) return XDP_PASS;
+    } else {
+        // Mode 1/2 only support IPv4 for now filtering
+        return XDP_PASS;
+    }
 
     // MODE 1: UDP
     if (*mode == 1) {
-        if (!ip) return XDP_PASS; // ARP not allowed in UDP Mode
         if (ip->protocol != IPPROTO_UDP) return XDP_PASS;
         struct udphdr *udp = (void *)ip + (ip->ihl * 4);
         if ((void *)(udp + 1) > data_end) return XDP_PASS;
@@ -85,17 +83,9 @@ int xdp_prog(struct xdp_md *ctx) {
     
     // MODE 2: RAW (IP Protocol)
     else if (*mode == 2) {
-        if (!ip) return XDP_PASS; // ARP not allowed in Raw Filter Mode
         if (ip->protocol == *val) {
             return bpf_redirect_map(&xsks_map, ctx->rx_queue_index, 0);
         }
-    }
-    
-    // MODE 0: Promiscuous (Redirect ALL IP + ARP)
-    // Used for Veth interface where we want to capture everything from Host
-    else if (*mode == 0) {
-        // We already validated Eth is IP or ARP above.
-        return bpf_redirect_map(&xsks_map, ctx->rx_queue_index, 0);
     }
 
     return XDP_PASS;
