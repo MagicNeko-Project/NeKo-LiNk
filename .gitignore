@@ -11,3 +11,4 @@ vpn
 /.go/
 neko-link
 config.json
+config_old.json
