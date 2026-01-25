@@ -54,7 +54,10 @@ int xdp_prog(struct xdp_md *ctx) {
     
     // MODE 0: Promiscuous (Redirect ALL)
     if (*mode == 0) {
-         return bpf_redirect_map(&xsks_map, ctx->rx_queue_index, 0);
+         // Force Queue 0.
+         // In Generic XDP (SKB Mode), rx_queue_index might depend on CPU.
+         // We only attached AF_XDP to Queue 0.
+         return bpf_redirect_map(&xsks_map, 0, 0);
     }
 
     struct ethhdr *eth = data;
