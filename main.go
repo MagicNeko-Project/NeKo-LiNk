@@ -173,6 +173,8 @@ func NewVPNInstance(cfg Config) *VPNInstance {
 	if cfg.MTU == 0 { cfg.MTU = 1400 }
 	if cfg.WGInternalPort == 0 { cfg.WGInternalPort = 51820 }
 	if cfg.CustomProtocol == 0 { cfg.CustomProtocol = 233 }
+	if cfg.ServerBindPort == 0 { cfg.ServerBindPort = 23333 }
+	if cfg.ClientRemotePort == 0 { cfg.ClientRemotePort = 23333 }
 	if cfg.VPNInterface == "" { cfg.VPNInterface = "neko0" }
 
 	v := &VPNInstance{Cfg: cfg}
@@ -302,11 +304,11 @@ func (v *VPNInstance) setupKernelWireGuard(iface string) {
 	// WireGuard interfaces don't auto-generate IPv6 LL, so we add one.
 	llBuf := make([]byte, 8)
 	rand.Read(llBuf)
-	llIP := fmt.Sprintf("fe80::%s:%s:%s:%s/64", 
-		fmt.Sprintf("%x", llBuf[0:2]), 
-		fmt.Sprintf("%x", llBuf[2:4]), 
-		fmt.Sprintf("%x", llBuf[4:6]), 
-		fmt.Sprintf("%x", llBuf[6:8]))
+	llIP := fmt.Sprintf("fe80::%04x:%04x:%04x:%04x/64", 
+		binary.BigEndian.Uint16(llBuf[0:2]),
+		binary.BigEndian.Uint16(llBuf[2:4]),
+		binary.BigEndian.Uint16(llBuf[4:6]),
+		binary.BigEndian.Uint16(llBuf[6:8]))
 	runCmd("ip", "addr", "add", llIP, "dev", iface)
 	
 	// Safe MTU for tunneled traffic
