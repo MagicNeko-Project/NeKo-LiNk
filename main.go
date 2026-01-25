@@ -1027,6 +1027,20 @@ func (v *VPNInstance) Start() {
 	}
 }
 
+func (v *VPNInstance) Cleanup() {
+	log.Printf("[%s] 正在清理网络资源...", v.Cfg.InterfaceName)
+	if v.Cfg.Protocol == "wg-raw" {
+		if v.WGInterface != "" {
+			runCmdQuiet("ip", "link", "del", v.WGInterface)
+		}
+	} else {
+		// Raw Mode (Veth): Deleting host side automatically removes peer side
+		if v.Cfg.InterfaceName != "" {
+			runCmdQuiet("ip", "link", "del", v.Cfg.InterfaceName)
+		}
+	}
+}
+
 // --- Producer: UDP (Net) -> Pipeline ---
 
 
@@ -1437,12 +1451,22 @@ func main() {
 		os.Exit(0)
 	}
 
+	var instances []*VPNInstance
 	for _, cfg := range configs {
-		NewVPNInstance(cfg).Start()
+		v := NewVPNInstance(cfg)
+		instances = append(instances, v)
+		v.Start()
 	}
+
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
-	<-c
+	sig := <-c
+	log.Printf("接收到信号 %v，正在安全退出...", sig)
+
+	for _, v := range instances {
+		v.Cleanup()
+	}
+	log.Printf("清理完成，再见，主人！")
 }
 
 func runCmd(name string, args ...string) error {
