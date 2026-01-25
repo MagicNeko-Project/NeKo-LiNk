@@ -125,11 +125,23 @@ func NewSocket(cfg Config) (*Socket, error) {
 	if err := spec.LoadAndAssign(&objs, nil); err != nil { return nil, err }
 	
 	// Attach XDP
+	// Attach XDP
 	l, err := link.AttachXDP(link.XDPOptions{
 		Program:   objs.XdpProg,
 		Interface: iface.Index,
 	})
-	if err != nil { return nil, fmt.Errorf("attach xdp failed: %w", err) }
+	if err != nil {
+		log.Printf("[XDP] Default attach failed (%v), trying SKB/Generic mode...", err)
+		l, err = link.AttachXDP(link.XDPOptions{
+			Program:   objs.XdpProg,
+			Interface: iface.Index,
+			Flags:     link.XDPGenericMode,
+		})
+		if err != nil { return nil, fmt.Errorf("attach xdp (generic) failed: %w", err) }
+		log.Printf("[XDP] Attached in SKB/Generic mode")
+	} else {
+		log.Printf("[XDP] Attached in Native/Driver mode")
+	}
 	
 	// Write Config Map
 	m := uint32(cfg.Mode)
