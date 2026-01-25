@@ -45,6 +45,7 @@ func logDebug(format string, v ...interface{}) {
 // --- 配置结构 (保持兼容) ---
 
 type Config struct {
+	Version       string `json:"version,omitempty"` // v1.5
 	InterfaceName string `json:"interface_name"`
 	Mode          string `json:"mode"`
 	LocalAddr     string `json:"local_addr"`
@@ -285,7 +286,39 @@ func (c *Config) ParseLegacy() (changed bool) {
 		changed = true
 	}
 
+	// 6. Version Upgrade
+	c.Version = "v1.5"
 	return
+}
+
+// MapConfigByProtocol returns a filtered map based on the protocol to hide irrelevant fields
+func (c *Config) MapConfigByProtocol() map[string]interface{} {
+	m := make(map[string]interface{})
+	m["version"] = "v1.5"
+	m["interface_name"] = c.InterfaceName
+	m["mode"] = c.Mode
+	m["protocol"] = c.Protocol
+	m["key"] = c.Key
+	m["mtu"] = c.MTU
+	if c.Debug { m["debug"] = true }
+	if c.Comment != "" { m["comment"] = c.Comment }
+
+	if c.Protocol == "wg-raw" {
+		// Only wg-raw (Phantom) fields
+		if c.ParentInterface != "" { m["parent_interface"] = c.ParentInterface }
+		if c.WGInterface != "" { m["wg_interface"] = c.WGInterface }
+		if c.ListenPort != 0 { m["listen_port"] = c.ListenPort }
+		if c.WGPort != 0 { m["wg_port"] = c.WGPort }
+	} else {
+		// Only raw (Veth) fields
+		if c.LocalAddr != "" { m["local_addr"] = c.LocalAddr }
+		if c.ListenAddr != "" { m["listen_addr"] = c.ListenAddr }
+		if c.AppInterface != "" { m["app_interface"] = c.AppInterface }
+		if c.IPProtocolNum != 0 { m["ip_protocol_num"] = c.IPProtocolNum }
+		if c.UseNATT { m["use_nat_t"] = true }
+		if c.UseTCP { m["use_tcp"] = true }
+	}
+	return m
 }
 
 func writeFull(w io.Writer, b []byte) error {
@@ -1576,17 +1609,26 @@ func main() {
 	}
 
 	if *migrate {
-		log.Printf(">>> 正在优化并清理配置文件布局...")
-		var outData []byte
+		log.Printf(">>> [Migrate] 正在执行 V1.5 配置升级...")
+		
+		var output interface{}
 		if isArray {
-			outData, _ = json.MarshalIndent(configs, "", "  ")
+			var list []map[string]interface{}
+			for _, c := range configs {
+				list = append(list, c.MapConfigByProtocol())
+			}
+			output = list
 		} else {
-			outData, _ = json.MarshalIndent(configs[0], "", "  ")
+			output = configs[0].MapConfigByProtocol()
 		}
-		if err := os.WriteFile(*cfgPath, outData, 0644); err != nil {
+
+		newData, _ := json.MarshalIndent(output, "", "  ")
+		newPath := *cfgPath + ".v15"
+		if err := os.WriteFile(newPath, newData, 0644); err != nil {
 			log.Printf("保存失败: %v", err)
 		} else {
-			log.Printf("✅ 配置文件已精简并保存！")
+			log.Printf(">>> [Migrate] 升级完成！新配置文件已生成至: %s", newPath)
+			log.Printf(">>> 提示: V1.5 格式仅包含协议所需的必要字段喵~")
 		}
 		os.Exit(0)
 	}

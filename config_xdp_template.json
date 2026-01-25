@@ -4,19 +4,23 @@
         "mode": "server",
         "protocol": "raw",
         "local_addr": "10.0.0.1/24",
-        "key": "YOUR_PRIVATE_KEY_BASE64",
-        "ip_protocol_num": 233,
+        "key": "YOUR_SHARED_SECRET",
+        "ip_protocol_num": 250,
         "mtu": 1400,
         "listen_addr": "0.0.0.0",
-        "comment": "Mode 2 (Raw): 创建 veth pair (neko0 <-> neko0_app)，宿主机可见 neko0 网卡，底层使用 AF_XDP 加速。"
+        "app_interface": "neko0_app",
+        "comment": "Mode 2 (Raw): 创建 veth 对 (neko0 <-> neko0_app)。流量通过 AF_XDP 加速并进行并行加解密。"
     },
     {
-        "interface_name": "eth0",
+        "interface_name": "tox-bj-ali",
         "mode": "server",
         "protocol": "wg-raw",
-        "listen_port": 8888,
+        "parent_interface": "eth0",
+        "wg_interface": "tox-bj-ali",
+        "listen_port": 23333,
         "wg_port": 51820,
-        "key": "YOUR_PRIVATE_KEY_BASE64",
-        "comment": "Mode 3 (WG-Raw Phantom): 幻影模式。不创建新网卡，直接挂载到 eth0。流量被转发给内核 WireGuard (127.0.0.1:51820)。"
+        "key": "YOUR_SHARED_SECRET",
+        "mtu": 1400,
+        "comment": "Mode 3 (WG-Raw Phantom): 幻影模式。XDP 挂载在物理网卡 eth0。不创建额外 Tun，流量完美转发至内核 WireGuard。"
     }
 ]
