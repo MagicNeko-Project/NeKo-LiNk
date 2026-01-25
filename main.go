@@ -1049,18 +1049,9 @@ func (v *VPNInstance) rawReaderLoop(idx int) {
 		nonce := enc[:NonceSize]
 		cipherText := enc[NonceSize:]
 		
-
-		// Debug Log for Raw Mode connection state
-		if debugMode { 
-			log.Printf("[RAW Rx] Pkt from %s (%d bytes). Seq=%d", addr, n, seq)
-		}
-
 		plain, err := v.AEAD.Open(enc[NonceSize:NonceSize], nonce, cipherText, nil)
 		if err == nil && len(plain) > 0 {
 			// Successful Decrypt
-			if debugMode {
-				log.Printf("[RAW Rx] Decrypt OK. Payload=%d", len(plain))
-			}
 			// Submit to Reorderer
 			v.reorderChan <- &DecryptedPacket{
 				Seq:       seq,
@@ -1072,9 +1063,93 @@ func (v *VPNInstance) rawReaderLoop(idx int) {
 			// Allocate NEW buffer for next read
 			bufPtr = bufPool.Get().(*[]byte)
 			buf = *bufPtr
-		} else {
-			if debugMode {
-				log.Printf("[RAW Rx] Decrypt Failed from %s: %v", addr, err)
+		}
+	}
+}
+
+func (v *VPNInstance) XDPReaderLoop(idx int) {
+	// XDP Reader
+	// RAW MODE: veth_app RX = Host TX (Plain IP + ARP)
+	// WG-RAW MODE: eth0 RX = Encrypted Packets
+	
+	for {
+		pkts, err := v.Xsk.Receive()
+		if err != nil || len(pkts) == 0 {
+			v.Xsk.Poll(10)
+			continue
+		}
+		
+		for _, pkt := range pkts {
+			// Parse Ethernet
+			if len(pkt) < 14 { continue }
+			ethType := binary.BigEndian.Uint16(pkt[12:14])
+		
+		// 1. Handle ARP (0x0806)
+		if ethType == 0x0806 {
+			// Basic ARP Reply for ANY request coming to us
+			// We act as the "Link Peer".
+			// ARP Packet: Htype(2) Ptype(2) Hlen(1) Plen(1) Op(2) Sha(6) Spa(4) Tha(6) Tpa(4)
+			if len(pkt) < 14+28 { continue }
+			arpOff := 14
+			op := binary.BigEndian.Uint16(pkt[arpOff+6:arpOff+8])
+			
+			if op == 1 { // ARP Request
+				// log.Printf("[ARP] Got Request, sending Reply")
+				
+				// Construct Reply
+				reply := make([]byte, 42) // 14 Eth + 28 ARP
+				
+				// Ethernet Header
+				// Dst = Src of Request
+				copy(reply[0:6], pkt[6:12]) 
+				// Src = My Dummy MAC (02:00:00:00:00:01)
+				copy(reply[6:12], []byte{0x02,0x00,0x00,0x00,0x00,0x01})
+				reply[12], reply[13] = 0x08, 0x06
+				
+				// ARP Payload
+				copy(reply[14:16], pkt[14:16]) // Htype
+				copy(reply[16:18], pkt[16:18]) // Ptype
+				reply[18], reply[19] = pkt[18], pkt[19] // Hlen, Plen
+				binary.BigEndian.PutUint16(reply[20:22], 2) // Op = Reply
+				
+				// Sender MAC (My Dummy)
+				copy(reply[22:28], []byte{0x02,0x00,0x00,0x00,0x00,0x01})
+				// Sender IP (Copy from Target IP of Request)
+				// We reply to "Who has IP X?" with "I have IP X". 
+				// This effectively claims ALL IPs routed to us.
+				copy(reply[28:32], pkt[38:42]) 
+				
+				// Target MAC (Requester MAC)
+				copy(reply[32:38], pkt[22:28])
+				// Target IP (Requester IP)
+				copy(reply[38:42], pkt[28:32])
+				
+				v.Xsk.Transmit(reply)
+			}
+			continue
+		}
+
+			// 2. Encrypt and Send for Veth Mode
+			// Strip Ethernet
+			ipv4 := pkt[14:]
+			
+			// Encrypt
+			nonce := make([]byte, NonceSize)
+			rand.Read(nonce)
+			cipherText := v.AEAD.Seal(nil, nonce, ipv4, nil)
+			finalPayload := append(nonce, cipherText...)
+			
+			// Send via ConnRaw
+			var remoteAddr *net.IPAddr
+			if v.Cfg.Mode == "client" {
+				remoteAddr = v.ClientRemoteIP
+			} else {
+				p := v.ServerPeerIP.Load()
+				if p != nil { remoteAddr = p }
+			}
+			
+			if remoteAddr != nil && len(v.ConnRaw) > 0 && v.ConnRaw[0] != nil {
+				v.ConnRaw[0].WriteToIP(finalPayload, remoteAddr)
 			}
 		}
 	}
@@ -1083,48 +1158,7 @@ func (v *VPNInstance) rawReaderLoop(idx int) {
 
 
 // --- XDP Reader/Writer (Raw Mode 2) ---
-
-func (v *VPNInstance) XDPReaderLoop(workerID int) {
-	// Raw Mode: Read from AF_XDP (veth_app), Decrypt, Write to IPConn (External)
-	// Actually:
-	// Mode 2 Flow:
-	// Rx: veth_host -> (kernel) -> veth_app -> XDP -> [HERE] -> Encrypt -> IPConn -> Eth0 (Internet)
-	// Tx: Eth0 -> IPConn -> [rawReaderLoop] -> Decrypt -> Reorder -> [writeTUN] -> XDP -> veth_app -> (kernel) -> veth_host
-	
-	// So this function reads from XDP (veth_app), Encrypts, and sends to External Peer.
-	
-	aead := v.aeadPool[workerID]
-	
-	for {
-		// 1. Read from XDP
-		pkts, err := v.Xsk.Receive()
-		if err != nil {
-			// Backoff/Yield
-			// time.Sleep(senderDelay)
-			continue
-		}
-		if len(pkts) == 0 {
-			// Poll? Or v.Xsk.Poll() is called in background?
-			// Our v.Xsk implementation has a background PollLoop feeding a channel?
-			// Wait, in previous step I implemented PollLoop feeding RxChan?
-			// Current Socket.go implemention: Receive() reads directly from Ring.
-			// It does NOT use a channel. So we must Poll if empty.
-			// But Receive() is non-blocking check.
-			v.Xsk.Poll(10) // 10ms block
-			continue
-		}
-		
-		for _, pkt := range pkts {
-			// pkt is plain Ethernet frame from veth_app.
-			// We need to strip Ethernet Header (14 bytes) to get IP packet.
-			if len(pkt) <= 14 { continue }
-			ipPkt := pkt[14:]
-			
-			// Encrypt and Send to Remote
-			v.sendRawOptimized(ipPkt, aead)
-		}
-	}
-}
+// Note: XDPReaderLoop implemented above to resolve scope issues.
 
 func (v *VPNInstance) encryptInto(plain []byte, aead cipher.AEAD, dst []byte) []byte {
 	outSize := NonceSize + len(plain) + Overhead

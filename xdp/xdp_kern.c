@@ -40,10 +40,28 @@ int xdp_prog(struct xdp_md *ctx) {
 
     struct ethhdr *eth = data;
     if (data + sizeof(*eth) > data_end) return XDP_PASS;
-    if (eth->h_proto != __constant_htons(ETH_P_IP)) return XDP_PASS;
-
-    struct iphdr *ip = data + sizeof(*eth);
-    if ((void *)(ip + 1) > data_end) return XDP_PASS;
+    
+    // Check Protocol
+    // Allow IP (0x0800)
+    if (eth->h_proto == __constant_htons(ETH_P_IP)) {
+        struct iphdr *ip = data + sizeof(*eth);
+        if ((void *)(ip + 1) > data_end) return XDP_PASS;
+        
+        // IP Logic continues below
+    } else if (eth->h_proto == __constant_htons(ETH_P_ARP)) {
+        // ARP (0x0806)
+        // Only allow in Mode 0 (Promiscuous)
+        // We will check map below
+    } else {
+        return XDP_PASS;
+    }
+    
+    // Legacy IP Pointer logic (moved inside if, but we need it for Mode 1/2 checks)
+    // Refactor: Extract IP only if IP
+    struct iphdr *ip = NULL;
+    if (eth->h_proto == __constant_htons(ETH_P_IP)) {
+         ip = data + sizeof(*eth);
+    }
 
     // Load Config
     int key_mode = 0;
@@ -55,16 +73,11 @@ int xdp_prog(struct xdp_md *ctx) {
 
     // MODE 1: UDP
     if (*mode == 1) {
+        if (!ip) return XDP_PASS; // ARP not allowed in UDP Mode
         if (ip->protocol != IPPROTO_UDP) return XDP_PASS;
         struct udphdr *udp = (void *)ip + (ip->ihl * 4);
         if ((void *)(udp + 1) > data_end) return XDP_PASS;
         
-        // Check Dest Port
-        // udp->dest is Net Order (Big). *val is Host Order (Little).
-        // Standardize: Go should write *val in Little Endian (Host).
-        // We convert udp->dest to Host? Or compare raw?
-        // bpf_ntohs logic?
-        // Let's assume Go writes Net Order to map for simplicity.
         if (udp->dest == *val) {
              return bpf_redirect_map(&xsks_map, ctx->rx_queue_index, 0);
         }
@@ -72,14 +85,16 @@ int xdp_prog(struct xdp_md *ctx) {
     
     // MODE 2: RAW (IP Protocol)
     else if (*mode == 2) {
+        if (!ip) return XDP_PASS; // ARP not allowed in Raw Filter Mode
         if (ip->protocol == *val) {
             return bpf_redirect_map(&xsks_map, ctx->rx_queue_index, 0);
         }
     }
     
-    // MODE 0: Promiscuous (Redirect ALL IP)
+    // MODE 0: Promiscuous (Redirect ALL IP + ARP)
     // Used for Veth interface where we want to capture everything from Host
     else if (*mode == 0) {
+        // We already validated Eth is IP or ARP above.
         return bpf_redirect_map(&xsks_map, ctx->rx_queue_index, 0);
     }
 
