@@ -132,19 +132,39 @@ func (c *Config) ParseLegacy() (changed bool) {
 		}
 	}
 	
-	if c.ListenPort == 0 && c.UDPPort != 0 {
-		c.ListenPort = c.UDPPort
-		changed = true
+	// 5. 端口逻辑清理 (Strict Raw Mode)
+	if c.Protocol == "wg-raw" {
+		// wg-raw 模式：必须有端口
+		if c.ListenPort == 0 && c.UDPPort != 0 {
+			c.ListenPort = c.UDPPort
+			changed = true
+		}
+		c.UDPPort = 0 // Clear legacy field
+		
+		if c.ListenPort == 0 {
+			c.ListenPort = 23333
+			changed = true
+		}
+		if c.WGPort == 0 {
+			c.WGPort = 51820 // Default internal WG port
+			changed = true
+		}
+	} else {
+		// Raw 模式 (Pure IP)：严禁出现端口
+		if c.ListenPort != 0 {
+			c.ListenPort = 0
+			changed = true
+		}
+		if c.UDPPort != 0 {
+			c.UDPPort = 0
+			changed = true
+		}
+		if c.WGPort != 0 {
+			c.WGPort = 0
+			changed = true
+		}
 	}
-	c.UDPPort = 0 // Clear always
-	if c.ListenPort == 0 {
-		c.ListenPort = 23333
-		changed = true
-	}
-	if c.WGPort == 0 {
-		c.WGPort = 51820 // Default internal WG port
-		changed = true
-	}
+
 	if c.InterfaceName == "" {
 		c.InterfaceName = "neko0"
 		changed = true
