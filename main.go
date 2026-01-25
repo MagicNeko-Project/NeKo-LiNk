@@ -313,9 +313,15 @@ const (
 
 var bufPool = sync.Pool{
 	New: func() interface{} {
-		b := make([]byte, BufSize)
+		// 4096 is enough for any Jumbo Frame or Tunnel Overhead
+		b := make([]byte, 4096)
 		return &b
 	},
+}
+
+type txPacket struct {
+	bufPtr *[]byte
+	n      int
 }
 
 // --- VPN 实例 ---
@@ -1034,18 +1040,16 @@ func (v *VPNInstance) Start() {
 		}
 
 		// 启动写入循环 (AF_XDP -> Encrypt -> IPConn)
-		// 使用并行加解密流水线以利用多核性能
 		log.Printf("[RAW] 启用高性能并行 TX 流水线: 1 Producer -> %d Encryption Workers", v.numWorkers)
 		go v.XDPReaderLoop(0)
 		
 		// 启动重排序写入器 (Consumer) (Decrypt -> Reorder -> AF_XDP)
 		go v.packetOrderedWriter()
 
-		// 启动并行读取器 (Producers) (IPConn -> Decrypt -> Reorder)
-		log.Printf("[RAW] 已恢复并行 RX 读取模式: %d Workers -> 1 Ordered Writer", v.numWorkers)
-		for i := 0; i < v.numWorkers; i++ {
-			go v.rawReaderLoop(0)
-		}
+		// 启动单路读取器 (IPConn -> Decrypt -> Reorder)
+		// 核心：单路读取配合多路写入以确保解密顺序和稳定性
+		log.Printf("[RAW] 启用单路 RX 读取模式 (Sequential Reading Active)")
+		go v.rawReaderLoop(0)
 
 		// 启动心跳机制
 		go v.handshakeLoop()
@@ -1225,25 +1229,26 @@ func (v *VPNInstance) initRaw() {
 func (v *VPNInstance) rawReaderLoop(idx int) {
 	conn := v.ConnRaw[idx]
 	
-	// Pre-allocate buffer pointer from pool
+	// Pre-allocate buffer pointer once
 	bufPtr := bufPool.Get().(*[]byte)
-	buf := *bufPtr
 	
 	for {
-		// Read into current buffer
+		buf := *bufPtr
 		n, addr, err := conn.ReadFromIP(buf)
-		if err != nil { continue }
-		if n < NonceSize+Overhead { continue }
+		if err != nil || n < NonceSize+Overhead { 
+			continue // Keep current buffer and try again
+		}
+
 		if v.Cfg.Mode == "server" { v.ServerPeerIP.Store(addr) }
 		
 		// 0. Check for Handshake (0xFE)
 		if buf[0] == 0xFE {
 			aPort := netip.AddrPortFrom(netip.AddrFrom4([4]byte{addr.IP[0], addr.IP[1], addr.IP[2], addr.IP[3]}), 0)
 			v.onHandshakeReceived(buf[:n], aPort)
-			continue
+			continue // Handshake doesn't need reordering, reuse buffer
 		}
 
-		// 1. Extract Sequence and SessionID from Nonce
+		// 1. Extract Sequence and SessionID
 		seq := binary.BigEndian.Uint64(buf[0:8])
 		sess := binary.BigEndian.Uint32(buf[8:12])
 		
@@ -1254,36 +1259,33 @@ func (v *VPNInstance) rawReaderLoop(idx int) {
 		
 		plain, err := v.AEAD.Open(enc[NonceSize:NonceSize], nonce, cipherText, nil)
 		if err == nil && len(plain) > 0 {
-			// Successful Decrypt
 			// Submit to Reorderer
 			v.reorderChan <- &DecryptedPacket{
 				Seq:       seq,
 				SessionID: sess,
-				Data:      plain,  // Slice of buf
-				BufReq:    bufPtr, // Ownership passed
+				Data:      plain,  // Slice of currently active buffer
+				BufReq:    bufPtr, // Ownership passed to reorderer
 			}
 			
-			// Allocate NEW buffer for next read
+			// Ownership transferred, MUST get a new buffer for next read
 			bufPtr = bufPool.Get().(*[]byte)
-			buf = *bufPtr
 		}
+		// If decrypt failed, we just reuse the current buffer for next packet.
 	}
 }
 
 func (v *VPNInstance) XDPReaderLoop(idx int) {
 	// XDP Reader (Producer) + Parallel Encryption Workers
-	// Use a slightly larger channel to buffer spikes
-	txChan := make(chan *[]byte, 8192)
+	txChan := make(chan txPacket, 8192)
 
 	for i := 0; i < v.numWorkers; i++ {
 		go func(wIdx int) {
 			aead := v.aeadPool[wIdx%len(v.aeadPool)]
 			nonce := make([]byte, NonceSize)
-			
 			clientRemote := v.ClientRemoteIP
 
-			for bufPtr := range txChan {
-				pkt := *bufPtr
+			for txPkt := range txChan {
+				pkt := (*txPkt.bufPtr)[:txPkt.n]
 				
 				var target *net.IPAddr
 				if v.Cfg.Mode == "client" {
@@ -1298,8 +1300,7 @@ func (v *VPNInstance) XDPReaderLoop(idx int) {
 					binary.BigEndian.PutUint64(nonce[0:8], vVal)
 					binary.BigEndian.PutUint32(nonce[8:12], v.SessionID)
 
-					// Encrypt (Seal into a new slice or pre-allocated?)
-					// For now, simple Seal for correctness. Tag is 16 bytes.
+					// Encrypt (Use Seal with correct length)
 					cipherText := aead.Seal(nil, nonce, pkt, nil)
 					finalPayload := append(nonce, cipherText...)
 
@@ -1307,7 +1308,7 @@ func (v *VPNInstance) XDPReaderLoop(idx int) {
 				}
 				
 				// Return buffer to pool
-				bufPool.Put(bufPtr)
+				bufPool.Put(txPkt.bufPtr)
 			}
 		}(i)
 	}
@@ -1324,11 +1325,18 @@ func (v *VPNInstance) XDPReaderLoop(idx int) {
 			
 			// Copy buffer from XDP Umem using Pool
 			bufPtr := bufPool.Get().(*[]byte)
-			decPkt := (*bufPtr)[:len(pkt)]
-			copy(decPkt, pkt)
+			// Ensure the buffer is large enough, though bufPool.New already makes it 2048
+			if cap(*bufPtr) < len(pkt) {
+				// This should ideally not happen if BufSize is set correctly
+				// but as a safeguard, if it's too small, get a new one.
+				bufPool.Put(bufPtr) // Return the too-small buffer
+				newBuf := make([]byte, len(pkt))
+				bufPtr = &newBuf
+			}
+			copy(*bufPtr, pkt)
 			
 			select {
-			case txChan <- bufPtr:
+			case txChan <- txPacket{bufPtr: bufPtr, n: len(pkt)}:
 			default:
 				// Buffer full: must drop to prevent deadlock
 				bufPool.Put(bufPtr)
