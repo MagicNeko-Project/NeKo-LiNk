@@ -320,6 +320,7 @@ type VPNInstance struct {
 	// Phantom Mode State
 	GatewayMAC   [6]byte
 	PhyMAC       [6]byte
+	WGInterface  string // Kernel WireGuard Interface Name
 	remoteAddr   netip.AddrPort
 	remoteAddrMx sync.RWMutex
 }
@@ -418,7 +419,9 @@ func (v *VPNInstance) startWireGuardRaw() {
 	}
 	
 	// 2. Setup Kernel WireGuard Interface
-	wgIf := "neko_wg0"
+	// Use a unique name based on WGPort to avoid conflicts
+	wgIf := fmt.Sprintf("wg_%d", v.Cfg.WGPort)
+	v.WGInterface = wgIf
 	v.setupKernelWireGuard(wgIf)
 	
 	// 3. Start Local UDP Proxy Listener
@@ -588,7 +591,7 @@ func (v *VPNInstance) onHandshakeReceived(data []byte, remote netip.AddrPort) bo
 		// Add/Update Peer. 
 		// Note: PersistentKeepalive is handled by NekoLink heartbeat? Or allow WG to do it?
 		// Since we have Side-Channel, we don't strictly need WG Keepalive, but it helps.
-		runCmdQuiet("wg", "set", "neko_wg0", "peer", pubKey64, "allowed-ips", "0.0.0.0/0,::/0", "endpoint", fmt.Sprintf("127.0.0.1:%d", v.Cfg.WGPort))
+		runCmdQuiet("wg", "set", v.WGInterface, "peer", pubKey64, "allowed-ips", "0.0.0.0/0,::/0", "endpoint", fmt.Sprintf("127.0.0.1:%d", v.Cfg.WGPort))
 	}()
 	
 	return true
