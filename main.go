@@ -692,7 +692,7 @@ func (v *VPNInstance) proxyXDPToUDP(conn *net.UDPConn) {
 				copy(v.GatewayMAC[:], pkt[6:12])
 				v.remoteAddrMx.Unlock()
 				
-				v.handleRawPacket(payload, conn, kernelAddr)
+				v.handleRawPacket(payload, conn, kernelAddr, newRemote)
 			}
 		}
 	}
@@ -715,15 +715,11 @@ func (v *VPNInstance) proxyUDPToXDP(conn *net.UDPConn) {
 	}
 }
 
-func (v *VPNInstance) handleRawPacket(payload []byte, conn *net.UDPConn, target *net.UDPAddr) {
+func (v *VPNInstance) handleRawPacket(payload []byte, conn *net.UDPConn, target *net.UDPAddr, remotePeer netip.AddrPort) {
 	if len(payload) == 0 { return }
 
 	if payload[0] == 0xFE {
-		ip := target.IP
-		port := target.Port
-		addrPort := netip.AddrPortFrom(netip.AddrFrom4([4]byte{ip[0],ip[1],ip[2],ip[3]}), uint16(port))
-		
-		v.onHandshakeReceived(payload, addrPort)
+		v.onHandshakeReceived(payload, remotePeer)
 		return
 	}
 
