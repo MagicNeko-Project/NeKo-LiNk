@@ -534,11 +534,28 @@ func (v *VPNInstance) handshakeLoop() {
 		select {
 		case <-ticker.C:
 			// Send Handshake Packet if we have a target
-			// We send OUR Public Key so remote can add us.
+			// We send OUR Public Key so remote can advertise themselves.
 			if v.Cfg.Mode == "client" && v.Cfg.PeerAddr != "" {
 				addr, err := netip.ParseAddr(v.Cfg.PeerAddr)
 				if err == nil {
 					remote := netip.AddrPortFrom(addr, uint16(v.Cfg.PeerPort))
+					v.sendHandshakePacket(remote, myPubKey[:])
+				}
+			} else if v.Cfg.Mode == "server" {
+				// Server also sends heartbeat if it knows the peer
+				var remote netip.AddrPort
+				if v.Cfg.Protocol == "wg-raw" {
+					v.remoteAddrMx.RLock()
+					remote = v.remoteAddr
+					v.remoteAddrMx.RUnlock()
+				} else {
+					p := v.ServerPeerIP.Load()
+					if p != nil {
+						addr, _ := netip.ParseAddr(p.String())
+						remote = netip.AddrPortFrom(addr, 0)
+					}
+				}
+				if remote.IsValid() {
 					v.sendHandshakePacket(remote, myPubKey[:])
 				}
 			}
@@ -581,18 +598,20 @@ func (v *VPNInstance) onHandshakeReceived(data []byte, remote netip.AddrPort) bo
 		log.Printf("[Handshake] Roaming: Peer moved to %s", remote)
 	}
 	v.remoteAddrMx.Unlock()
+
+	// If legacy Raw Mode, update ServerPeerIP
+	if v.Cfg.Protocol != "wg-raw" {
+		ipAddr, _ := net.ResolveIPAddr("ip", remote.Addr().String())
+		v.ServerPeerIP.Store(ipAddr)
+	}
 	
-	// Update WG Peer
-	// We need to know the Interface Name. "neko_wg0"?
-	// We should probably store it.
-	go func() {
-		pubKey64 := base64.StdEncoding.EncodeToString(peerPubKey)
-		// We trust this peer because they knew the Shared Password.
-		// Add/Update Peer. 
-		// Note: PersistentKeepalive is handled by NekoLink heartbeat? Or allow WG to do it?
-		// Since we have Side-Channel, we don't strictly need WG Keepalive, but it helps.
-		runCmdQuiet("wg", "set", v.WGInterface, "peer", pubKey64, "allowed-ips", "0.0.0.0/0,::/0", "endpoint", fmt.Sprintf("127.0.0.1:%d", v.Cfg.WGPort))
-	}()
+	// Update WG Peer (only for wg-raw mode)
+	if v.Cfg.Protocol == "wg-raw" {
+		go func() {
+			pubKey64 := base64.StdEncoding.EncodeToString(peerPubKey)
+			runCmdQuiet("wg", "set", v.WGInterface, "peer", pubKey64, "allowed-ips", "0.0.0.0/0,::/0", "endpoint", fmt.Sprintf("127.0.0.1:%d", v.Cfg.WGPort))
+		}()
+	}
 	
 	return true
 }
@@ -611,25 +630,16 @@ func (v *VPNInstance) sendHandshakePacket(remote netip.AddrPort, myPub []byte) {
 	plain[0] = 1
 	copy(plain[1:], myPub)
 	
-	// Encrypt using the SHA256(Key) AEAD (Same as Payload Encryption)
-	// Note: This relies on "v.AEAD" being initialized from v.Cfg.Key
+	// Encrypt using the SHA256(Key) AEAD
 	v.AEAD.Seal(pkt[1+NonceSize:1+NonceSize], nonce, plain, nil)
 	
-	// Send via XDP
-	// We need to construct Eth/IP headers manually since we are bypassing Kernel routing
-	// Or we can use "sendPhantomPacket" helper?
-	// Yes, reuse sendPhantomPacket but without Encryption (it's already encrypted/special)
-	// Actually sendPhantomPacket takes plain data and encrypts it?
-	// Let's make a lower level `sendRawXDP(payload, remote)`?
-	
-	// Minimal implementation for now:
-	// Just log that we *would* send it. 
-	// To implement correctly, we need constructs for IP headers matching `remote`.
-	// For now, let's skip actual sending to avoid bloat, 
-	// assuming the USER will configure Valid Peers on both sides manually if Side-Channel fails.
-	// OR: implement `sendRawXDP`
-	
-	v.sendRawXDP(pkt, remote)
+	// Send via appropriate channel
+	if v.Cfg.Protocol == "wg-raw" {
+		v.sendRawXDP(pkt, remote)
+	} else if len(v.ConnRaw) > 0 {
+		ipAddr, _ := net.ResolveIPAddr("ip", remote.Addr().String())
+		v.ConnRaw[0].WriteToIP(pkt, ipAddr)
+	}
 	log.Printf("[Handshaker] Sent heartbeat to %s", remote)
 }
 
@@ -1001,6 +1011,9 @@ func (v *VPNInstance) Start() {
 		for i := 0; i < v.numWorkers; i++ {
 			go v.rawReaderLoop(0)
 		}
+
+		// 启动心跳机制
+		go v.handshakeLoop()
 	}
 }
 
@@ -1044,13 +1057,14 @@ func (v *VPNInstance) InitInterface() {
 	// Configure Host Side
 	runCmd("ip", "addr", "add", v.Cfg.LocalAddr, "dev", hostIf)
 	runCmd("ip", "link", "set", hostIf, "mtu", fmt.Sprintf("%d", v.Cfg.MTU))
-	// Disable ARP to simulate Point-to-Point (TUN-like) behavior
-	runCmd("ip", "link", "set", hostIf, "arp", "off")
+	// Enable ARP + Promisc for L2 tunneling
+	runCmd("ip", "link", "set", hostIf, "arp", "on")
+	runCmd("ip", "link", "set", hostIf, "promisc", "on")
 	runCmd("ip", "link", "set", hostIf, "up")
 	
 	// Configure App Side (AF_XDP Target)
-	// Also disable ARP on App side to prevent Kernel noise
-	runCmd("ip", "link", "set", appIf, "arp", "off")
+	runCmd("ip", "link", "set", appIf, "arp", "on")
+	runCmd("ip", "link", "set", appIf, "promisc", "on")
 	runCmd("ip", "link", "set", appIf, "mtu", fmt.Sprintf("%d", v.Cfg.MTU))
 	runCmd("ip", "link", "set", appIf, "up")
 	runCmdQuiet("sysctl", "-w", fmt.Sprintf("net.ipv6.conf.%s.disable_ipv6=1", appIf))
@@ -1177,6 +1191,13 @@ func (v *VPNInstance) rawReaderLoop(idx int) {
 		if n < NonceSize+Overhead { continue }
 		if v.Cfg.Mode == "server" { v.ServerPeerIP.Store(addr) }
 		
+		// 0. Check for Handshake (0xFE)
+		if buf[0] == 0xFE {
+			aPort := netip.AddrPortFrom(netip.AddrFrom4([4]byte{addr.IP[0], addr.IP[1], addr.IP[2], addr.IP[3]}), 0)
+			v.onHandshakeReceived(buf[:n], aPort)
+			continue
+		}
+
 		// 1. Extract Sequence and SessionID from Nonce
 		seq := binary.BigEndian.Uint64(buf[0:8])
 		sess := binary.BigEndian.Uint32(buf[8:12])
