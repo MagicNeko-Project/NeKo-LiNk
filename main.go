@@ -190,9 +190,9 @@ func (c *Config) ParseLegacy() (changed bool) {
 	// 4. MTU 优化 (避免分片)
 	if c.MTU == 0 || c.MTU > 1420 {
 		oldMTU := c.MTU
-		c.MTU = 1400
+		c.MTU = 1420
 		if oldMTU != 0 {
-			log.Printf("[%s] 优化 MTU: %d -> 1400", c.InterfaceName, oldMTU)
+			log.Printf("[%s] 优化 MTU: %d -> 1420", c.InterfaceName, oldMTU)
 			changed = true
 		}
 		if oldMTU == 0 {
@@ -391,7 +391,7 @@ func NewVPNInstance(cfg Config) *VPNInstance {
 	v.AEAD = v.aeadPool[0]
 	v.SessionID = uint32(os.Getpid()) ^ uint32(keyHash[0])<<24
 	
-	v.reorderChan = make(chan *DecryptedPacket, 1024)
+	v.reorderChan = make(chan *DecryptedPacket, 4096)
 
 	// Initialize Phantom Remote if Client
 	if cfg.Mode == "client" && cfg.PeerAddr != "" {
@@ -1032,15 +1032,18 @@ func (v *VPNInstance) Start() {
 		}
 
 		// 启动写入循环 (AF_XDP -> Encrypt -> IPConn)
-		// 核心：Raw 模式读取必须单线程以避免重复发包 (DUP!)
+		// 使用并行加解密流水线以利用多核性能
+		log.Printf("[RAW] 启用高性能并行 TX 流水线: 1 Producer -> %d Encryption Workers", v.numWorkers)
 		go v.XDPReaderLoop(0)
 		
 		// 启动重排序写入器 (Consumer) (Decrypt -> Reorder -> AF_XDP)
 		go v.packetOrderedWriter()
 
 		// 启动并行读取器 (Producers) (IPConn -> Decrypt -> Reorder)
-		log.Printf("[RAW] 已启用顺序读取模式 (Serial Reading Active): 1 Worker -> 1 Ordered Writer")
-		go v.rawReaderLoop(0)
+		log.Printf("[RAW] 已恢复并行 RX 读取模式: %d Workers -> 1 Ordered Writer", v.numWorkers)
+		for i := 0; i < v.numWorkers; i++ {
+			go v.rawReaderLoop(i)
+		}
 
 		// 启动心跳机制
 		go v.handshakeLoop()
@@ -1266,9 +1269,41 @@ func (v *VPNInstance) rawReaderLoop(idx int) {
 }
 
 func (v *VPNInstance) XDPReaderLoop(idx int) {
-	// XDP Reader
-	// RAW MODE: veth_app RX = Host TX (Plain IP + ARP)
-	// WG-RAW MODE: eth0 RX = Encrypted Packets
+	// XDP Reader (Producer) + Parallel Encryption Workers
+	txChan := make(chan []byte, 8192)
+
+	for i := 0; i < v.numWorkers; i++ {
+		go func(wIdx int) {
+			aead := v.aeadPool[wIdx%len(v.aeadPool)]
+			nonce := make([]byte, NonceSize)
+			
+			// Get client remote once
+			clientRemote := v.ClientRemoteIP
+
+			for pkt := range txChan {
+				var target *net.IPAddr
+				if v.Cfg.Mode == "client" {
+					target = clientRemote
+				} else {
+					target = v.ServerPeerIP.Load()
+				}
+				
+				if target == nil { continue }
+
+				// Structure Nonce
+				vVal := atomic.AddUint64(&v.nonceCounter, 1)
+				binary.BigEndian.PutUint64(nonce[0:8], vVal)
+				binary.BigEndian.PutUint32(nonce[8:12], v.SessionID)
+
+				cipherText := aead.Seal(nil, nonce, pkt, nil)
+				finalPayload := append(nonce, cipherText...)
+
+				if len(v.ConnRaw) > 0 {
+					v.ConnRaw[0].WriteToIP(finalPayload, target)
+				}
+			}
+		}(i)
+	}
 	
 	for {
 		pkts, err := v.Xsk.Receive()
@@ -1278,37 +1313,15 @@ func (v *VPNInstance) XDPReaderLoop(idx int) {
 		}
 		
 		for _, pkt := range pkts {
-			// Parse Ethernet
 			if len(pkt) < 14 { continue }
-		
-			// 2. Encrypt and Send (L2 Tunnel Mode - Ethernet over IP)
-			// We tunnel the FULL Ethernet Frame (including Header)
-			// No more ARP Responder needed - ARP is tunneled too!
-			payload := pkt
+			// Copy buffer from XDP Umem for asynchronous processing
+			cp := make([]byte, len(pkt))
+			copy(cp, pkt)
 			
-			// Encrypt
-			nonce := make([]byte, NonceSize)
-
-			// Structure Nonce: [Seq (8)] + [SessionID (4)] + [Padding (12)]
-			vVal := atomic.AddUint64(&v.nonceCounter, 1)
-			binary.BigEndian.PutUint64(nonce[0:8], vVal)
-			binary.BigEndian.PutUint32(nonce[8:12], v.SessionID)
-			// Remaining bytes are 0
-
-			cipherText := v.AEAD.Seal(nil, nonce, payload, nil)
-			finalPayload := append(nonce, cipherText...)
-			
-			// Send via ConnRaw
-			var remoteAddr *net.IPAddr
-			if v.Cfg.Mode == "client" {
-				remoteAddr = v.ClientRemoteIP
-			} else {
-				p := v.ServerPeerIP.Load()
-				if p != nil { remoteAddr = p }
-			}
-			
-			if remoteAddr != nil && len(v.ConnRaw) > 0 && v.ConnRaw[0] != nil {
-				v.ConnRaw[0].WriteToIP(finalPayload, remoteAddr)
+			select {
+			case txChan <- cp:
+			default:
+				// Drop if channel full to avoid deadlocking XDP
 			}
 		}
 	}
@@ -1416,7 +1429,7 @@ func (v *VPNInstance) packetOrderedWriter() {
 					if s < minSeq { minSeq = s }
 				}
 				if minSeq != 0xFFFFFFFFFFFFFFFF && minSeq > nextSeq {
-					// log.Printf("[Reorderer] Timeout waiting for %d, skipping to %d", nextSeq, minSeq)
+					// 30ms timeout is safe for local/LAN jitter
 					nextSeq = minSeq
 					
 					// Now flush from current minSeq
@@ -1430,7 +1443,7 @@ func (v *VPNInstance) packetOrderedWriter() {
 					}
 				}
 			}
-			timer.Reset(20 * time.Millisecond)
+			timer.Reset(30 * time.Millisecond)
 		}
 
 		// Prevent Bloat (Fallback)
