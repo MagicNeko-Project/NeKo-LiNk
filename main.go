@@ -828,7 +828,7 @@ func (v *VPNInstance) proxyXDPToUDP(conn *net.UDPConn) {
 	for {
 		pkts, err := v.Xsk.Receive()
 		if err != nil || len(pkts) == 0 {
-			v.Xsk.Poll(10)
+			v.Xsk.Poll(-1)
 			continue
 		}
 		
@@ -1268,7 +1268,7 @@ func (v *VPNInstance) XDPReaderLoop(idx int) {
 	for {
 		pkts, err := v.Xsk.Receive()
 		if err != nil || len(pkts) == 0 {
-			v.Xsk.Poll(10)
+			v.Xsk.Poll(-1)
 			continue
 		}
 		
