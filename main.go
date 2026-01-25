@@ -779,9 +779,13 @@ func (v *VPNInstance) InitInterface() {
 	// Configure Host Side
 	runCmd("ip", "addr", "add", v.Cfg.LocalAddr, "dev", hostIf)
 	runCmd("ip", "link", "set", hostIf, "mtu", fmt.Sprintf("%d", v.Cfg.MTU))
+	// Disable ARP to simulate Point-to-Point (TUN-like) behavior
+	runCmd("ip", "link", "set", hostIf, "arp", "off")
 	runCmd("ip", "link", "set", hostIf, "up")
 	
 	// Configure App Side (AF_XDP Target)
+	// Also disable ARP on App side to prevent Kernel noise
+	runCmd("ip", "link", "set", appIf, "arp", "off")
 	runCmd("ip", "link", "set", appIf, "mtu", fmt.Sprintf("%d", v.Cfg.MTU))
 	runCmd("ip", "link", "set", appIf, "up")
 	runCmdQuiet("sysctl", "-w", fmt.Sprintf("net.ipv6.conf.%s.disable_ipv6=1", appIf))
