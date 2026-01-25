@@ -45,7 +45,7 @@ func logDebug(format string, v ...interface{}) {
 // --- 配置结构 (保持兼容) ---
 
 type Config struct {
-	Version       string `json:"version,omitempty"` // v1.5
+	Version       string `json:"version,omitempty"` // v2
 	InterfaceName string `json:"interface_name"`
 	Mode          string `json:"mode"`
 	LocalAddr     string `json:"local_addr"`
@@ -287,14 +287,14 @@ func (c *Config) ParseLegacy() (changed bool) {
 	}
 
 	// 6. Version Upgrade
-	c.Version = "v1.5"
+	c.Version = "v2"
 	return
 }
 
 // MapConfigByProtocol returns a filtered map based on the protocol to hide irrelevant fields
 func (c *Config) MapConfigByProtocol() map[string]interface{} {
 	m := make(map[string]interface{})
-	m["version"] = "v1.5"
+	m["version"] = "v2"
 	m["interface_name"] = c.InterfaceName
 	m["mode"] = c.Mode
 	m["protocol"] = c.Protocol
@@ -1579,14 +1579,34 @@ func main() {
 	flag.Parse()
 	debugMode = *debug
 
-	// Allow BPF Maps Memlock 
+	// Intelligent Config Probing (V2 Priority)
+	targetPath := *cfgPath
+
+	// Allow BPF Maps Memlock (Essential for XDP)
 	if err := rlimit.RemoveMemlock(); err != nil {
 		log.Printf("[Init] Warning: Failed to remove memlock limit: %v", err)
 	}
+	
+	// If user didn't explicitly override via -c, or if we want to honor v2 existence:
+	// We probe: 1. /etc/neko-link/config.v2.json  2. ./config.v2.json
+	v2ProbePaths := []string{"/etc/neko-link/config.v2.json", "config.v2.json"}
+	
+	v2Found := ""
+	for _, p := range v2ProbePaths {
+		if _, err := os.Stat(p); err == nil {
+			v2Found = p
+			break
+		}
+	}
 
-	data, err := os.ReadFile(*cfgPath)
+	if v2Found != "" {
+		log.Printf("[Init] 检测到 V2 配置文件 (%s)，已自动优先加载。", v2Found)
+		targetPath = v2Found
+	}
+
+	data, err := os.ReadFile(targetPath)
 	if err != nil {
-		log.Fatalf("无法读取配置文件: %v", err)
+		log.Fatalf("无法读取配置文件 (%s): %v", targetPath, err)
 	}
 
 	var configs []Config
@@ -1609,7 +1629,7 @@ func main() {
 	}
 
 	if *migrate {
-		log.Printf(">>> [Migrate] 正在执行 V1.5 配置升级...")
+		log.Printf(">>> [Migrate] 正在执行 V2 配置升级...")
 		
 		var output interface{}
 		if isArray {
@@ -1623,12 +1643,18 @@ func main() {
 		}
 
 		newData, _ := json.MarshalIndent(output, "", "  ")
-		newPath := *cfgPath + ".v15"
-		if err := os.WriteFile(newPath, newData, 0644); err != nil {
+		
+		// Priority: try to save to /etc/neko-link/config.v2.json
+		v2Path := "/etc/neko-link/config.v2.json"
+		if err := os.MkdirAll("/etc/neko-link", 0755); err != nil {
+			v2Path = "config.v2.json" // fallback to current dir
+		}
+
+		if err := os.WriteFile(v2Path, newData, 0644); err != nil {
 			log.Printf("保存失败: %v", err)
 		} else {
-			log.Printf(">>> [Migrate] 升级完成！新配置文件已生成至: %s", newPath)
-			log.Printf(">>> 提示: V1.5 格式仅包含协议所需的必要字段喵~")
+			log.Printf(">>> [Migrate] 升级完成！新配置文件已生成至: %s", v2Path)
+			log.Printf(">>> 提示: 程序下次启动将优先加载此 V2 配置文件喵~")
 		}
 		os.Exit(0)
 	}
