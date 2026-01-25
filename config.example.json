@@ -1,0 +1,37 @@
+[
+  {
+    "_comment": "=== NekoLink Configuration Example ===",
+    "_instructions": "Copy this file to config.json and edit it. This array can contain multiple VPN instances.",
+
+    "_field_guide": {
+      "mode": "Required. 'server' or 'client'",
+      "protocol": "Required. 'wg-raw' (Phantom Mode, Recommended) or 'raw' (Legacy Veth)",
+      "phy_interface": "Required for wg-raw. The physical interface name (e.g. eth0) to attach XDP to.",
+      "vpn_interface": "Required. The name of the VPN interface to create (e.g. wg0 or neko0).",
+      "vpn_addr": "Required. The IP/CIDR to assign to the VPN interface (e.g. 10.0.0.1/24).",
+      "server_bind_port": "SERVER ONLY. The physical port to listen on (Raw) or intercept (WG-Raw).",
+      "client_remote_ip": "CLIENT ONLY. The physical IP of the server.",
+      "client_remote_port": "CLIENT ONLY. The physical port of the server.",
+      "password": "Required. Shared secret for encryption or handshake.",
+      "private_key": "WG-RAW ONLY. WireGuard Private Key (Generate with: wg genkey).",
+      "wg_internal_port": "WG-RAW ONLY. Internal port for Kernel WireGuard (Default 51820).",
+      "tcp_mode": "Optional. If true, disguises traffic as TCP.",
+      "custom_protocol": "Optional. Custom IP Protocol number (Default 233). Set 17 for UDP."
+    },
+
+    "mode": "server",
+    "protocol": "wg-raw",
+    "phy_interface": "eth0",
+    "vpn_interface": "wg0",
+    "vpn_addr": "10.0.0.1/24",
+
+    "server_bind_port": 23333,
+
+    "password": "CHANGE_ME_PLEASE",
+    "private_key": "INSERT_PRIVATE_KEY_HERE",
+
+    "wg_internal_port": 51820,
+    "mtu": 1400,
+    "debug": true
+  }
+]

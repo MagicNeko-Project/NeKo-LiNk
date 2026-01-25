@@ -14,7 +14,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"runtime"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -33,7 +32,7 @@ import (
 	"vpn/xdp"
 )
 
-// --- 全局分发 ---
+// --- Global ---
 var debugMode bool
 
 func logDebug(format string, v ...interface{}) {
@@ -42,287 +41,41 @@ func logDebug(format string, v ...interface{}) {
 	}
 }
 
-// --- 配置结构 (保持兼容) ---
+// --- Config Structure ---
 
 type Config struct {
-	Version       string `json:"version,omitempty"` // v2.1
-	InterfaceName string `json:"interface_name"`
-	Mode          string `json:"mode"`
-	LocalAddr     string `json:"local_addr"`
-	Key           string `json:"key"` // Shared Secret (Password)
-	PrivateKey    string `json:"private_key,omitempty"` // WireGuard Private Key
-	Protocol      string `json:"protocol"`
-	MTU           int    `json:"mtu"`
+	// --- Common ---
+	Mode     string `json:"mode"`     // "server" | "client"
+	Protocol string `json:"protocol"` // "raw" | "wg-raw"
+	Debug    bool   `json:"debug"`
+	MTU      int    `json:"mtu"`
 
-	// --- Optimized Naming ---
-	ListenAddr string `json:"listen_addr,omitempty"`
-	ListenPort int    `json:"listen_port,omitempty"`
-	PeerAddr   string `json:"peer_addr,omitempty"`
-	PeerPort   int    `json:"peer_port,omitempty"`
+	// --- Interfaces ---
+	// Physical Interface (Required for wg-raw, optional for raw binding)
+	PhyInterface string `json:"phy_interface"`
+	// VPN Interface (The interface created by NekoLink: neko0 or wg0)
+	VPNInterface string `json:"vpn_interface"`
+	// VPN IP Address (CIDR, e.g. 10.0.0.1/24)
+	VPNAddr      string `json:"vpn_addr"`
 
-	// --- Internal WG Control ---
-	WGPort int `json:"wg_port,omitempty"`
+	// --- Server Binding ---
+	// Port to listen on (Raw) or intercept (WG-Raw) on the Physical Interface
+	ServerBindPort int `json:"server_bind_port"`
 
-	// --- Transport Options ---
-	IPProtocolNum int  `json:"ip_protocol_num,omitempty"`
-	UseNATT       bool `json:"use_nat_t,omitempty"`
-	UseTCP        bool `json:"use_tcp,omitempty"`
-	UDPPort       int  `json:"udp_port,omitempty"`
-	Debug         bool `json:"debug,omitempty"`
-	Comment       string `json:"comment,omitempty"`
+	// --- Client Remote ---
+	ClientRemoteIP   string `json:"client_remote_ip"`
+	ClientRemotePort int    `json:"client_remote_port"`
 
-	// --- Custom Interface Names ---
-	AppInterface  string `json:"app_interface,omitempty"` // For raw mode veth peer
-	WGInterface   string `json:"wg_interface,omitempty"`  // For wg-raw mode kernel interface
-	ParentInterface string `json:"parent_interface,omitempty"` // Physical interface for XDP (e.g. eth0)
+	// --- Auth ---
+	Password   string `json:"password"`    // Shared Secret
+	PrivateKey string `json:"private_key"` // WireGuard Private Key (wg-raw)
 
-	// --- Legacy Fields (Hidden but mapped) ---
-	LegacyServerAddr string `json:"server_addr,omitempty"`
-	LegacyBasePort   int    `json:"base_port,omitempty"`
-	LegacyServerIP   string `json:"server_ip,omitempty"`
-	LegacyServerPort int    `json:"server_port,omitempty"`
-}
-
-func (c *Config) PerformMigration() {
-	// Mode 3 (Phantom) Migration
-	if c.Protocol == "wg-raw" {
-		// Detect if InterfaceName is likely a VPN name (e.g. starts with to-, neko-, wg-) 
-		// AND we are in Phantom mode (which requires Physical Interface).
-		// Heuristic: If detecting a likely TUN name, swap it with Default Interface (e.g. eth0).
-		
-		needsSwap := false
-		if strings.HasPrefix(c.InterfaceName, "to-") || strings.HasPrefix(c.InterfaceName, "neko") {
-			needsSwap = true
-		}
-		
-		if needsSwap {
-			defIf, err := getDefaultInterface()
-			if err == nil && defIf != "" {
-				// Backup old name
-				if c.Comment == "" {
-					c.Comment = fmt.Sprintf("Migrated from: %s", c.InterfaceName)
-				} else {
-					c.Comment = fmt.Sprintf("%s (Migrated from: %s)", c.Comment, c.InterfaceName)
-				}
-				
-				log.Printf("[Migrate] '%s': Detected Logical Name '%s' for Phantom Mode. Using Physical '%s' as Parent.", 
-					c.Comment, c.InterfaceName, defIf)
-				c.ParentInterface = defIf
-			}
-		}
-		
-		if c.ParentInterface == "" {
-			// Fallback: If not set, use InterfaceName as Parent (Legacy behavior)
-			c.ParentInterface = c.InterfaceName
-		}
-		
-		// Ensure Config Port exists
-		if c.WGPort == 0 {
-			c.WGPort = 51820
-		}
-	}
+	// --- Tuning / Transport ---
+	CustomProtocol int  `json:"custom_protocol"` // IP Protocol Number (e.g. 253). If 17, implies UDP.
+	TCPMode        bool `json:"tcp_mode"`        // Use Fake TCP Headers
 	
-	// Key Generation (Auto-Provisioning)
-	if c.PrivateKey == "" {
-		out, err := exec.Command("wg", "genkey").Output()
-		if err == nil {
-			c.PrivateKey = strings.TrimSpace(string(out))
-			log.Printf("[Config] Assigned new WireGuard Private Key.")
-		} else {
-			log.Printf("Warning: 'wg' tool not found. Cannot auto-generate keys: %v", err)
-		}
-	}
-}
-
-func getDefaultInterface() (string, error) {
-	// Execute: ip route show default | awk '{print $5}'
-	out, err := exec.Command("sh", "-c", "ip route show default | awk '/default/ {print $5}'").Output()
-	if err != nil { return "", err }
-	return strings.TrimSpace(string(out)), nil
-}
-
-func (c *Config) ParseLegacy() (changed bool) {
-	// 1. 命名字段搬迁 (旧 -> 新)
-	if c.ListenAddr == "" && c.LegacyServerAddr != "" {
-		c.ListenAddr = c.LegacyServerAddr
-		changed = true
-	}
-	c.LegacyServerAddr = "" // Clear always to clean up JSON
-
-	if c.ListenPort == 0 && c.LegacyBasePort != 0 {
-		c.ListenPort = c.LegacyBasePort
-		changed = true
-	}
-	c.LegacyBasePort = 0 // Clear always
-
-	if c.PeerAddr == "" && c.LegacyServerIP != "" {
-		c.PeerAddr = c.LegacyServerIP
-		changed = true
-	}
-	c.LegacyServerIP = "" // Clear always
-
-	if c.PeerPort == 0 && c.LegacyServerPort != 0 {
-		c.PeerPort = c.LegacyServerPort
-		changed = true
-	}
-	c.LegacyServerPort = 0 // Clear always
-
-	// 2. 基本字段兼容 (兼容之前的老代码可能还在直接用 RemoteIP 等逻辑)
-	// (如果有其它代码引用了旧字段，可以在这里同步，但建议全部改为引用新字段)
-	
-	// 2. 协议迁移 (UDP/TCP/QUIC -> wg-raw)
-	oldProto := strings.ToLower(c.Protocol)
-	if oldProto == "udp" || oldProto == "tcp" || oldProto == "quic" || oldProto == "" {
-		if oldProto == "tcp" {
-			c.UseTCP = true
-			c.IPProtocolNum = 6
-		}
-		c.Protocol = "wg-raw"
-		log.Printf("[%s] 自动将旧版协议 %s 升级为 wg-raw (Fake TCP: %v)", c.InterfaceName, oldProto, c.UseTCP)
-		changed = true
-	}
-	
-	// 3. 默认值设置
-	if c.IPProtocolNum == 0 {
-		c.IPProtocolNum = 233
-		changed = true
-	}
-	
-	// 4. MTU 优化 (避免分片)
-	// 1400 is allowed if the physical link supports 1482 byte packets (MTU 1500)
-	if c.MTU == 0 || c.MTU > 1400 {
-		oldMTU := c.MTU
-		c.MTU = 1400
-		if oldMTU != 0 {
-			log.Printf("[%s] 优化 MTU: %d -> 1400", c.InterfaceName, oldMTU)
-			changed = true
-		}
-		if oldMTU == 0 {
-			changed = true
-		}
-	}
-	
-	// 5. 端口逻辑清理 (Strict Raw Mode)
-	if c.Protocol == "wg-raw" {
-		// wg-raw 模式：必须有端口
-		if c.ListenPort == 0 && c.UDPPort != 0 {
-			c.ListenPort = c.UDPPort
-			changed = true
-		}
-		c.UDPPort = 0 // Clear legacy field
-		
-		if c.ListenPort == 0 {
-			c.ListenPort = 23333
-			changed = true
-		}
-		if c.WGPort == 0 {
-			c.WGPort = 51820 // Default internal WG port
-			changed = true
-		}
-	} else {
-		// Raw 模式 (Pure IP)：严禁出现端口
-		// Client Mode: 修正 ListenAddr 误用 (如果是 Client 且没 PeerAddr，说明 ListenAddr 填的是对面)
-		if c.Mode == "client" && c.PeerAddr == "" && c.ListenAddr != "" {
-			c.PeerAddr = c.ListenAddr
-			c.ListenAddr = "" // Client bind default
-			log.Printf("[%s] 修正配置: 将 ListenAddr 移动至 PeerAddr (Client 模式)", c.InterfaceName)
-			changed = true
-		}
-
-		if c.ListenPort != 0 {
-			c.ListenPort = 0
-			changed = true
-		}
-		if c.UDPPort != 0 {
-			c.UDPPort = 0
-			changed = true
-		}
-		if c.WGPort != 0 {
-			c.WGPort = 0
-			changed = true
-		}
-		// Raw Mode Client 也不需要 PeerPort
-		if c.PeerPort != 0 {
-			c.PeerPort = 0
-			changed = true
-		}
-	}
-
-	if c.InterfaceName == "" {
-		c.InterfaceName = "neko0"
-		changed = true
-	}
-
-	// Default secondary interface names if not provided
-	if c.Protocol == "wg-raw" {
-		if c.WGInterface == "" {
-			c.WGInterface = c.InterfaceName
-			changed = true
-		}
-	} else {
-		if c.AppInterface == "" {
-			prefix := c.InterfaceName
-			if len(prefix) > 11 {
-				prefix = prefix[:11]
-			}
-			c.AppInterface = prefix + "_app"
-			log.Printf("[%s] 自动分配 AppInterface: %s", c.InterfaceName, c.AppInterface)
-			changed = true
-		}
-	}
-
-	// Final Safety Check for Linux IFNAMSIZ (16 bytes including null)
-	// We MUST truncate here so the entire app uses the same shortened names.
-	if len(c.InterfaceName) > 15 {
-		c.InterfaceName = c.InterfaceName[:15]
-		changed = true
-	}
-	if len(c.AppInterface) > 15 {
-		c.AppInterface = c.AppInterface[:15]
-		changed = true
-	}
-	if len(c.WGInterface) > 15 {
-		c.WGInterface = c.WGInterface[:15]
-		changed = true
-	}
-
-	// 6. Version Upgrade
-	c.Version = "v2.1"
-	return
-}
-
-// MapConfigByProtocol returns a filtered map based on the protocol to hide irrelevant fields
-func (c *Config) MapConfigByProtocol() map[string]interface{} {
-	m := make(map[string]interface{})
-	m["version"] = "v2.1"
-	m["interface_name"] = c.InterfaceName
-	m["mode"] = c.Mode
-	m["protocol"] = c.Protocol
-	m["key"] = c.Key
-	m["mtu"] = c.MTU
-	if c.Debug { m["debug"] = true }
-	if c.Comment != "" { m["comment"] = c.Comment }
-
-	if c.Protocol == "wg-raw" {
-		// Only wg-raw (Phantom) fields
-		m["local_addr"] = c.LocalAddr
-		if c.ParentInterface != "" { m["parent_interface"] = c.ParentInterface }
-		if c.WGInterface != "" { m["wg_interface"] = c.WGInterface }
-		if c.ListenPort != 0 { m["listen_port"] = c.ListenPort }
-		if c.WGPort != 0 { m["wg_port"] = c.WGPort }
-		if c.PeerAddr != "" { m["peer_addr"] = c.PeerAddr }
-		if c.PeerPort != 0 { m["peer_port"] = c.PeerPort }
-		if c.UseTCP { m["use_tcp"] = true }
-	} else {
-		// Only raw (Veth) fields
-		if c.LocalAddr != "" { m["local_addr"] = c.LocalAddr }
-		if c.ListenAddr != "" { m["listen_addr"] = c.ListenAddr }
-		if c.AppInterface != "" { m["app_interface"] = c.AppInterface }
-		if c.IPProtocolNum != 0 { m["ip_protocol_num"] = c.IPProtocolNum }
-		if c.UseNATT { m["use_nat_t"] = true }
-		if c.UseTCP { m["use_tcp"] = true }
-	}
-	return m
+	// --- Internal ---
+	WGInternalPort int `json:"wg_internal_port"` // Port for internal Kernel WG (default 51820)
 }
 
 func writeFull(w io.Writer, b []byte) error {
@@ -336,21 +89,19 @@ func writeFull(w io.Writer, b []byte) error {
 	return nil
 }
 
-// --- 常量 ---
+// --- Constants ---
 
 const (
 	NonceSize = chacha20poly1305.NonceSizeX
 	Overhead  = chacha20poly1305.Overhead
-	TunOffset = 16
 	BufSize   = 65536
 	BatchSize = 256
 )
 
-// --- 内存池 ---
+// --- Memory Pool ---
 
 var bufPool = sync.Pool{
 	New: func() interface{} {
-		// 4096 is enough for any Jumbo Frame or Tunnel Overhead
 		b := make([]byte, 4096)
 		return &b
 	},
@@ -361,36 +112,28 @@ type txPacket struct {
 	n      int
 }
 
-// --- VPN 实例 ---
+// --- VPN Instance ---
 
 type VPNInstance struct {
 	Cfg Config
 	TunDev tun.Device
 
-	// --- QUIC 模式 (v6.0) --- (REMOVED)
-	// quicListener *quic.Listener   // Server Mode
-	// quicConn     *quic.Conn       // Client Mode
-	// activeStream *quic.Stream     // 当前活跃的加密 Stream
-	// 互斥锁保护 quicConn 重连
-	connMx       sync.RWMutex
-
-	// --- Raw 模式 (Legacy / High Perf) ---
-	// 保留原有逻辑不动
+	// --- Raw Mode State ---
 	ConnRaw        []*net.IPConn
 	ClientRemoteIP *net.IPAddr
 	ServerPeerIP   atomic.Pointer[net.IPAddr]
 	rawSendIdx     uint32
-	// Raw 模式仍需 AEAD
+
 	AEAD           cipher.AEAD
-	aeadPool       []cipher.AEAD // Raw 模式并发需要
+	aeadPool       []cipher.AEAD
 
 	// Reordering Pipeline
 	reorderChan chan *DecryptedPacket
-	rxDispatchChan chan rxPacket // RX Dispatcher
+	rxDispatchChan chan rxPacket
 
-	// 通用统计
+	// Stats / Session
 	SessionID    uint32
-	nonceCounter uint64 // 若 Raw 模式需要
+	nonceCounter uint64
 	numWorkers   int
 	IsIPv6       bool
 	
@@ -403,7 +146,6 @@ type VPNInstance struct {
 	// Phantom Mode State
 	GatewayMAC   [6]byte
 	PhyMAC       [6]byte
-	WGInterface  string // Kernel WireGuard Interface Name
 	remoteAddr   netip.AddrPort
 	remoteAddrMx sync.RWMutex
 }
@@ -422,19 +164,21 @@ type DecryptedPacket struct {
 }
 
 func NewVPNInstance(cfg Config) *VPNInstance {
-	cfg.ParseLegacy()
+	// Set Defaults
+	if cfg.MTU == 0 { cfg.MTU = 1400 }
+	if cfg.WGInternalPort == 0 { cfg.WGInternalPort = 51820 }
+	if cfg.CustomProtocol == 0 { cfg.CustomProtocol = 233 }
+	if cfg.VPNInterface == "" { cfg.VPNInterface = "neko0" }
+
 	v := &VPNInstance{Cfg: cfg}
 
-	// 初始化并发数 (Raw 和 QUIC 处理可能都需要)
 	v.numWorkers = runtime.NumCPU()
 	if v.numWorkers > 8 {
 		v.numWorkers = 8
 	}
 
-	// 初始化 AEAD (XChaCha20-Poly1305)
-	// 初始化 AEAD (XChaCha20-Poly1305)
-	// 无论是 Raw 还是 wg-raw (握手用)，我们都使用这套加密
-	keyHash := sha256.Sum256([]byte(cfg.Key))
+	// Initialize AEAD (XChaCha20-Poly1305) using Password
+	keyHash := sha256.Sum256([]byte(cfg.Password))
 	v.aeadPool = make([]cipher.AEAD, 16)
 	for i := 0; i < 16; i++ {
 		v.aeadPool[i], _ = chacha20poly1305.NewX(keyHash[:])
@@ -442,15 +186,16 @@ func NewVPNInstance(cfg Config) *VPNInstance {
 	v.AEAD = v.aeadPool[0]
 	v.SessionID = uint32(os.Getpid()) ^ uint32(keyHash[0])<<24
 	
-	// High throughput reorder buffer
 	v.reorderChan = make(chan *DecryptedPacket, 8192)
 	v.rxDispatchChan = make(chan rxPacket, 8192)
 
-	// Initialize Phantom Remote if Client
-	if cfg.Mode == "client" && cfg.PeerAddr != "" {
-		if addr, err := netip.ParseAddr(cfg.PeerAddr); err == nil {
-			v.remoteAddr = netip.AddrPortFrom(addr, uint16(cfg.PeerPort))
+	// Initialize Remote Address (Client Mode)
+	if cfg.Mode == "client" && cfg.ClientRemoteIP != "" {
+		if addr, err := netip.ParseAddr(cfg.ClientRemoteIP); err == nil {
+			v.remoteAddr = netip.AddrPortFrom(addr, uint16(cfg.ClientRemotePort))
 		}
+		// Also resolve for Raw mode usage
+		v.ClientRemoteIP, _ = net.ResolveIPAddr("ip", cfg.ClientRemoteIP)
 	}
 
 	return v
@@ -459,42 +204,32 @@ func NewVPNInstance(cfg Config) *VPNInstance {
 
 // --- WireGuard Auto-Config Logic ---
 
-func generateWGKey() ([]byte, []byte) {
-	var priv [32]byte
-	rand.Read(priv[:])
-	priv[0] &= 248
-	priv[31] &= 127
-	priv[31] |= 64
-	
-	var pub [32]byte
-	curve25519.ScalarBaseMult(&pub, &priv)
-	return priv[:], pub[:]
-}
-
 func (v *VPNInstance) startWireGuardRaw() {
 	// Phantom Mode (Mode 3): Kernel WireGuard <-> UDP Listener <-> AF_XDP Proxy
 	
 	// Determine BPF Mode
 	bpfMode := 2 // Default Raw
-	bpfTarget := v.Cfg.IPProtocolNum
+	bpfTarget := v.Cfg.CustomProtocol
 
 	// Check for UDP Mode
-	if v.Cfg.UseNATT || v.Cfg.IPProtocolNum == 17 {
+	if v.Cfg.CustomProtocol == 17 {
 		bpfMode = 1
-		bpfTarget = v.Cfg.ListenPort
+		bpfTarget = v.Cfg.ServerBindPort
 	}
 
 	// 1. Get Physical MAC
-	iface, err := net.InterfaceByName(v.Cfg.ParentInterface)
+	iface, err := net.InterfaceByName(v.Cfg.PhyInterface)
 	if err == nil && len(iface.HardwareAddr) >= 6 {
 		copy(v.PhyMAC[:], iface.HardwareAddr)
 		log.Printf("[WG-RAW] Physical MAC: %x", v.PhyMAC)
+	} else {
+		log.Printf("[WG-RAW] Warning: Could not find Physical Interface '%s'", v.Cfg.PhyInterface)
 	}
 
 	// 2. Initialize XDP on Parent Interface
-	log.Printf("[WG-RAW] Initializing Phantom XDP on %s (Mode: %d, Target: %d)", v.Cfg.ParentInterface, bpfMode, bpfTarget)
+	log.Printf("[WG-RAW] Initializing Phantom XDP on %s (Mode: %d, Target: %d)", v.Cfg.PhyInterface, bpfMode, bpfTarget)
 	xsk, err := xdp.NewSocket(xdp.Config{
-		Interface: v.Cfg.ParentInterface,
+		Interface: v.Cfg.PhyInterface,
 		QueueID:   0,
 		RingSize:  2048,
 		Mode:      bpfMode,
@@ -509,28 +244,22 @@ func (v *VPNInstance) startWireGuardRaw() {
 	}
 	
 	// 2. Setup Kernel WireGuard Interface
-	wgIf := v.Cfg.WGInterface
-	v.WGInterface = wgIf
-	v.setupKernelWireGuard(wgIf)
+	v.setupKernelWireGuard(v.Cfg.VPNInterface)
 	
 	// 3. Start Local UDP Proxy Listener
-	// Kernel WG sends to 127.0.0.1:v.Cfg.WGPort (Configured by setupKernelWireGuard)
-	udpAddr, _ := net.ResolveUDPAddr("udp", fmt.Sprintf("127.0.0.1:%d", v.Cfg.WGPort))
+	// Kernel WG sends to 127.0.0.1:v.Cfg.WGInternalPort
+	udpAddr, _ := net.ResolveUDPAddr("udp", fmt.Sprintf("127.0.0.1:%d", v.Cfg.WGInternalPort))
 	conn, err := net.ListenUDP("udp", udpAddr)
 	if err != nil {
 		log.Fatalf("Local Proxy Bind Failed: %v", err)
 	}
-	log.Printf("[WG-RAW] Proxy Active: Kernel_WG -> 127.0.0.1:%d -> AF_XDP", v.Cfg.WGPort)
+	log.Printf("[WG-RAW] Proxy Active: Kernel_WG -> 127.0.0.1:%d -> AF_XDP", v.Cfg.WGInternalPort)
 
 	// 4. Start Loops
 	go v.proxyXDPToUDP(conn) // External -> XDP -> Proxy -> Kernel WG
 	go v.proxyUDPToXDP(conn) // Kernel WG -> Proxy -> XDP -> External
 	
-	// 5. Start Side-Channel Handshaker (Managed by Go, separate from Kernel WG)
-	// We need to send 0xFE packets to the real remote to exchange keys/roaming.
-	// And update Kernel WG peer endpoint if remote changes (Actually we don't need to update Kernel WG,
-	// because Kernel WG always talks to 127.0.0.1. WE maintain the Remote mapping in the Proxy).
-	// So Handshake just updates the "v.ClientRemoteIP/Port" variable. 
+	// 5. Start Side-Channel Handshaker
 	go v.handshakeLoop()
 	
 	select {}
@@ -546,8 +275,8 @@ func (v *VPNInstance) setupKernelWireGuard(iface string) {
 	}
 	
 	// Config IP
-	if v.Cfg.LocalAddr != "" {
-		runCmd("ip", "addr", "add", v.Cfg.LocalAddr, "dev", iface)
+	if v.Cfg.VPNAddr != "" {
+		runCmd("ip", "addr", "add", v.Cfg.VPNAddr, "dev", iface)
 	}
 	
 	// Safe MTU for tunneled traffic
@@ -557,61 +286,20 @@ func (v *VPNInstance) setupKernelWireGuard(iface string) {
 	runCmd("ip", "link", "set", iface, "up")
 	
 	// Config WireGuard (Keys/Peers)
-	// We use `wg` utility for simplicity. 
-	// Private Key
 	privKeyFile := "/tmp/neko_wg_priv"
 	if v.Cfg.PrivateKey == "" {
-		log.Fatal("[Wg-Raw] Error: No Private Key generated. Please use -migrate or check config.")
+		log.Fatal("[Wg-Raw] Error: No Private Key provided.")
 	}
 	os.WriteFile(privKeyFile, []byte(v.Cfg.PrivateKey), 0600)
 	runCmd("wg", "set", iface, "private-key", privKeyFile)
 	os.Remove(privKeyFile)
 	
-	// Peer
-	// We point the Peer Endpoint to 127.0.0.1:WGPort (Our Proxy)
-	// If Client Mode:
-	if v.Cfg.Mode == "client" {
-		// Peer PubKey? We might need to ask user or use a dummy if using Side-Channel.
-		// For now assume Config has PeerPubKey? Cfg currently only has Shared Key logic?
-		// Wait, NekoLink uses specific Key derivation or config.
-		// If user only provided "Key" (PSK-like logic in old code), Kernel WG needs Standard Keys.
-		// Assumption: User provides standard WG Config or we generate it?
-		// User Rule: "All new codes ... add usage to intro".
-		// Current Cfg has `Key`.
-		// Let's assume standard WG usage requires valid Keys.
-		// For "Phantom" to work effectively with "Kernel WG", we strictly need standard WG behavior.
-		
-		// If Peer is configured:
-		if v.Cfg.PeerAddr != "" {
-			// endpoint = 127.0.0.1:WGPort
-			// allowed-ips = 0.0.0.0/0
-			// We need Peer Public Key. 
-			// FIX: Assuming v.Cfg.Key is Private, how do we get Peer Public?
-			// Old Logic: Side-Channel Handshake exchanged them.
-			// New Logic: Handshake Loop will do `wg set` when it learns dynamic key?
-			// Initial: Empty Peer or Configured?
-			// Let's rely on `wg` command dynamic updates for now.
-		}
-	}
-	
 	// Server Mode:
-	runCmd("wg", "set", iface, "listen-port", fmt.Sprintf("%d", v.Cfg.WGPort + 1)) // Kernel WG Listen Port (Not used effectively since we use Endpoint)
+	runCmd("wg", "set", iface, "listen-port", fmt.Sprintf("%d", v.Cfg.WGInternalPort + 1))
 }
 
 func (v *VPNInstance) handshakeLoop() {
-	// Periodically send 0xFE to Remote to keep session alive and notify our presence.
-	// Since we are "Proxy", Kernel WG just sends to 127.0.0.1.
-	// But we need to ensure the REMOTE knows our Public Key and IP.
-	// We use the same side-channel protocol: [0xFE] [Nonce] [Cipher(Ver+PubKey)]
-	
-	// Prepare Local Keys (We need to read them or derive them)
-	// For "Kernel WG Mode", the key in v.Cfg.Key is the Private Key.
-	// We need the Public Key to advertise.
-	
-	// 1. Prepare Keys
-	// We use the PRIVATE KEY for our Identity (Standard WG)
-	// We use the KEY (Password) for the Shared Secret (AEAD Side-Channel)
-	
+	// Prepare Keys
 	privateKeyHex := v.Cfg.PrivateKey
 	var myPrivKey [32]byte
 	if slice, err := base64.StdEncoding.DecodeString(privateKeyHex); err == nil && len(slice) == 32 {
@@ -621,23 +309,21 @@ func (v *VPNInstance) handshakeLoop() {
 	var myPubKey [32]byte
 	curve25519.ScalarBaseMult(&myPubKey, &myPrivKey)
 
-	// Ticker for Heartbeat
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ticker.C:
-			// Send Handshake Packet if we have a target
-			// We send OUR Public Key so remote can advertise themselves.
-			if v.Cfg.Mode == "client" && v.Cfg.PeerAddr != "" {
-				addr, err := netip.ParseAddr(v.Cfg.PeerAddr)
+			if v.Cfg.Mode == "client" && v.Cfg.ClientRemoteIP != "" {
+				// Client sends heartbeat to server
+				addr, err := netip.ParseAddr(v.Cfg.ClientRemoteIP)
 				if err == nil {
-					remote := netip.AddrPortFrom(addr, uint16(v.Cfg.PeerPort))
+					remote := netip.AddrPortFrom(addr, uint16(v.Cfg.ClientRemotePort))
 					v.sendHandshakePacket(remote, myPubKey[:])
 				}
 			} else if v.Cfg.Mode == "server" {
-				// Server also sends heartbeat if it knows the peer
+				// Server sends heartbeat if it knows the peer
 				var remote netip.AddrPort
 				if v.Cfg.Protocol == "wg-raw" {
 					v.remoteAddrMx.RLock()
@@ -658,9 +344,7 @@ func (v *VPNInstance) handshakeLoop() {
 	}
 }
 
-// Callback for when we receive a valid 0xFE Handshake
 func (v *VPNInstance) onHandshakeReceived(data []byte, remote netip.AddrPort) bool {
-	// [0xFE] [Nonce] [Cipher]
 	if len(data) < 1+NonceSize+Overhead+1 { return false }
 	
 	nonce := data[1:1+NonceSize]
@@ -674,9 +358,6 @@ func (v *VPNInstance) onHandshakeReceived(data []byte, remote netip.AddrPort) bo
 	}
 	
 	if len(plain) < 33 { return false }
-	// ver := plain[0]
-	// Previous code: plain[0] = 1, plain[1:] = PubKey
-	
 	peerPubKey := plain[1:33]
 	info := base64.StdEncoding.EncodeToString(peerPubKey)
 	
@@ -704,7 +385,7 @@ func (v *VPNInstance) onHandshakeReceived(data []byte, remote netip.AddrPort) bo
 	if v.Cfg.Protocol == "wg-raw" {
 		go func() {
 			pubKey64 := base64.StdEncoding.EncodeToString(peerPubKey)
-			runCmdQuiet("wg", "set", v.WGInterface, "peer", pubKey64, "allowed-ips", "0.0.0.0/0,::/0", "endpoint", fmt.Sprintf("127.0.0.1:%d", v.Cfg.WGPort))
+			runCmdQuiet("wg", "set", v.Cfg.VPNInterface, "peer", pubKey64, "allowed-ips", "0.0.0.0/0,::/0", "endpoint", fmt.Sprintf("127.0.0.1:%d", v.Cfg.WGInternalPort))
 		}()
 	}
 	
@@ -712,23 +393,18 @@ func (v *VPNInstance) onHandshakeReceived(data []byte, remote netip.AddrPort) bo
 }
 
 func (v *VPNInstance) sendHandshakePacket(remote netip.AddrPort, myPub []byte) {
-	// Construct [0xFE] [Nonce] [Cipher]
 	pkt := make([]byte, 1+NonceSize+33+Overhead)
 	pkt[0] = 0xFE
 	
-	// Nonce
 	nonce := pkt[1 : 1+NonceSize]
 	if _, err := rand.Read(nonce); err != nil { return }
 	
-	// Payload: [Ver(1)][PubKey] 
 	plain := make([]byte, 33)
 	plain[0] = 1
 	copy(plain[1:], myPub)
 	
-	// Encrypt using the SHA256(Key) AEAD
 	v.AEAD.Seal(pkt[1+NonceSize:1+NonceSize], nonce, plain, nil)
 	
-	// Send via appropriate channel
 	if v.Cfg.Protocol == "wg-raw" {
 		v.sendRawXDP(pkt, remote)
 	} else if len(v.ConnRaw) > 0 {
@@ -739,8 +415,8 @@ func (v *VPNInstance) sendHandshakePacket(remote netip.AddrPort, myPub []byte) {
 }
 
 func (v *VPNInstance) sendRawXDP(data []byte, remote netip.AddrPort) {
-	isRaw := !v.Cfg.UseNATT && v.Cfg.IPProtocolNum != 17
-	useTCP := v.Cfg.UseTCP && isRaw
+	isRaw := v.Cfg.CustomProtocol != 17
+	useTCP := v.Cfg.TCPMode && isRaw
 
 	pktLen := 14 + 20 + 8 + len(data)
 	if isRaw {
@@ -753,17 +429,11 @@ func (v *VPNInstance) sendRawXDP(data []byte, remote netip.AddrPort) {
 	pkt := make([]byte, pktLen)
 	
 	// 1. Ethernet
-	// Dst: Gateway MAC (or Broadcast if unknown)
-	// Src: My Dummy MAC (02:00:00:00:00:01) ?? No, must match physical if possible?
-	// Actually, if we send out physical, we should probably use real MAC if we want reply.
-	// But usually Gateway accepts if IP matches.
-	// Let's use v.GatewayMAC which we learned.
 	v.remoteAddrMx.RLock()
 	gwMac := v.GatewayMAC
 	v.remoteAddrMx.RUnlock()
 
 	if gwMac == [6]byte{0,0,0,0,0,0} {
-		// Fallback to Broadcast
 		copy(pkt[0:6], []byte{0xff,0xff,0xff,0xff,0xff,0xff})
 	} else {
 		copy(pkt[0:6], gwMac[:])
@@ -772,99 +442,89 @@ func (v *VPNInstance) sendRawXDP(data []byte, remote netip.AddrPort) {
 	if v.PhyMAC != [6]byte{0,0,0,0,0,0} {
 		copy(pkt[6:12], v.PhyMAC[:])
 	} else {
-		// Fallback
 		copy(pkt[6:12], []byte{0x02,0x00,0x00,0x00,0x00,0x01})
 	}
 	
-	// EtherType IPv4
 	binary.BigEndian.PutUint16(pkt[12:14], 0x0800)
 	
-	// 2. IPv4 Header
-	// IP Off: 14
+	// 2. IPv4
 	ipOff := 14
-	pkt[ipOff] = 0x45 // Ver=4, IHL=5
-	pkt[ipOff+1] = 0x00 // TOS
+	pkt[ipOff] = 0x45
+	pkt[ipOff+1] = 0x00
 
 	totalLen := uint16(20 + 8 + len(data))
 	if isRaw {
 		totalLen = uint16(20 + len(data))
 		if useTCP {
-			totalLen += 20 // Add TCP header length
+			totalLen += 20
 		}
 	}
-	binary.BigEndian.PutUint16(pkt[ipOff+2:ipOff+4], totalLen) // Total Len
+	binary.BigEndian.PutUint16(pkt[ipOff+2:ipOff+4], totalLen)
 
-	pkt[ipOff+4], pkt[ipOff+5] = 0x00, 0x01 // ID
-	pkt[ipOff+6], pkt[ipOff+7] = 0x00, 0x00 // Flags/Frag
-	pkt[ipOff+8] = 64 // TTL
+	pkt[ipOff+4], pkt[ipOff+5] = 0x00, 0x01
+	pkt[ipOff+6], pkt[ipOff+7] = 0x00, 0x00
+	pkt[ipOff+8] = 64
 
 	if isRaw {
-		pkt[ipOff+9] = uint8(v.Cfg.IPProtocolNum)
+		pkt[ipOff+9] = uint8(v.Cfg.CustomProtocol)
 	} else {
-		pkt[ipOff+9] = 17 // UDP
+		pkt[ipOff+9] = 17
 	}
-	// Checksum (Zero for now, fill later)
 	
-	// Src IP (My IP)
-	myIP := net.ParseIP(v.Cfg.LocalAddr).To4()
+	// Src IP
+	myIP, _, _ := net.ParseCIDR(v.Cfg.VPNAddr)
+	if myIP == nil {
+		myIP = net.ParseIP(v.Cfg.VPNAddr) // Fallback if just IP
+	}
 	if myIP == nil { myIP = net.IP{0,0,0,0} }
-	copy(pkt[ipOff+12:ipOff+16], myIP)
 	
-	// Dst IP (Remote)
+	copy(pkt[ipOff+12:ipOff+16], myIP.To4())
 	copy(pkt[ipOff+16:ipOff+20], remote.Addr().AsSlice())
 	
-	// IP Checksum
 	cs := checksum(pkt[ipOff:ipOff+20])
 	binary.BigEndian.PutUint16(pkt[ipOff+10:ipOff+12], cs)
 	
 	if isRaw {
 		payloadOff := ipOff + 20
 		if useTCP {
-			// 3. TCP Disguise
 			tcpOff := ipOff + 20
 			payloadOff = tcpOff + 20
 			
-			binary.BigEndian.PutUint16(pkt[tcpOff:tcpOff+2], uint16(v.Cfg.ListenPort)) // Src Port
+			binary.BigEndian.PutUint16(pkt[tcpOff:tcpOff+2], uint16(v.Cfg.ServerBindPort)) // Src Port
 			binary.BigEndian.PutUint16(pkt[tcpOff+2:tcpOff+4], remote.Port())          // Dst Port
-			binary.BigEndian.PutUint32(pkt[tcpOff+4:tcpOff+8], 0xDEADBEEF)             // Seq Num
-			binary.BigEndian.PutUint32(pkt[tcpOff+8:tcpOff+12], 0xCAFEBABE)            // Ack Num
-			pkt[tcpOff+12] = 0x50 // Data Offset (5 * 4 = 20 bytes), Reserved (0)
-			pkt[tcpOff+13] = 0x18 // PSH (0x08) + ACK (0x10) flags
-			binary.BigEndian.PutUint16(pkt[tcpOff+14:tcpOff+16], 0x4000) // Window Size
-			binary.BigEndian.PutUint16(pkt[tcpOff+16:tcpOff+18], 0x0000) // Checksum (initially zero)
-			binary.BigEndian.PutUint16(pkt[tcpOff+18:tcpOff+20], 0x0000) // Urgent Pointer
+			binary.BigEndian.PutUint32(pkt[tcpOff+4:tcpOff+8], 0xDEADBEEF)
+			binary.BigEndian.PutUint32(pkt[tcpOff+8:tcpOff+12], 0xCAFEBABE)
+			pkt[tcpOff+12] = 0x50
+			pkt[tcpOff+13] = 0x18
+			binary.BigEndian.PutUint16(pkt[tcpOff+14:tcpOff+16], 0x4000)
+			binary.BigEndian.PutUint16(pkt[tcpOff+16:tcpOff+18], 0x0000)
+			binary.BigEndian.PutUint16(pkt[tcpOff+18:tcpOff+20], 0x0000)
 
-			// TCP Checksum
 			tcpPseudoHeader := make([]byte, 12)
-			copy(tcpPseudoHeader[0:4], myIP)
+			copy(tcpPseudoHeader[0:4], myIP.To4())
 			copy(tcpPseudoHeader[4:8], remote.Addr().AsSlice())
-			tcpPseudoHeader[9] = 6 // Protocol TCP
-			binary.BigEndian.PutUint16(tcpPseudoHeader[10:12], uint16(20+len(data))) // TCP Length
+			tcpPseudoHeader[9] = 6
+			binary.BigEndian.PutUint16(tcpPseudoHeader[10:12], uint16(20+len(data)))
 
-			tcpChecksum := v.calculateTCPChecksum(pkt[tcpOff:tcpOff+20], data, myIP, remote.Addr().AsSlice())
+			tcpChecksum := v.calculateTCPChecksum(pkt[tcpOff:tcpOff+20], data, myIP.To4(), remote.Addr().AsSlice())
 			binary.BigEndian.PutUint16(pkt[tcpOff+16:tcpOff+18], tcpChecksum)
 		}
-		// 4. Raw Payload
 		copy(pkt[payloadOff:], data)
 	} else {
-		// 3. UDP Header
 		udpOff := ipOff + 20
-		binary.BigEndian.PutUint16(pkt[udpOff:udpOff+2], uint16(v.Cfg.ListenPort)) // Src Port
-		binary.BigEndian.PutUint16(pkt[udpOff+2:udpOff+4], remote.Port())          // Dst Port
-		binary.BigEndian.PutUint16(pkt[udpOff+4:udpOff+6], uint16(8+len(data)))    // Length
-		binary.BigEndian.PutUint16(pkt[udpOff+6:udpOff+8], 0x0000)                 // Checksum (initially zero)
+		binary.BigEndian.PutUint16(pkt[udpOff:udpOff+2], uint16(v.Cfg.ServerBindPort))
+		binary.BigEndian.PutUint16(pkt[udpOff+2:udpOff+4], remote.Port())
+		binary.BigEndian.PutUint16(pkt[udpOff+4:udpOff+6], uint16(8+len(data)))
+		binary.BigEndian.PutUint16(pkt[udpOff+6:udpOff+8], 0x0000)
 
-		// UDP Checksum
 		udpPkt := pkt[udpOff : udpOff+8+len(data)]
 		copy(udpPkt[8:], data)
-		udpChecksum := checksumUDP(myIP, remote.Addr().AsSlice(), udpPkt)
+		udpChecksum := checksumUDP(myIP.To4(), remote.Addr().AsSlice(), udpPkt)
 		binary.BigEndian.PutUint16(pkt[udpOff+6:udpOff+8], udpChecksum)
 
-		// 4. UDP Payload
 		copy(pkt[udpOff+8:], data)
 	}
 	
-	// Transmit
 	if v.Xsk != nil {
 		v.Xsk.Transmit(pkt)
 	}
@@ -887,15 +547,13 @@ func checksum(data []byte) uint16 {
 
 func checksumUDP(src, dst, udpPkt []byte) uint16 {
 	sum := uint32(0)
-	// Pseudo Header
 	for i := 0; i < 4; i += 2 {
 		sum += uint32(binary.BigEndian.Uint16(src[i : i+2]))
 		sum += uint32(binary.BigEndian.Uint16(dst[i : i+2]))
 	}
-	sum += 17 // Proto
+	sum += 17
 	sum += uint32(len(udpPkt))
 	
-	// UDP Packet
 	for i := 0; i < len(udpPkt)-1; i += 2 {
 		sum += uint32(binary.BigEndian.Uint16(udpPkt[i : i+2]))
 	}
@@ -906,7 +564,7 @@ func checksumUDP(src, dst, udpPkt []byte) uint16 {
 	for sum > 0xffff {
 		sum = (sum & 0xffff) + (sum >> 16)
 	}
-	if sum == 0xffff { return 0xffff } // UDP zero checksum means "no checksum", but calculated zero is 0xffff
+	if sum == 0xffff { return 0xffff }
 	return ^uint16(sum)
 }
 
@@ -916,19 +574,16 @@ func (v *VPNInstance) calculateTCPChecksum(header []byte, payload []byte, srcIP,
 	headerLen := len(header)
 	totalLen := uint32(headerLen + payloadLen)
 
-	// Pseudo-header
 	sum += uint32(binary.BigEndian.Uint16(srcIP[0:2])) + uint32(binary.BigEndian.Uint16(srcIP[2:4]))
 	sum += uint32(binary.BigEndian.Uint16(dstIP[0:2])) + uint32(binary.BigEndian.Uint16(dstIP[2:4]))
-	sum += uint32(6) // Proto TCP
+	sum += uint32(6)
 	sum += totalLen
 
-	// TCP Header
 	for i := 0; i < headerLen; i += 2 {
-		if i == 16 { continue } // Skip checksum field
+		if i == 16 { continue }
 		sum += uint32(binary.BigEndian.Uint16(header[i : i+2]))
 	}
 
-	// TCP Payload
 	for i := 0; i < payloadLen; i += 2 {
 		if i+1 < payloadLen {
 			sum += uint32(binary.BigEndian.Uint16(payload[i : i+2]))
@@ -945,11 +600,10 @@ func (v *VPNInstance) calculateTCPChecksum(header []byte, payload []byte, srcIP,
 
 func (v *VPNInstance) proxyXDPToUDP(conn *net.UDPConn) {
 	// External -> XDP -> Decrypt -> Local UDP (KernelWG)
-	// We need to route traffic to KernelWG which is listening on 127.0.0.1:(WGPort+1)
-	kernelAddr, _ := net.ResolveUDPAddr("udp", fmt.Sprintf("127.0.0.1:%d", v.Cfg.WGPort+1))
+	kernelAddr, _ := net.ResolveUDPAddr("udp", fmt.Sprintf("127.0.0.1:%d", v.Cfg.WGInternalPort+1))
 
-	isRaw := !v.Cfg.UseNATT && v.Cfg.IPProtocolNum != 17
-	useTCP := v.Cfg.UseTCP && isRaw
+	isRaw := v.Cfg.CustomProtocol != 17
+	useTCP := v.Cfg.TCPMode && isRaw
 
 	for {
 		pkts, err := v.Xsk.Receive()
@@ -961,76 +615,60 @@ func (v *VPNInstance) proxyXDPToUDP(conn *net.UDPConn) {
 		for _, pkt := range pkts {
 			if len(pkt) < 34 { continue }
 			
-			// 1. Learn Gateway MAC (Src MAC of incoming frame)
-			// SrcMAC is at [6:12]
-			// Moved to lock block below
-			
-			// 2. Parse IP/UDP
 			ethType := binary.BigEndian.Uint16(pkt[12:14])
 			var ipHdrLen int
 			var srcIP net.IP
 			var srcPort int
 			var payload []byte
 
-			if ethType == 0x0800 { // IPv4
+			if ethType == 0x0800 {
 				ipHdrLen = int((pkt[14] & 0x0F) * 4)
 				srcIP = net.IP(pkt[14+12 : 14+16])
 
 				if isRaw {
 					proto := pkt[14+9]
-					if int(proto) != v.Cfg.IPProtocolNum { continue }
+					if int(proto) != v.Cfg.CustomProtocol { continue }
 
 					payloadStart := 14 + ipHdrLen
 					if len(pkt) <= payloadStart { continue }
 					
 					if useTCP {
-						// Strip TCP header disguise
 						if len(pkt) < payloadStart+20 { continue }
 						srcPort = int(binary.BigEndian.Uint16(pkt[payloadStart : payloadStart+2]))
 						payload = pkt[payloadStart+20:]
 					} else {
 						payload = pkt[payloadStart:]
-						srcPort = 0 // No port in Raw mode
+						srcPort = 0
 					}
 				} else {
-					// UDP Header at 14+ipHdrLen
 					udpStart := 14 + ipHdrLen
 					if len(pkt) < udpStart+8 { continue }
 					srcPort = int(binary.BigEndian.Uint16(pkt[udpStart : udpStart+2]))
-					// Payload
 					payload = pkt[udpStart+8:]
 				}
 				
-				// Update Remote State
 				newRemote := netip.AddrPortFrom(netip.AddrFrom4([4]byte{srcIP[0], srcIP[1], srcIP[2], srcIP[3]}), uint16(srcPort))
 				
 				v.remoteAddrMx.Lock()
 				if v.remoteAddr != newRemote {
 					v.remoteAddr = newRemote
-					// Optional: Log new connection
 				}
-				// Always update GatewayMAC (Learned from Switch/Gateway)
 				copy(v.GatewayMAC[:], pkt[6:12])
 				v.remoteAddrMx.Unlock()
 				
-				// Decrypt & Forward
 				v.handleRawPacket(payload, conn, kernelAddr)
 			}
-			// TODO: IPv6 Support (similar logic)
 		}
 	}
 }
 
 func (v *VPNInstance) proxyUDPToXDP(conn *net.UDPConn) {
-	// Local UDP (KernelWG) -> Encrypt -> XDP -> External
 	buf := make([]byte, 2048)
 	for {
 		n, _, err := conn.ReadFromUDP(buf)
 		if err != nil { continue }
 		data := buf[:n]
 		
-		// If we don't have a remote yet (Server mode waiting for handshake), drop.
-		// If Client mode, properly initialized.
 		v.remoteAddrMx.RLock()
 		remote := v.remoteAddr
 		v.remoteAddrMx.RUnlock()
@@ -1044,9 +682,7 @@ func (v *VPNInstance) proxyUDPToXDP(conn *net.UDPConn) {
 func (v *VPNInstance) handleRawPacket(payload []byte, conn *net.UDPConn, target *net.UDPAddr) {
 	if len(payload) == 0 { return }
 
-	// 1. Check for Handshake (0xFE)
 	if payload[0] == 0xFE {
-		// Side-Channel Handshake Processing
 		ip := target.IP
 		port := target.Port
 		addrPort := netip.AddrPortFrom(netip.AddrFrom4([4]byte{ip[0],ip[1],ip[2],ip[3]}), uint16(port))
@@ -1055,63 +691,32 @@ func (v *VPNInstance) handleRawPacket(payload []byte, conn *net.UDPConn, target 
 		return
 	}
 
-	// 2. Decrypt
 	nonce := payload[:NonceSize]
 	cipherText := payload[NonceSize:]
 	
 	plain, err := v.AEAD.Open(nil, nonce, cipherText, nil)
 	if err != nil {
-		// Decrypt failed (maybe not ours?), drop
 		return
 	}
 
-	// 3. Forward to Kernel WireGuard
 	conn.WriteToUDP(plain, target)
 }
 
 func (v *VPNInstance) sendPhantomPacket(plain []byte, remote netip.AddrPort) {
-	// Encrypt -> Construct Raw -> Xsk.Transmit
-	
-	// Encrypt
 	nonce := make([]byte, NonceSize)
 
-	// Structure Nonce: [Seq (8)] + [SessionID (4)] + [Padding (12)]
-	// This matches the expectation of the Reordering Logic on the receiver side.
 	vVal := atomic.AddUint64(&v.nonceCounter, 1)
 	binary.BigEndian.PutUint64(nonce[0:8], vVal)
 	binary.BigEndian.PutUint32(nonce[8:12], v.SessionID)
-	// Remaining bytes are 0 (make initializes to 0)
 	
-	// Cipher = Nonce + AEAD(plain)
 	cipherText := v.AEAD.Seal(nil, nonce, plain, nil)
 	finalPayload := append(nonce, cipherText...)
 	
 	v.sendRawXDP(finalPayload, remote)
 }
 
-func (v *VPNInstance) sendHandshake(bind *RawBind, remote netip.AddrPort, myPub []byte) {
-	// Construct [0xFE] [Nonce] [Cipher]
-	pkt := make([]byte, 1+NonceSize+33+Overhead)
-	pkt[0] = 0xFE
-	
-	// Nonce
-	nonce := pkt[1 : 1+NonceSize]
-	if _, err := rand.Read(nonce); err != nil { return }
-	
-	// Payload: [Ver(Verification Code/Ver)(1)][PubKey] 
-	plain := make([]byte, 33)
-	plain[0] = 1
-	copy(plain[1:], myPub)
-	
-	// Encrypt
-	v.AEAD.Seal(pkt[1+NonceSize:1+NonceSize], nonce, plain, nil) // dst is slice at end of nonce
-	
-	bind.SendRaw(pkt, remote)
-	log.Printf("[Handshake] Sent to %s", remote)
-}
-
 func (v *VPNInstance) startUAPI() {
-	fileUAPI, err := ipc.UAPIOpen(v.Cfg.InterfaceName)
+	fileUAPI, err := ipc.UAPIOpen(v.Cfg.VPNInterface)
 	if err != nil {
 		log.Printf("[WG-RAW] UAPI Listen failed: %v", err)
 		return
@@ -1132,117 +737,87 @@ func (v *VPNInstance) Start() {
 		debugMode = true
 	}
 
-	log.Printf("[%s] NekoLink (WireGuard Edition) 启动中 - 核心: %d, MTU: %d",
-		v.Cfg.InterfaceName, v.numWorkers, v.Cfg.MTU)
+	log.Printf("[%s] NekoLink (WireGuard Edition) Starting - Workers: %d, MTU: %d",
+		v.Cfg.VPNInterface, v.numWorkers, v.Cfg.MTU)
 
 	v.InitInterface()
 	v.InitNetwork()
 	
 	if v.Cfg.Protocol == "wg-raw" {
-		log.Printf("[Init] 启动 wg-raw 模式 (Embedded WireGuard over Raw Socket)")
+		log.Printf("[Init] Starting wg-raw mode (Phantom)")
 		go v.startWireGuardRaw()
 	} else {
-		// Legacy Raw 模式 (现在升级为 Veth + AF_XDP)
-		log.Printf("[Init] 启动 Raw Mode 2 (Veth + AF_XDP)")
+		log.Printf("[Init] Starting Raw Mode 2 (Veth + AF_XDP)")
 		
-		// Initialize AF_XDP
-		appIf := v.Cfg.AppInterface
+		appIf := v.Cfg.VPNInterface + "_app"
 		
 		xsk, err := xdp.NewSocket(xdp.Config{
 			Interface: appIf,
 			QueueID:   0,
 			RingSize:  2048,
-			Mode:      0, // Promiscuous / Redirect All (Since we are veth peer)
+			Mode:      0,
 			Target:    0,
 		})
 		if err != nil {
-			log.Fatalf("AF_XDP 初始化失败: %v", err)
+			log.Fatalf("AF_XDP Init Failed: %v", err)
 		}
 		v.Xsk = xsk
 		
-		// Update BPF Map (Self-Registration)
 		if err := v.Xsk.AddToMap(v.Xsk.XsksMap); err != nil {
-			log.Printf("Warning: Map Update Failed: %v", err) // Soft fail?
+			log.Printf("Warning: Map Update Failed: %v", err)
 		}
 
-		// 启动写入循环 (AF_XDP -> Encrypt -> IPConn)
-		log.Printf("[RAW] 启用高性能并行 TX 流水线: 1 Producer -> %d Encryption Workers", v.numWorkers)
+		log.Printf("[RAW] Starting Pipeline")
 		go v.XDPReaderLoop(0)
 		
-		// 启动 RX Workers
-		log.Printf("[RAW] 启用高性能并行 RX 流水线: %d Decryption Workers", v.numWorkers)
 		for i := 0; i < v.numWorkers; i++ {
 			go v.rxWorkerLoop(i)
 		}
 
-		// 启动重排序写入器 (Consumer) (Decrypt -> Reorder -> AF_XDP)
 		go v.packetOrderedWriter()
-
-		// 启动单路读取器 (IPConn -> Decrypt -> Reorder)
-		// 核心：单路读取配合多路写入以确保解密顺序和稳定性
-		log.Printf("[RAW] 启用单路 RX 读取模式 (Sequential Reading Active)")
 		go v.rawReaderLoop(0)
-
-		// 启动心跳机制
 		go v.handshakeLoop()
 	}
 }
 
 func (v *VPNInstance) Cleanup() {
-	log.Printf("[%s] 正在清理网络资源...", v.Cfg.InterfaceName)
+	log.Printf("[%s] Cleaning up...", v.Cfg.VPNInterface)
 	if v.Cfg.Protocol == "wg-raw" {
-		if v.WGInterface != "" {
-			runCmdQuiet("ip", "link", "del", v.WGInterface)
+		if v.Cfg.VPNInterface != "" {
+			runCmdQuiet("ip", "link", "del", v.Cfg.VPNInterface)
 		}
 	} else {
-		// Raw Mode (Veth): Deleting host side automatically removes peer side
-		if v.Cfg.InterfaceName != "" {
-			runCmdQuiet("ip", "link", "del", v.Cfg.InterfaceName)
+		if v.Cfg.VPNInterface != "" {
+			runCmdQuiet("ip", "link", "del", v.Cfg.VPNInterface)
 		}
 	}
 }
 
-// --- Producer: UDP (Net) -> Pipeline ---
-
-
-// --- QUIC Client Logic ---
-// --- QUIC Client Logic Removed ---
-
-
-
-// --- TUN 初始化 ---
-
 func (v *VPNInstance) InitInterface() {
 	if v.Cfg.Protocol == "wg-raw" {
-		log.Printf("[%s] Phantom 模式: 跳过本地接口创建 (直接使用物理网卡)", v.Cfg.InterfaceName)
+		log.Printf("[%s] Phantom Mode: Skipping local interface creation (Using Physical)", v.Cfg.VPNInterface)
 		return
 	}
 
 	// Raw Mode: Veth
-	hostIf := v.Cfg.InterfaceName
-	appIf := v.Cfg.AppInterface
+	hostIf := v.Cfg.VPNInterface
+	appIf := v.Cfg.VPNInterface + "_app"
 	
-	// Cleanup
 	runCmdQuiet("ip", "link", "del", hostIf)
 	
-	// Create Veth pair
-	log.Printf("[%s] 创建 Veth Pair: %s <-> %s", hostIf, hostIf, appIf)
+	log.Printf("[%s] Creating Veth Pair: %s <-> %s", hostIf, hostIf, appIf)
 	if err := runCmd("ip", "link", "add", hostIf, "type", "veth", "peer", "name", appIf); err != nil {
-		log.Fatalf("Veth 创建失败: %v", err)
+		log.Fatalf("Veth Create Failed: %v", err)
 	}
 
-	// Configure Host Side
-	runCmd("ip", "addr", "add", v.Cfg.LocalAddr, "dev", hostIf)
+	runCmd("ip", "addr", "add", v.Cfg.VPNAddr, "dev", hostIf)
 	runCmd("ip", "link", "set", hostIf, "mtu", fmt.Sprintf("%d", v.Cfg.MTU))
-	// Enable ARP for L2 tunneling
 	runCmd("ip", "link", "set", hostIf, "arp", "on")
 	
-	// Disable Checksum Offloading to fix UDP issues in Veth/XDP
 	runCmd("ethtool", "-K", hostIf, "tx", "off", "rx", "off", "tso", "off", "gso", "off", "ufo", "off")
 	
 	runCmd("ip", "link", "set", hostIf, "up")
 	
-	// Configure App Side (AF_XDP Target)
 	runCmd("ip", "link", "set", appIf, "arp", "on")
 	runCmd("ip", "link", "set", appIf, "promisc", "on")
 	runCmd("ethtool", "-K", appIf, "tx", "off", "rx", "off", "tso", "off", "gso", "off", "ufo", "off")
@@ -1250,11 +825,8 @@ func (v *VPNInstance) InitInterface() {
 	runCmd("ip", "link", "set", appIf, "up")
 	runCmdQuiet("sysctl", "-w", fmt.Sprintf("net.ipv6.conf.%s.disable_ipv6=1", appIf))
 
-	// IPv4 转发优化
 	runCmdQuiet("sysctl", "-w", "net.ipv4.conf.all.rp_filter=0")
 	runCmdQuiet("sysctl", "-w", fmt.Sprintf("net.ipv4.conf.%s.rp_filter=0", hostIf))
-	
-	// IPv6 基础支持
 	runCmdQuiet("sysctl", "-w", "net.ipv6.conf.all.forwarding=1")
 
 	v.setupNFTables(hostIf)
@@ -1269,7 +841,6 @@ func (v *VPNInstance) setupNFTables(iface string) {
 		"{ type filter hook forward priority mangle; policy accept; }")
 	runCmd("nft", "flush", "chain", "inet", "nekolink", chainMSS)
 
-	// 同时钳制 v4 和 v6 的 TCP MSS
 	runCmd("nft", "add", "rule", "inet", "nekolink", chainMSS,
 		"iifname", iface, "tcp", "flags", "syn", "tcp", "option", "maxseg", "size", "set", "rt", "mtu")
 	runCmd("nft", "add", "rule", "inet", "nekolink", chainMSS,
@@ -1293,59 +864,45 @@ func (v *VPNInstance) setupSecurityRules(iface string) {
 	runCmd("nft", "add", "rule", "inet", tableName, "input", "meta", "l4proto", "{ icmp, icmpv6 }", "accept")
 
 	if v.Cfg.Protocol == "raw" || v.Cfg.Protocol == "wg-raw" {
-		if v.Cfg.Protocol == "wg-raw" && v.Cfg.UseNATT {
-			runCmd("nft", "add", "rule", "inet", tableName, "input", "udp", "dport", fmt.Sprintf("%d", v.Cfg.ListenPort), "accept")
+		if v.Cfg.Protocol == "wg-raw" && v.Cfg.CustomProtocol == 17 {
+			runCmd("nft", "add", "rule", "inet", tableName, "input", "udp", "dport", fmt.Sprintf("%d", v.Cfg.ServerBindPort), "accept")
 		} else {
-			protoNum := v.Cfg.IPProtocolNum
+			protoNum := v.Cfg.CustomProtocol
 			runCmd("nft", "add", "rule", "inet", tableName, "input", "meta", "l4proto", fmt.Sprintf("%d", protoNum), "accept")
 		}
 	} else {
-		port := v.Cfg.ListenPort
+		// Fallback (though protocol must be one of above)
+		port := v.Cfg.ServerBindPort
 		runCmd("nft", "add", "rule", "inet", tableName, "input", "udp", "dport", fmt.Sprintf("%d", port), "accept")
 	}
 
 	runCmd("nft", "add", "rule", "inet", tableName, "input", "ct", "state", "invalid", "drop")
 }
 
-// --- 网络初始化 ---
-
 func (v *VPNInstance) InitNetwork() {
 	if v.Cfg.Protocol == "wg-raw" {
-		// wg-raw 模式不需要在此初始化 ConnRaw，由 WireGuard Device 自己管理 RawBind
+		// Managed by WG
 	} else {
-		// Assume Raw
 		v.initRaw()
 	}
 }
 
-// --- 遗留 Raw 逻辑 ---
-// v6.0: Raw 模式完整保留 (Expert Mode)
-
 func (v *VPNInstance) initRaw() {
-	numConns := 1 // 核心：只打开一个 Raw 句柄以避免 DUP
+	numConns := 1
 
-	// 检测 IP 类型
-	testIP := v.Cfg.PeerAddr
-	if v.Cfg.Mode == "server" {
-		testIP = v.Cfg.ListenAddr
-	}
+	// Bind to 0.0.0.0 by default or BindPort?
+	// Old code listened on Custom Proto.
+
+	protoStr := fmt.Sprintf("ip4:%d", v.Cfg.CustomProtocol)
+	// Check for IPv6 based on VPNAddr? No, based on bind addr.
+	// We don't have bind addr for Raw, only Port.
+	// Assume IPv4 for now unless I parse something else.
 	
-	protoStr := fmt.Sprintf("ip4:%d", v.Cfg.IPProtocolNum)
-	if strings.Contains(testIP, ":") {
-		v.IsIPv6 = true
-		protoStr = fmt.Sprintf("ip6:%d", v.Cfg.IPProtocolNum)
-		log.Printf("[RAW] IPv6 自定义协议模式 (Proto: %d)", v.Cfg.IPProtocolNum)
-	}
-
 	v.ConnRaw = make([]*net.IPConn, numConns)
 	for i := 0; i < numConns; i++ {
-		var lAddr *net.IPAddr
-		if v.Cfg.Mode == "server" && v.Cfg.ListenAddr != "0.0.0.0" && v.Cfg.ListenAddr != "[::]" {
-			lAddr, _ = net.ResolveIPAddr("ip", v.Cfg.ListenAddr)
-		}
-		conn, err := net.ListenIP(protoStr, lAddr)
+		conn, err := net.ListenIP(protoStr, nil) // Listen on all interfaces
 		if err != nil {
-			log.Fatalf("Raw 监听失败: %v", err)
+			log.Fatalf("Raw Listen Failed: %v", err)
 		}
 		conn.SetReadBuffer(32 << 20)
 		conn.SetWriteBuffer(32 << 20)
@@ -1353,46 +910,38 @@ func (v *VPNInstance) initRaw() {
 	}
 
 	if v.Cfg.Mode == "client" {
-		v.ClientRemoteIP, _ = net.ResolveIPAddr("ip", v.Cfg.PeerAddr)
+		v.ClientRemoteIP, _ = net.ResolveIPAddr("ip", v.Cfg.ClientRemoteIP)
 	}
 }
 
-
 func (v *VPNInstance) rawReaderLoop(idx int) {
 	conn := v.ConnRaw[idx]
-	
-	// Pre-allocate buffer pointer once
 	bufPtr := bufPool.Get().(*[]byte)
 	
 	for {
 		buf := *bufPtr
 		n, addr, err := conn.ReadFromIP(buf)
 		if err != nil || n < NonceSize+Overhead { 
-			continue // Keep current buffer and try again
+			continue
 		}
 
 		if v.Cfg.Mode == "server" { v.ServerPeerIP.Store(addr) }
 		
-		// 0. Check for Handshake (0xFE)
 		if buf[0] == 0xFE {
 			aPort := netip.AddrPortFrom(netip.AddrFrom4([4]byte{addr.IP[0], addr.IP[1], addr.IP[2], addr.IP[3]}), 0)
 			v.onHandshakeReceived(buf[:n], aPort)
-			continue // Handshake doesn't need reordering, reuse buffer
+			continue
 		}
 
-		// Dispatch to RX Workers (Parallel Decryption)
 		select {
 		case v.rxDispatchChan <- rxPacket{bufPtr: bufPtr, n: n, addr: addr}:
-			// Ownership transferred, get new buffer
 			bufPtr = bufPool.Get().(*[]byte)
 		default:
-			// Drop if full to apply backpressure (Reuse buffer)
 		}
 	}
 }
 
 func (v *VPNInstance) XDPReaderLoop(idx int) {
-	// XDP Reader (Producer) + Parallel Encryption Workers
 	txChan := make(chan txPacket, 8192)
 
 	for i := 0; i < v.numWorkers; i++ {
@@ -1412,19 +961,16 @@ func (v *VPNInstance) XDPReaderLoop(idx int) {
 				}
 				
 				if target != nil && len(v.ConnRaw) > 0 {
-					// Structure Nonce
 					vVal := atomic.AddUint64(&v.nonceCounter, 1)
 					binary.BigEndian.PutUint64(nonce[0:8], vVal)
 					binary.BigEndian.PutUint32(nonce[8:12], v.SessionID)
 
-					// Encrypt (Use Seal with correct length)
 					cipherText := aead.Seal(nil, nonce, pkt, nil)
 					finalPayload := append(nonce, cipherText...)
 
 					v.ConnRaw[0].WriteToIP(finalPayload, target)
 				}
 				
-				// Return buffer to pool
 				bufPool.Put(txPkt.bufPtr)
 			}
 		}(i)
@@ -1440,13 +986,9 @@ func (v *VPNInstance) XDPReaderLoop(idx int) {
 		for _, pkt := range pkts {
 			if len(pkt) < 14 { continue }
 			
-			// Copy buffer from XDP Umem using Pool
 			bufPtr := bufPool.Get().(*[]byte)
-			// Ensure the buffer is large enough, though bufPool.New already makes it 2048
 			if cap(*bufPtr) < len(pkt) {
-				// This should ideally not happen if BufSize is set correctly
-				// but as a safeguard, if it's too small, get a new one.
-				bufPool.Put(bufPtr) // Return the too-small buffer
+				bufPool.Put(bufPtr)
 				newBuf := make([]byte, len(pkt))
 				bufPtr = &newBuf
 			}
@@ -1455,17 +997,11 @@ func (v *VPNInstance) XDPReaderLoop(idx int) {
 			select {
 			case txChan <- txPacket{bufPtr: bufPtr, n: len(pkt)}:
 			default:
-				// Buffer full: must drop to prevent deadlock
 				bufPool.Put(bufPtr)
 			}
 		}
 	}
 }
-
-
-
-// --- XDP Reader/Writer (Raw Mode 2) ---
-// Note: XDPReaderLoop implemented above to resolve scope issues.
 
 func (v *VPNInstance) rxWorkerLoop(wIdx int) {
 	aead := v.aeadPool[wIdx%len(v.aeadPool)]
@@ -1473,23 +1009,17 @@ func (v *VPNInstance) rxWorkerLoop(wIdx int) {
 	for pkt := range v.rxDispatchChan {
 		buf := (*pkt.bufPtr)[:pkt.n]
 
-		// Handshake already handled by Dispatcher
 		if len(buf) < NonceSize+Overhead {
 			bufPool.Put(pkt.bufPtr)
 			continue
 		}
 
-		// 1. Extract Sequence and SessionID
 		seq := binary.BigEndian.Uint64(buf[0:8])
 		sess := binary.BigEndian.Uint32(buf[8:12])
 
-		// 2. Decrypt
-		// Re-slice to separate Nonce and CipherText
 		nonce := buf[:NonceSize]
 		cipherText := buf[NonceSize:]
 
-		// Decrypt in-place (overwrite cipherText)
-		// We use buf[NonceSize:NonceSize] as dst to start writing where cipherText begins
 		plain, err := aead.Open(buf[NonceSize:NonceSize], nonce, cipherText, nil)
 
 		if err == nil {
@@ -1500,36 +1030,9 @@ func (v *VPNInstance) rxWorkerLoop(wIdx int) {
 				BufReq:    pkt.bufPtr,
 			}
 		} else {
-			// Decrypt failed
 			bufPool.Put(pkt.bufPtr)
 		}
 	}
-}
-
-func (v *VPNInstance) encryptInto(plain []byte, aead cipher.AEAD, dst []byte) []byte {
-	outSize := NonceSize + len(plain) + Overhead
-	if len(dst) < outSize { return nil }
-	nonce := dst[:NonceSize]
-	vVal := atomic.AddUint64(&v.nonceCounter, 1)
-	binary.BigEndian.PutUint64(nonce[0:8], vVal)
-	binary.BigEndian.PutUint32(nonce[8:12], v.SessionID)
-	for i := 12; i < NonceSize; i++ { nonce[i] = 0 }
-	aead.Seal(dst[NonceSize:NonceSize], nonce, plain, nil)
-	return dst[:outSize]
-}
-
-func (v *VPNInstance) sendRawOptimized(plain []byte, aead cipher.AEAD) {
-	dstPtr := bufPool.Get().(*[]byte)
-	encrypted := v.encryptInto(plain, aead, *dstPtr)
-	if encrypted != nil {
-		addr := v.ClientRemoteIP
-		if v.Cfg.Mode == "server" { addr = v.ServerPeerIP.Load() }
-		if addr != nil {
-			idx := atomic.AddUint32(&v.rawSendIdx, 1) % uint32(len(v.ConnRaw))
-			v.ConnRaw[idx].WriteToIP(encrypted, addr)
-		}
-	}
-	bufPool.Put(dstPtr)
 }
 
 func (v *VPNInstance) packetOrderedWriter() {
@@ -1539,8 +1042,6 @@ func (v *VPNInstance) packetOrderedWriter() {
 	
 	firstPacket := true
 
-	// Timer for missing packet recovery
-	// Optimized: Reduced from 20ms to 5ms to reduce RTT spikes
 	const ReorderTimeout = 5 * time.Millisecond
 	const HeadOfLineLimit = 50
 
@@ -1552,18 +1053,15 @@ func (v *VPNInstance) packetOrderedWriter() {
 		case pkt, ok := <-v.reorderChan:
 			if !ok { return }
 			
-			// Session Reset Detection
 			if pkt.SessionID != currentSessionID {
 				if !firstPacket {
-					log.Printf("[Reorderer] Session Change Detected: %x -> %x. Resetting Sequence.", currentSessionID, pkt.SessionID)
+					log.Printf("[Reorderer] Session Change: %x -> %x", currentSessionID, pkt.SessionID)
 				}
 				currentSessionID = pkt.SessionID
-				// Clear buffer for old session
 				for k, p := range buffer {
 					bufPool.Put(p.BufReq)
 					delete(buffer, k)
 				}
-				// Reset Seq to this packet's seq (Latch on)
 				nextSeq = pkt.Seq
 				firstPacket = false
 			}
@@ -1572,7 +1070,7 @@ func (v *VPNInstance) packetOrderedWriter() {
 				nextSeq = pkt.Seq
 				firstPacket = false
 				currentSessionID = pkt.SessionID
-				log.Printf("[Reorderer] Init Sequence: %d (Session %x)", nextSeq, currentSessionID)
+				log.Printf("[Reorderer] Init Sequence: %d", nextSeq)
 			}
 
 			if pkt.Seq < nextSeq {
@@ -1582,13 +1080,10 @@ func (v *VPNInstance) packetOrderedWriter() {
 			
 			buffer[pkt.Seq] = pkt
 			
-			// OPTIMIZATION: Check Head Of Line Limit
-			// If we have packets far ahead, assume packet loss and skip nextSeq to unblock stream
 			if _, ok := buffer[nextSeq+HeadOfLineLimit]; ok {
-				nextSeq++ // Skip the missing one
+				nextSeq++
 			}
 
-			// Flush consecutive
 			moved := false
 			for {
 				p, ok := buffer[nextSeq]
@@ -1606,17 +1101,14 @@ func (v *VPNInstance) packetOrderedWriter() {
 			}
 
 		case <-timer.C:
-			// Timeout: If waiting for a missing packet, skip it
 			if len(buffer) > 0 {
 				var minSeq uint64 = 0xFFFFFFFFFFFFFFFF
 				for s := range buffer {
 					if s < minSeq { minSeq = s }
 				}
 				if minSeq != 0xFFFFFFFFFFFFFFFF && minSeq > nextSeq {
-					// Timeout occurred, skip to next available packet
 					nextSeq = minSeq
 					
-					// Now flush from current minSeq
 					for {
 						p, ok := buffer[nextSeq]
 						if !ok { break }
@@ -1630,7 +1122,6 @@ func (v *VPNInstance) packetOrderedWriter() {
 			timer.Reset(ReorderTimeout)
 		}
 
-		// Prevent Bloat (Dynamic Window)
 		if len(buffer) > 2048 {
 			var minSeq uint64 = 0xFFFFFFFFFFFFFFFF
 			for s := range buffer {
@@ -1643,15 +1134,7 @@ func (v *VPNInstance) packetOrderedWriter() {
 	}
 }
 
-func (v *VPNInstance) handleIncomingPacket(enc []byte) {
-	// Deprecated: Logic moved to rawReaderLoop & Pipeline
-}
-
 func (v *VPNInstance) writeTUN(data []byte) {
-	// Raw Mode Tx Path: Internet -> Decrypted -> Here -> XDP -> veth_app
-	// L2 Tunnel Mode: "data" is ALREADY a full Ethernet Frame.
-	// We just transmit it directly.
-	
 	if v.Xsk != nil {
 		v.Xsk.Transmit(data)
 	}
@@ -1660,88 +1143,26 @@ func (v *VPNInstance) writeTUN(data []byte) {
 func main() {
 	cfgPath := flag.String("c", "config.json", "Config path")
 	debug := flag.Bool("debug", false, "Debug mode")
-	migrate := flag.Bool("migrate", false, "Migrate legacy config to new format and exit")
 	flag.Parse()
 	debugMode = *debug
 
-	// Intelligent Config Probing (V2 Priority)
-	targetPath := *cfgPath
-
-	// Allow BPF Maps Memlock (Essential for XDP)
 	if err := rlimit.RemoveMemlock(); err != nil {
 		log.Printf("[Init] Warning: Failed to remove memlock limit: %v", err)
 	}
 	
-	// If user didn't explicitly override via -c, or if we want to honor v2 existence:
-	// We probe: 1. /etc/neko-link/config.v2.json  2. ./config.v2.json
-	v2ProbePaths := []string{"/etc/neko-link/config.v2.json", "config.v2.json"}
-	
-	v2Found := ""
-	for _, p := range v2ProbePaths {
-		if _, err := os.Stat(p); err == nil {
-			v2Found = p
-			break
-		}
-	}
-
-	if v2Found != "" {
-		log.Printf("[Init] 检测到 V2 配置文件 (%s)，已自动优先加载。", v2Found)
-		targetPath = v2Found
-	}
-
-	data, err := os.ReadFile(targetPath)
+	data, err := os.ReadFile(*cfgPath)
 	if err != nil {
-		log.Fatalf("无法读取配置文件 (%s): %v", targetPath, err)
+		log.Fatalf("Cannot read config file (%s): %v", *cfgPath, err)
 	}
 
 	var configs []Config
-	var isArray bool
 	if err := json.Unmarshal(data, &configs); err != nil {
 		var single Config
 		if err2 := json.Unmarshal(data, &single); err2 == nil {
 			configs = append(configs, single)
-			isArray = false
 		} else {
-			log.Fatalf("配置文件格式错误: %v", err)
+			log.Fatalf("Config Format Error: %v", err)
 		}
-	} else {
-		isArray = true
-	}
-
-	for i := range configs {
-		configs[i].ParseLegacy()
-		configs[i].PerformMigration()
-	}
-
-	if *migrate {
-		log.Printf(">>> [Migrate] 正在执行 V2.1 配置升级...")
-		
-		var output interface{}
-		if isArray {
-			var list []map[string]interface{}
-			for _, c := range configs {
-				list = append(list, c.MapConfigByProtocol())
-			}
-			output = list
-		} else {
-			output = configs[0].MapConfigByProtocol()
-		}
-
-		newData, _ := json.MarshalIndent(output, "", "  ")
-		
-		// Priority: try to save to /etc/neko-link/config.v2.json
-		v2Path := "/etc/neko-link/config.v2.json"
-		if err := os.MkdirAll("/etc/neko-link", 0755); err != nil {
-			v2Path = "config.v2.json" // fallback to current dir
-		}
-
-		if err := os.WriteFile(v2Path, newData, 0644); err != nil {
-			log.Printf("保存失败: %v", err)
-		} else {
-			log.Printf(">>> [Migrate] 升级完成！新配置文件已生成至: %s", v2Path)
-			log.Printf(">>> 提示: 程序下次运行将完美支持 wg-raw 全套特性喵~")
-		}
-		os.Exit(0)
 	}
 
 	var instances []*VPNInstance
@@ -1754,12 +1175,12 @@ func main() {
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
 	sig := <-c
-	log.Printf("接收到信号 %v，正在安全退出...", sig)
+	log.Printf("Received Signal %v, Exiting...", sig)
 
 	for _, v := range instances {
 		v.Cleanup()
 	}
-	log.Printf("清理完成，再见，主人！")
+	log.Printf("Bye!")
 }
 
 func runCmd(name string, args ...string) error {
