@@ -32,7 +32,8 @@ go build -o neko-link main.go structs.go wg_bind.go
   "mode": "server",           // server 或 client
   "listen_addr": "0.0.0.0",   // 服务端监听
   "peer_addr": "1.2.3.4",     // 客户端目标 (client 必填)
-  "key": "myaespassword",     // 共享密码，保持一致即可
+  "key": "myaespassword",     // 共享密码 (两端一致)
+  // "private_key": "",       // 留空即可！程序会自动生成真正的 WireGuard 密钥并交换
   "protocol": "wg-raw",       // 开启 Shadow WireGuard 模式
   "local_addr": "10.0.0.1/24",// 隧道内部 IP
   "mtu": 1400                 // 推荐 1400
