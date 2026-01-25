@@ -37,10 +37,20 @@ int tc_shadow_ingress(struct __sk_buff *skb) {
     if ((void *)ip + sizeof(*ip) > data_end) return TC_ACT_OK;
 
     // Raw 模式仅检查允许列表
-    __u8 *allowed = bpf_map_lookup_elem(&raw_allow_map, &ip->protocol);
+    __u8 proto = ip->protocol; // 复制到栈变量以确保内存对齐 (BPF 要求)
+    __u8 *allowed = bpf_map_lookup_elem(&raw_allow_map, &proto);
     if (allowed) {
+        // bpf_printk("Allowed Proto: %d\n", proto);
         return TC_ACT_OK; // 允许通过
     }
+    
+    // 如果没有匹配，默认也通过？或者 Drop？
+    // 根据设计，我们只“Steer”也就是“标记/允许”，还是说要拦截非允许流量？
+    // 如果 Raw Socket 仅用于特定协议，那么非该协议的流量本来就不会进 Raw Socket。
+    // 但为了纯净，我们可以选择忽略。
+    // 目前保持 TC_ACT_OK 以防误杀。
+    // bpf_printk("Pass Unknown Proto: %d\n", proto);
+    return TC_ACT_OK;
 
     return TC_ACT_OK;
 }
