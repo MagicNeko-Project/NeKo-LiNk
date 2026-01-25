@@ -436,10 +436,10 @@ func (v *VPNInstance) Start() {
 		for i := 0; i < v.numWorkers; i++ {
 			go v.TUNReaderLoopRaw(i)
 		}
-		// 所有的 reader goroutine 现在共享同一个底层连接，以避免 DUP
-		for i := 0; i < v.numWorkers; i++ {
-			go v.rawReaderLoop(0)
-		}
+		// ⚠️ [Stablity Fix] 强制单线程读取以避免 Raw 模式下的包乱序 (Packet Reordering)
+		// 多线程读取会导致 TCP 严重丢包重传。单线程虽然有瓶颈，但更稳定。
+		log.Printf("[RAW] 已启用单线程读取模式以保证顺序 (Anti-Reordering Active)")
+		go v.rawReaderLoop(0)
 	}
 }
 
