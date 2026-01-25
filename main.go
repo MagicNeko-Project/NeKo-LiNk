@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -1675,23 +1676,62 @@ func main() {
 		log.Printf("[Init] Warning: Failed to remove memlock limit: %v", err)
 	}
 
-	data, err := os.ReadFile(*cfgPath)
+	var configs []Config
+	
+	// Check if path is directory or file
+	fi, err := os.Stat(*cfgPath)
 	if err != nil {
-		log.Fatalf("无法读取配置文件: %v", err)
+		log.Fatalf("无法读取配置路径: %v", err)
 	}
 
-	var configs []Config
-	var isArray bool
-	if err := json.Unmarshal(data, &configs); err != nil {
-		var single Config
-		if err2 := json.Unmarshal(data, &single); err2 == nil {
-			configs = append(configs, single)
-			isArray = false
-		} else {
-			log.Fatalf("配置文件格式错误: %v", err)
+	if fi.IsDir() {
+		files, err := os.ReadDir(*cfgPath)
+		if err != nil {
+			log.Fatalf("读取配置目录失败: %v", err)
+		}
+		
+		for _, f := range files {
+			if !f.IsDir() && strings.HasSuffix(f.Name(), ".json") {
+				fullPath := filepath.Join(*cfgPath, f.Name())
+				data, err := os.ReadFile(fullPath)
+				if err != nil {
+					log.Printf("Warning: Skipping file %s: %v", f.Name(), err)
+					continue
+				}
+				
+				var fileConfigs []Config
+				// Try parsing as array
+				if err := json.Unmarshal(data, &fileConfigs); err != nil {
+					// Try parsing as single object
+					var single Config
+					if err2 := json.Unmarshal(data, &single); err2 == nil {
+						fileConfigs = append(fileConfigs, single)
+					} else {
+						log.Printf("Warning: Invalid JSON in %s: %v", f.Name(), err)
+						continue
+					}
+				}
+				configs = append(configs, fileConfigs...)
+				log.Printf("[Init] Loaded config from %s", f.Name())
+			}
+		}
+		if len(configs) == 0 {
+			log.Fatalf("目录 %s 中未找到有效配置文件", *cfgPath)
 		}
 	} else {
-		isArray = true
+		// Single File Mode
+		data, err := os.ReadFile(*cfgPath)
+		if err != nil {
+			log.Fatalf("无法读取配置文件: %v", err)
+		}
+		if err := json.Unmarshal(data, &configs); err != nil {
+			var single Config
+			if err2 := json.Unmarshal(data, &single); err2 == nil {
+				configs = append(configs, single)
+			} else {
+				log.Fatalf("配置文件格式错误: %v", err)
+			}
+		}
 	}
 
 	for i := range configs {
@@ -1702,7 +1742,7 @@ func main() {
 	if *migrate {
 		log.Printf(">>> 正在优化并清理配置文件布局...")
 		var outData []byte
-		if isArray {
+		if true {
 			outData, _ = json.MarshalIndent(configs, "", "  ")
 		} else {
 			outData, _ = json.MarshalIndent(configs[0], "", "  ")
