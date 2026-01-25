@@ -7,6 +7,7 @@
 
 *   **Shadow WireGuard (wg-raw)**: 官方 WireGuard 内核，但**不走 UDP**。流量被巧妙地封装在自定义 IP 协议号或 **TCP 伪装协议**中。
 *   **eBPF / 幻影模式 (Phantom Mode)**: 采用 Linux 最前沿的 **eBPF/XDP** 技术，直接在物理网卡驱动层捕获和重定向流量。系统甚至不再需要虚拟网卡，彻底隐身！
+*   **L2 (以太网) 隧道支持**: 在 `protocol: "raw"` 模式下，NekoLink 提供完整的 **Layer 2 (以太网帧) 隧道**。它不仅传输 IP，还透传 ARP、DHCP 甚至二层组播流量，让隧道两端像接在同一个交换机上一样。
 *   **多核加速流水线**: 深度优化的“单生产者-多消费者”模型，支持多核并行加解密，即使在 10Gbps 负载下也能保持低延迟。
 *   **全链路内存复用**: 引入自适应 `sync.Pool` 内存池，全链路几乎零内存分配，极大降低了垃圾回收 (GC) 对网络延迟的影响。
 *   **自进化配置引擎**: 内置 `-migrate` 模式，自动识别旧版配置并平滑升级至最新架构，支持物理接口自动探测。
@@ -58,9 +59,10 @@ NekoLink 的核心威力源自对 **eBPF (Extended Berkeley Packet Filter)** 的
 ## 📥 安装与升级
 - **一键安装服务**: `sudo ./install_service.sh`
 - **一键调试**: `sudo bash debug.sh` (实时查看加解密流水线状态)
-- **V1.5 配置升级**: `./neko-link -migrate -c config.json`
-  - 程序会读取旧配置，并生成一个纯净的 `config.json.v15`。
-  - **新特性**: V1.5 格式会根据您选择的 `protocol` 自动过滤字段。例如 `wg-raw` 模式将不再显示 `local_addr` 等无关字段，让配置更专注、更清爽喵~
+- **V2 配置极致升级**: `./neko-link -migrate -c config.json`
+  - 程序会自动在 `/etc/neko-link/config.v2.json` 生成 V2 标准配置文件。
+  - **智能探测**: 下次启动时，若存在 `config.v2.json`，程序将**自动锁定该文件**并跳过旧的 `config.json`。
+  - **协议自适应**: V2 格式仅包含您当前协议所需的必要字段，拒绝配置臃肿喵~
 
 ---
 主人，快来体验这由 eBPF 驱动的、极致丝滑的“影子隧道”世界吧喵！(≧∇≦)/🐾
