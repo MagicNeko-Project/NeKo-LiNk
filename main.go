@@ -302,7 +302,11 @@ func (v *VPNInstance) setupKernelWireGuard(iface string) {
 	// WireGuard interfaces don't auto-generate IPv6 LL, so we add one.
 	llBuf := make([]byte, 8)
 	rand.Read(llBuf)
-	llIP := fmt.Sprintf("fe80::%x%x:%x%x/64", llBuf[0:2], llBuf[2:4], llBuf[4:6], llBuf[6:8])
+	llIP := fmt.Sprintf("fe80::%s:%s:%s:%s/64", 
+		fmt.Sprintf("%x", llBuf[0:2]), 
+		fmt.Sprintf("%x", llBuf[2:4]), 
+		fmt.Sprintf("%x", llBuf[4:6]), 
+		fmt.Sprintf("%x", llBuf[6:8]))
 	runCmd("ip", "addr", "add", llIP, "dev", iface)
 	
 	// Safe MTU for tunneled traffic
@@ -1213,6 +1217,11 @@ func tryRepairJSON(input string) string {
 	for arrBrackets > 0 { input += "]"; arrBrackets-- }
 	// 多删掉的也补回来 (如果由于正则替换导致不匹配)
 	for objBrackets < 0 { input = "{" + input; objBrackets++ }
+
+	// 6. 强制数字去引号 (针对 "port": "23333" -> "port": 23333)
+	// 匹配：冒号后面跟着引号包裹的纯数字
+	reNum := regexp.MustCompile(`(:\s*)"([0-9]+)"`)
+	input = reNum.ReplaceAllString(input, `$1$2`)
 
 	return input
 }
