@@ -27,7 +27,7 @@ import (
 	"golang.org/x/crypto/curve25519"
 	"net/netip"
 	"crypto/rand"
-	"vpn/xdp"
+
 )
 
 // --- 全局分发 ---
@@ -62,8 +62,6 @@ type Config struct {
 	IPProtocolNum int  `json:"ip_protocol_num,omitempty"`
 	UseNATT       bool `json:"use_nat_t,omitempty"`
 	UseTCP        bool `json:"use_tcp,omitempty"`
-	UseEBPF       bool `json:"use_ebpf,omitempty"`
-	EBPFDevice    string `json:"ebpf_device,omitempty"`
 	UDPPort       int  `json:"udp_port,omitempty"`
 	Debug         bool `json:"debug,omitempty"`
 
@@ -104,32 +102,15 @@ func (c *Config) ParseLegacy() (changed bool) {
 	// (如果有其它代码引用了旧字段，可以在这里同步，但建议全部改为引用新字段)
 	
 	// 2. 协议迁移 (UDP/TCP/QUIC -> wg-raw)
-	// 注意：这里移除了 "raw"，因为主人希望保留原有的 legacy raw 模式。
-	c.Protocol = strings.ToLower(c.Protocol) // Ensure lowercase normalization
-	oldProto := c.Protocol
+	oldProto := strings.ToLower(c.Protocol)
 	if oldProto == "udp" || oldProto == "tcp" || oldProto == "quic" || oldProto == "" {
 		if oldProto == "tcp" {
 			c.UseTCP = true
 			c.IPProtocolNum = 6
 		}
 		c.Protocol = "wg-raw"
-		log.Printf("[%s] 自动将旧版协议 %s 升级为 wg-raw (Fake TCP: %v, eBPF: %v)", c.InterfaceName, oldProto, c.UseTCP, c.UseEBPF)
+		log.Printf("[%s] 自动将旧版协议 %s 升级为 wg-raw (Fake TCP: %v)", c.InterfaceName, oldProto, c.UseTCP)
 		changed = true
-	}
-
-	// 2.1 EBPF 设备冲突解决
-	// 如果开启了 EBPF 但还没指定 EBPFDevice，且 InterfaceName 看起来像个物理网卡名
-	if c.UseEBPF && c.EBPFDevice == "" {
-		isPhysical := strings.HasPrefix(c.InterfaceName, "eth") || 
-					  strings.HasPrefix(c.InterfaceName, "en") || 
-					  strings.HasPrefix(c.InterfaceName, "wl")
-		
-		if isPhysical {
-			c.EBPFDevice = c.InterfaceName
-			c.InterfaceName = "neko0" // 虚拟网卡换个名字
-			log.Printf("[EBPF] 检测到接口冲突，已自动调整：物理网卡=%s, 虚拟网卡=%s", c.EBPFDevice, c.InterfaceName)
-			changed = true
-		}
 	}
 	
 	// 3. 默认值设置
@@ -160,23 +141,12 @@ func (c *Config) ParseLegacy() (changed bool) {
 		c.ListenPort = 23333
 		changed = true
 	}
-	if c.Protocol == "wg-raw" {
-		if c.WGPort == 0 {
-			c.WGPort = 51820 // Default internal WG port only for wg-raw
-			changed = true
-		}
-	} else {
-		if c.WGPort != 0 {
-			c.WGPort = 0 // Clear WG port for non-WG modes
-			changed = true
-		}
+	if c.WGPort == 0 {
+		c.WGPort = 51820 // Default internal WG port
+		changed = true
 	}
 	if c.InterfaceName == "" {
 		c.InterfaceName = "neko0"
-		changed = true
-	}
-	if c.UseEBPF && c.EBPFDevice == "" {
-		c.EBPFDevice = "eth0" // 默认物理网卡
 		changed = true
 	}
 	return
@@ -227,8 +197,7 @@ type VPNInstance struct {
 
 	// --- Raw 模式 (Legacy / High Perf) ---
 	// 保留原有逻辑不动
-	ConnRaw        []net.PacketConn // 通用接口以支持 IPConn 和 UDPConn (eBPF)
-	ebpfRawEngine  *xdp.ShadowXEngine
+	ConnRaw        []*net.IPConn
 	ClientRemoteIP *net.IPAddr
 	ServerPeerIP   atomic.Pointer[net.IPAddr]
 	rawSendIdx     uint32
@@ -244,13 +213,7 @@ type VPNInstance struct {
 	
 	// WG Device Ref
 	wgDevice *device.Device
-	ebpfRawCfg xdp.ShadowXConfig
 }
-
-var (
-	usedPorts      = make(map[uint16]string)
-	usedPortsMutex sync.Mutex
-)
 
 func NewVPNInstance(cfg Config) *VPNInstance {
 	cfg.ParseLegacy()
@@ -293,7 +256,7 @@ func generateWGKey() ([]byte, []byte) {
 
 func (v *VPNInstance) startWireGuardRaw() {
 	// 1. Create Bind
-	bind := NewRawBind(v.Cfg.IPProtocolNum, v.Cfg.UseNATT, v.Cfg.UseTCP, v.Cfg.UseEBPF, v.Cfg.EBPFDevice, v.Cfg.ListenPort, v.Cfg.PeerPort)
+	bind := NewRawBind(v.Cfg.IPProtocolNum, v.Cfg.UseNATT, v.Cfg.UseTCP, v.Cfg.ListenPort, v.Cfg.PeerPort)
 	
 	// 2. Client Mode: Set Remote
 	if v.Cfg.Mode == "client" {
@@ -422,23 +385,15 @@ func (v *VPNInstance) Start() {
 	log.Printf("[%s] NekoLink (WireGuard Edition) 启动中 - 核心: %d, MTU: %d",
 		v.Cfg.InterfaceName, v.numWorkers, v.Cfg.MTU)
 
-	// Check Port Collision early
-	usedPortsMutex.Lock()
-	if owner, exists := usedPorts[uint16(v.Cfg.ListenPort)]; exists {
-		log.Fatalf("❌ 配置错误: 端口 %d 已被实例 %s 占用！每个 NekoLink 实例必须使用唯一的监听端口喵！", v.Cfg.ListenPort, owner)
-	}
-	usedPorts[uint16(v.Cfg.ListenPort)] = v.Cfg.InterfaceName
-	usedPortsMutex.Unlock()
-
 	v.InitTUN()
 	v.InitNetwork()
 	
 	if v.Cfg.Protocol == "wg-raw" {
-		log.Printf("[%s] 启动 wg-raw 模式 (Embedded WireGuard over Raw Socket)", v.Cfg.InterfaceName)
+		log.Printf("[Init] 启动 wg-raw 模式 (Embedded WireGuard over Raw Socket)")
 		go v.startWireGuardRaw()
 	} else {
 		// Legacy Raw 模式 (保留)
-		log.Printf("[%s] 启动 Raw 模式 (High Performance Encrypted IP)", v.Cfg.InterfaceName)
+		log.Printf("[Init] 启动 Raw 模式 (High Performance Encrypted IP)")
 		for i := 0; i < v.numWorkers; i++ {
 			go v.TUNReaderLoopRaw(i)
 		}
@@ -447,14 +402,6 @@ func (v *VPNInstance) Start() {
 			go v.rawReaderLoop(0)
 		}
 	}
-}
-
-func (v *VPNInstance) Stop() {
-	if v.ebpfRawEngine != nil {
-		v.ebpfRawEngine.Unregister(v.ebpfRawCfg)
-		v.ebpfRawEngine.Close()
-	}
-	// Note: We could also close TunDev and ConnRaw here if needed.
 }
 
 // --- Producer: UDP (Net) -> Pipeline ---
@@ -567,81 +514,19 @@ func (v *VPNInstance) initRaw() {
 		log.Printf("[RAW] IPv6 自定义协议模式 (Proto: %d)", v.Cfg.IPProtocolNum)
 	}
 
-	if v.Cfg.UseEBPF {
-		// eBPF engine will be initialized per-worker-bind later in wg_bind logic or connection startup.
-		// For legacy raw mode here, we don't strictly need to pre-load.
-		// However, if we want to retain the engine handle for registration:
-		
-		// ⚠️ [Policy Update] Force Disable eBPF for Legacy Raw Mode
-		if !v.Cfg.UseTCP && v.Cfg.Protocol == "raw" {
-			log.Printf("[RAW] \u26A0\uFE0F 策略调整: Raw 模式已强制关闭 eBPF 加速 (仅 wg-raw 启用). 使用标准内核路径.")
-			v.Cfg.UseEBPF = false
-		} else {
-			engineMode := "raw"
-			if v.Cfg.UseTCP { engineMode = "tcp" }
-			
-			if engine, err := xdp.GetShadowXEngine(v.Cfg.EBPFDevice, engineMode); err != nil {
-				log.Printf("[EBPF] 核心加载失败: %v. 回退到纯用户态 Raw Socket.", err)
-				v.Cfg.UseEBPF = false
-			} else {
-				v.ebpfRawEngine = engine
-			}
-		}
-	}
-
-	v.ConnRaw = make([]net.PacketConn, numConns)
+	v.ConnRaw = make([]*net.IPConn, numConns)
 	for i := 0; i < numConns; i++ {
 		var lAddr *net.IPAddr
 		if v.Cfg.Mode == "server" && v.Cfg.ListenAddr != "0.0.0.0" && v.Cfg.ListenAddr != "[::]" {
 			lAddr, _ = net.ResolveIPAddr("ip", v.Cfg.ListenAddr)
 		}
-
-
-
-		if v.Cfg.UseEBPF {
-			addr := &net.UDPAddr{IP: net.IPv4zero, Port: v.Cfg.ListenPort}
-			if v.IsIPv6 { addr.IP = net.IPv6zero }
-			conn, err := net.ListenUDP("udp", addr)
-			if err != nil { log.Fatalf("UDP 监听失败: %v", err) }
-			
-			// Capture bound port
-			boundPort := uint16(conn.LocalAddr().(*net.UDPAddr).Port)
-			// 构造 eBPF 配置
-			mode := uint32(1)
-			if v.Cfg.UseTCP { mode = 2 }
-			
-			v.ebpfRawCfg = xdp.ShadowXConfig{
-				InterfaceName: v.Cfg.EBPFDevice,
-				Mode:          mode,
-				LocalPort:     boundPort,
-				RawProto:      uint8(v.Cfg.IPProtocolNum),
-			}
-
-			if err := v.ebpfRawEngine.Register(v.ebpfRawCfg); err != nil {
-				log.Printf("[EBPF] 注册失败: %v. 回退.", err)
-				conn.Close()
-				v.ebpfRawEngine.Close()
-				v.Cfg.UseEBPF = false
-			} else {
-				conn.SetReadBuffer(25 << 20); conn.SetWriteBuffer(25 << 20)
-				v.ConnRaw[i] = conn
-			}
-		} 
-		
-		// Fallback / Standard Raw (If not using eBPF, we MUST clean up any potential eBPF residue)
-		if !v.Cfg.UseEBPF {
-			// Proactive Cleanup: Ensure no zombie TC filters are stealing our packets!
-			// We only do this if we are the "Primary" raw instance (idx 0) and interface looks physical/virtual
-			if i == 0 {
-				log.Printf("[RAW] 正在清理接口 %s 上的旧 eBPF 规则以确保旁路畅通...", v.Cfg.EBPFDevice)
-				exec.Command("tc", "qdisc", "del", "dev", v.Cfg.EBPFDevice, "clsact").Run()
-			}
-
-			conn, err := net.ListenIP(protoStr, lAddr)
-			if err != nil { log.Fatalf("Raw 监听失败: %v", err) }
-			conn.SetReadBuffer(25 << 20); conn.SetWriteBuffer(25 << 20)
-			v.ConnRaw[i] = conn
+		conn, err := net.ListenIP(protoStr, lAddr)
+		if err != nil {
+			log.Fatalf("Raw 监听失败: %v", err)
 		}
+		conn.SetReadBuffer(32 << 20)
+		conn.SetWriteBuffer(32 << 20)
+		v.ConnRaw[i] = conn
 	}
 
 	if v.Cfg.Mode == "client" {
@@ -654,22 +539,10 @@ func (v *VPNInstance) rawReaderLoop(idx int) {
 	conn := v.ConnRaw[idx]
 	buf := make([]byte, BufSize)
 	for {
-		n, addr, err := conn.ReadFrom(buf)
+		n, addr, err := conn.ReadFromIP(buf)
 		if err != nil { continue }
 		if n < NonceSize+Overhead { continue }
-		
-		// 转换地址为 IPAddr 以便统一处理
-		var ipAddr *net.IPAddr
-		switch a := addr.(type) {
-		case *net.IPAddr:
-			ipAddr = a
-		case *net.UDPAddr:
-			ipAddr = &net.IPAddr{IP: a.IP, Zone: a.Zone}
-		}
-
-		if v.Cfg.Mode == "server" && ipAddr != nil {
-			v.ServerPeerIP.Store(ipAddr)
-		}
+		if v.Cfg.Mode == "server" { v.ServerPeerIP.Store(addr) }
 		v.handleIncomingPacket(buf[:n])
 	}
 }
@@ -714,29 +587,11 @@ func (v *VPNInstance) sendRawOptimized(plain []byte, aead cipher.AEAD) {
 	dstPtr := bufPool.Get().(*[]byte)
 	encrypted := v.encryptInto(plain, aead, *dstPtr)
 	if encrypted != nil {
-		var target net.Addr
-		ip := v.ClientRemoteIP
-		if v.Cfg.Mode == "server" { ip = v.ServerPeerIP.Load() }
-		
-		if ip != nil {
+		addr := v.ClientRemoteIP
+		if v.Cfg.Mode == "server" { addr = v.ServerPeerIP.Load() }
+		if addr != nil {
 			idx := atomic.AddUint32(&v.rawSendIdx, 1) % uint32(len(v.ConnRaw))
-			conn := v.ConnRaw[idx]
-
-			// 根据连接类型构造地址
-			if v.Cfg.UseEBPF {
-				target = &net.UDPAddr{IP: ip.IP, Port: v.Cfg.PeerPort}
-				if v.Cfg.Mode == "server" {
-					// 服务端回包给客户端，PeerPort 应该是客户端的监听端口
-					// 但由于 eBPF 模式下我们使用对称端口，这里也用 ListenPort 或从收包地址里学习
-					// 为了简单，我们暂定回物理对端的 PeerPort
-				}
-			} else {
-				target = ip
-			}
-
-			if target != nil {
-				conn.WriteTo(encrypted, target)
-			}
+			v.ConnRaw[idx].WriteToIP(encrypted, addr)
 		}
 	}
 	bufPool.Put(dstPtr)
@@ -802,21 +657,12 @@ func main() {
 		os.Exit(0)
 	}
 
-	var instances []*VPNInstance
 	for _, cfg := range configs {
-		v := NewVPNInstance(cfg)
-		v.Start()
-		instances = append(instances, v)
+		NewVPNInstance(cfg).Start()
 	}
-
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
 	<-c
-	
-	log.Printf(">>> 正在停止所有实例...")
-	for _, v := range instances {
-		v.Stop()
-	}
 }
 
 func runCmd(name string, args ...string) {
