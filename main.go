@@ -205,9 +205,16 @@ type VPNInstance struct {
 	// XDP Socket
 	Xsk *xdp.Socket
 	
+	// Fallback (AF_PACKET)
+	FallbackFd int
+	
 	// Handshake State (for Raw Mode Roaming/Keepalive)
 	remoteAddr   netip.AddrPort
 	remoteAddrMx sync.RWMutex
+}
+
+func htons(v uint16) int {
+	return int((v << 8) | (v >> 8))
 }
 
 type rxPacket struct {
@@ -344,6 +351,7 @@ func (v *VPNInstance) Start() {
 
 	// Initialize AF_XDP
 	appIf := v.Cfg.AppInterface
+	useFallback := false
 
 	xsk, err := xdp.NewSocket(xdp.Config{
 		Interface: appIf,
@@ -351,18 +359,28 @@ func (v *VPNInstance) Start() {
 		RingSize:  2048,
 	})
 	if err != nil {
-		log.Fatalf("AF_XDP 初始化失败: %v", err)
+		log.Printf("AF_XDP 初始化失败 (Permission/Kernel issue): %v. 切换至 Fallback 模式 (AF_PACKET).", err)
+		useFallback = true
+	} else {
+		v.Xsk = xsk
+		// Update BPF Map (Self-Registration)
+		if err := v.Xsk.AddToMap(v.Xsk.XsksMap); err != nil {
+			log.Printf("Warning: XDP Map Update Failed: %v. 切换至 Fallback 模式.", err)
+			v.Xsk = nil // Close handled in cleanup or GC
+			useFallback = true
+		}
 	}
-	v.Xsk = xsk
 
-	// Update BPF Map (Self-Registration)
-	if err := v.Xsk.AddToMap(v.Xsk.XsksMap); err != nil {
-		log.Printf("Warning: Map Update Failed: %v", err)
+	if useFallback {
+		if err := v.initFallback(); err != nil {
+			log.Fatalf("Fallback 初始化失败: %v", err)
+		}
+		log.Printf("[RAW] 启用 Fallback Mode (AF_PACKET)")
+		go v.FallbackReaderLoop(0)
+	} else {
+		log.Printf("[RAW] 启用高性能并行 TX 流水线: 1 Producer -> %d Encryption Workers", v.numWorkers)
+		go v.XDPReaderLoop(0)
 	}
-
-	// 启动写入循环 (AF_XDP -> Encrypt -> IPConn)
-	log.Printf("[RAW] 启用高性能并行 TX 流水线: 1 Producer -> %d Encryption Workers", v.numWorkers)
-	go v.XDPReaderLoop(0)
 
 	// 启动 RX Workers
 	log.Printf("[RAW] 启用高性能并行 RX 流水线: %d Decryption Workers", v.numWorkers)
@@ -370,7 +388,7 @@ func (v *VPNInstance) Start() {
 		go v.rxWorkerLoop(i)
 	}
 
-	// 启动重排序写入器 (Consumer) (Decrypt -> Reorder -> AF_XDP)
+	// 启动重排序写入器 (Consumer) (Decrypt -> Reorder -> AF_XDP/Fallback)
 	go v.packetOrderedWriter()
 
 	// 启动单路读取器 (IPConn -> Decrypt -> Reorder)
@@ -379,6 +397,107 @@ func (v *VPNInstance) Start() {
 
 	// 启动心跳机制
 	go v.handshakeLoop()
+}
+
+func (v *VPNInstance) initFallback() error {
+	// AF_PACKET, SOCK_RAW, ETH_P_ALL
+	proto := htons(syscall.ETH_P_ALL)
+	fd, err := syscall.Socket(syscall.AF_PACKET, syscall.SOCK_RAW, proto)
+	if err != nil {
+		return fmt.Errorf("socket(AF_PACKET) failed: %v", err)
+	}
+	
+	// Bind to Interface
+	iface, err := net.InterfaceByName(v.Cfg.AppInterface)
+	if err != nil {
+		syscall.Close(fd)
+		return fmt.Errorf("interface %s not found: %v", v.Cfg.AppInterface, err)
+	}
+	
+	sll := syscall.SockaddrLinklayer{
+		Protocol: uint16(proto),
+		Ifindex:  iface.Index,
+	}
+	
+	if err := syscall.Bind(fd, &sll); err != nil {
+		syscall.Close(fd)
+		return fmt.Errorf("bind failed: %v", err)
+	}
+	
+	v.FallbackFd = fd
+	return nil
+}
+
+func (v *VPNInstance) FallbackReaderLoop(idx int) {
+	txChan := make(chan txPacket, 8192)
+
+	// Start TX Workers (Encryption)
+	for i := 0; i < v.numWorkers; i++ {
+		go func(wIdx int) {
+			aead := v.aeadPool[wIdx%len(v.aeadPool)]
+			nonce := make([]byte, NonceSize)
+			clientRemote := v.ClientRemoteIP
+
+			for txPkt := range txChan {
+				pkt := (*txPkt.bufPtr)[:txPkt.n]
+				
+				var target *net.IPAddr
+				if v.Cfg.Mode == "client" {
+					target = clientRemote
+				} else {
+					target = v.ServerPeerIP.Load()
+				}
+				
+				if target != nil && len(v.ConnRaw) > 0 {
+					vVal := atomic.AddUint64(&v.nonceCounter, 1)
+					binary.BigEndian.PutUint64(nonce[0:8], vVal)
+					binary.BigEndian.PutUint32(nonce[8:12], v.SessionID)
+
+					cipherText := aead.Seal(nil, nonce, pkt, nil)
+					finalPayload := append(nonce, cipherText...)
+
+					v.ConnRaw[0].WriteToIP(finalPayload, target)
+				}
+				
+				bufPool.Put(txPkt.bufPtr)
+			}
+		}(i)
+	}
+	
+	buf := make([]byte, 65536)
+	for {
+		n, from, err := syscall.Recvfrom(v.FallbackFd, buf, 0)
+		if err != nil {
+			log.Printf("Fallback Read Error: %v", err)
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		
+		// Ignore Outgoing packets (we only want Incoming from veth peer)
+		if sll, ok := from.(*syscall.SockaddrLinklayer); ok {
+			if sll.Pkttype == syscall.PACKET_OUTGOING {
+				continue
+			}
+		}
+		
+		if n < 14 { continue }
+		
+		// Copy buffer to pool (optimization: Could use Pool directly if Recvfrom supported it, 
+		// but syscall uses slice. We copy to safe buffer for pipeline.)
+		bufPtr := bufPool.Get().(*[]byte)
+		if cap(*bufPtr) < n {
+			bufPool.Put(bufPtr)
+			newBuf := make([]byte, n)
+			bufPtr = &newBuf
+		}
+		copy(*bufPtr, buf[:n])
+		
+		select {
+		case txChan <- txPacket{bufPtr: bufPtr, n: n}:
+		default:
+			bufPool.Put(bufPtr)
+		}
+	}
 }
 
 func (v *VPNInstance) Cleanup() {
@@ -746,6 +865,8 @@ func (v *VPNInstance) packetOrderedWriter() {
 func (v *VPNInstance) writeTUN(data []byte) {
 	if v.Xsk != nil {
 		v.Xsk.Transmit(data)
+	} else if v.FallbackFd > 0 {
+		syscall.Write(v.FallbackFd, data)
 	}
 }
 
