@@ -304,6 +304,11 @@ type VPNInstance struct {
 	
 	// XDP Socket
 	Xsk *xdp.Socket
+	
+	// Phantom Mode State
+	GatewayMAC   [6]byte
+	remoteAddr   netip.AddrPort
+	remoteAddrMx sync.RWMutex
 }
 
 type DecryptedPacket struct {
@@ -335,6 +340,13 @@ func NewVPNInstance(cfg Config) *VPNInstance {
 	v.SessionID = uint32(os.Getpid()) ^ uint32(keyHash[0])<<24
 	
 	v.reorderChan = make(chan *DecryptedPacket, 1024)
+
+	// Initialize Phantom Remote if Client
+	if cfg.Mode == "client" && cfg.PeerAddr != "" {
+		if addr, err := netip.ParseAddr(cfg.PeerAddr); err == nil {
+			v.remoteAddr = netip.AddrPortFrom(addr, uint16(cfg.PeerPort))
+		}
+	}
 
 	return v
 }
@@ -536,42 +548,121 @@ func (v *VPNInstance) sendHandshakePacket(remote netip.AddrPort, myPub []byte) {
 }
 
 func (v *VPNInstance) sendRawXDP(data []byte, remote netip.AddrPort) {
-	// Construct Ethernet + IP + UDP for `data`
-	// Check IPv4/6
-	isV6 := remote.Addr().Is6()
+	pkt := make([]byte, 14 + 20 + 8 + len(data))
 	
-	// Ethernet
-	eth := make([]byte, 14)
-	eth[0], eth[1], eth[2] = 0xff, 0xff, 0xff // Broadcast/Gateway MAC
-	eth[3], eth[4], eth[5] = 0xff, 0xff, 0xff
-	eth[6], eth[7], eth[8] = 0x02, 0x01, 0x01 // Self MAC (Dummy)
-	eth[9], eth[10], eth[11] = 0x01, 0x01, 0x01
-	
-	if isV6 {
-		binary.BigEndian.PutUint16(eth[12:], 0x86DD)
+	// 1. Ethernet
+	// Dst: Gateway MAC (or Broadcast if unknown)
+	// Src: My Dummy MAC (02:00:00:00:00:01) ?? No, must match physical if possible?
+	// Actually, if we send out physical, we should probably use real MAC if we want reply.
+	// But usually Gateway accepts if IP matches.
+	// Let's use v.GatewayMAC which we learned.
+	v.remoteAddrMx.RLock()
+	gwMac := v.GatewayMAC
+	v.remoteAddrMx.RUnlock()
+
+	if gwMac == [6]byte{0,0,0,0,0,0} {
+		// Fallback to Broadcast
+		copy(pkt[0:6], []byte{0xff,0xff,0xff,0xff,0xff,0xff})
 	} else {
-		binary.BigEndian.PutUint16(eth[12:], 0x0800)
+		copy(pkt[0:6], gwMac[:])
+	}
+	// Src: 02:00:00:00:00:01 (Fixed for now, or learn form system?)
+	copy(pkt[6:12], []byte{0x02,0x00,0x00,0x00,0x00,0x01})
+	
+	// EtherType IPv4
+	binary.BigEndian.PutUint16(pkt[12:14], 0x0800)
+	
+	// 2. IPv4 Header
+	// IP Off: 14
+	ipOff := 14
+	pkt[ipOff] = 0x45 // Ver=4, IHL=5
+	pkt[ipOff+1] = 0x00 // TOS
+	binary.BigEndian.PutUint16(pkt[ipOff+2:ipOff+4], uint16(20 + 8 + len(data))) // Total Len
+	pkt[ipOff+4], pkt[ipOff+5] = 0x00, 0x01 // ID
+	pkt[ipOff+6], pkt[ipOff+7] = 0x00, 0x00 // Flags/Frag
+	pkt[ipOff+8] = 64 // TTL
+	pkt[ipOff+9] = 17 // UDP
+	// Checksum (Zero for now, fill later)
+	
+	// Src IP (My IP)
+	myIP := net.ParseIP(v.Cfg.LocalAddr).To4()
+	if myIP == nil { myIP = net.IP{0,0,0,0} }
+	copy(pkt[ipOff+12:ipOff+16], myIP)
+	
+	// Dst IP (Remote)
+	copy(pkt[ipOff+16:ipOff+20], remote.Addr().AsSlice())
+	
+	// IP Checksum
+	cs := checksum(pkt[ipOff:ipOff+20])
+	binary.BigEndian.PutUint16(pkt[ipOff+10:ipOff+12], cs)
+	
+	// 3. UDP Header
+	udpOff := ipOff + 20
+	// Src Port (My Listen Port)
+	binary.BigEndian.PutUint16(pkt[udpOff:udpOff+2], uint16(v.Cfg.ListenPort))
+	// Dst Port
+	binary.BigEndian.PutUint16(pkt[udpOff+2:udpOff+4], remote.Port())
+	// Length
+	binary.BigEndian.PutUint16(pkt[udpOff+4:udpOff+6], uint16(8 + len(data)))
+	// Checksum (Pseudo Header)
+	// Calculate UDP Checksum
+	udpCs := checksumUDP(pkt[ipOff+12:ipOff+16], pkt[ipOff+16:ipOff+20], pkt[udpOff:udpOff+8+len(data)])
+	binary.BigEndian.PutUint16(pkt[udpOff+6:udpOff+8], udpCs)
+	
+	// 4. Payload
+	copy(pkt[udpOff+8:], data)
+	
+	// Transmit
+	if v.Xsk != nil {
+		v.Xsk.Transmit(pkt)
+	}
+}
+
+// Helpers
+func checksum(data []byte) uint16 {
+	sum := uint32(0)
+	for i := 0; i < len(data)-1; i += 2 {
+		sum += uint32(binary.BigEndian.Uint16(data[i : i+2]))
+	}
+	if len(data)%2 == 1 {
+		sum += uint32(data[len(data)-1]) << 8
+	}
+	for sum > 0xffff {
+		sum = (sum & 0xffff) + (sum >> 16)
+	}
+	return ^uint16(sum)
+}
+
+func checksumUDP(src, dst, udpPkt []byte) uint16 {
+	sum := uint32(0)
+	// Pseudo Header
+	for i := 0; i < 4; i += 2 {
+		sum += uint32(binary.BigEndian.Uint16(src[i : i+2]))
+		sum += uint32(binary.BigEndian.Uint16(dst[i : i+2]))
+	}
+	sum += 17 // Proto
+	sum += uint32(len(udpPkt))
+	
+	// UDP Packet
+	for i := 0; i < len(udpPkt)-1; i += 2 {
+		sum += uint32(binary.BigEndian.Uint16(udpPkt[i : i+2]))
+	}
+	if len(udpPkt)%2 == 1 {
+		sum += uint32(udpPkt[len(udpPkt)-1]) << 8
 	}
 	
-	// IP + UDP Construction is complex without a library.
-	// For "Phantom Mode" to work robustly, we truly need `gopacket` or similar.
-	// Given we are "Zero-Base", manual construction is risky.
-	// Fallback: If we are "Client", maybe we let Side-Channel be optional?
-	// User Requirement: "Compatible".
-	
-	// Let's rely on the fact that if traffic flows, we are good.
-	// The heartbeat is mainly for NAT Keepalive + Key Exchange.
-	// If User manually configures Peers, we don't need this.
-	// User said "Like Port Forwarding".
-	// Port Forwarding implies I know where to send.
-	// v.Cfg.PeerAddr IS known.
-	
-	// TODO: Implement proper packet construction.
-	// For now, just Log.
+	for sum > 0xffff {
+		sum = (sum & 0xffff) + (sum >> 16)
+	}
+	if sum == 0xffff { return 0xffff } // UDP zero checksum means "no checksum", but calculated zero is 0xffff
+	return ^uint16(sum)
 }
 
 func (v *VPNInstance) proxyXDPToUDP(conn *net.UDPConn) {
-	// External -> XDP -> Decrypt/Handshake -> Local UDP
+	// External -> XDP -> Decrypt -> Local UDP (KernelWG)
+	// We need to route traffic to KernelWG which is listening on 127.0.0.1:(WGPort+1)
+	kernelAddr, _ := net.ResolveUDPAddr("udp", fmt.Sprintf("127.0.0.1:%d", v.Cfg.WGPort+1))
+
 	for {
 		pkts, err := v.Xsk.Receive()
 		if err != nil || len(pkts) == 0 {
@@ -580,68 +671,105 @@ func (v *VPNInstance) proxyXDPToUDP(conn *net.UDPConn) {
 		}
 		
 		for _, pkt := range pkts {
-			// Parse Headers (Ethernet + IP + UDP)
-			// We know it's hit our filter, so it IS UDP to our Port.
-			if len(pkt) < 42 { continue } // Eth(14)+IP(20)+UDP(8)
+			if len(pkt) < 42 { continue } 
 			
-			// Extract payload
-			// Assuming IPv4 for simplicity of offset, should check EthType and IPHeader len
-			// Eth: 14
-			// IP: 14 + IHL*4
-			ipHdr := pkt[14:]
-			ihl := (ipHdr[0] & 0x0F) * 4
-			udpHdr := ipHdr[ihl:]
-			payload := udpHdr[8:]
+			// 1. Learn Gateway MAC (Src MAC of incoming frame)
+			// SrcMAC is at [6:12]
+			// Moved to lock block below
 			
-			// Identify Remote (for sending back)
-			// In Client mode: we expect PeerAddr.
-			// In Server mode: we learn PeerAddr from IP src.
-			
-			// Decrypt / Handshake Check
-			v.handleRawPacket(payload, conn)
+			// 2. Parse IP/UDP
+			ethType := binary.BigEndian.Uint16(pkt[12:14])
+			var ipHdrLen int
+			var srcIP net.IP
+			var srcPort int
+
+			if ethType == 0x0800 { // IPv4
+				ipHdrLen = int((pkt[14] & 0x0F) * 4)
+				srcIP = net.IP(pkt[14+12 : 14+16])
+				// UDP Header at 14+ipHdrLen
+				udpStart := 14 + ipHdrLen
+				if len(pkt) < udpStart+8 { continue }
+				srcPort = int(binary.BigEndian.Uint16(pkt[udpStart : udpStart+2]))
+				// Payload
+				payload := pkt[udpStart+8:]
+				
+				// Update Remote State
+				newRemote := netip.AddrPortFrom(netip.AddrFrom4([4]byte{srcIP[0], srcIP[1], srcIP[2], srcIP[3]}), uint16(srcPort))
+				
+				v.remoteAddrMx.Lock()
+				if v.remoteAddr != newRemote {
+					v.remoteAddr = newRemote
+					// Optional: Log new connection
+				}
+				// Always update GatewayMAC (Learned from Switch/Gateway)
+				copy(v.GatewayMAC[:], pkt[6:12])
+				v.remoteAddrMx.Unlock()
+				
+				// Decrypt & Forward
+				v.handleRawPacket(payload, conn, kernelAddr)
+			}
+			// TODO: IPv6 Support (similar logic)
 		}
 	}
 }
 
 func (v *VPNInstance) proxyUDPToXDP(conn *net.UDPConn) {
-	// Local UDP -> Encrypt -> XDP -> External
+	// Local UDP (KernelWG) -> Encrypt -> XDP -> External
 	buf := make([]byte, 2048)
 	for {
 		n, _, err := conn.ReadFromUDP(buf)
 		if err != nil { continue }
 		data := buf[:n]
 		
-		// Encrypt and Send
-		// We need to construct full packet: Eth + IP + UDP + EncryptedData
-		// This requires Raw IP construction (checksums etc).
-		// This is the hard part of Phantom Mode: We must be a TCP/IP stack.
+		// If we don't have a remote yet (Server mode waiting for handshake), drop.
+		// If Client mode, properly initialized.
+		v.remoteAddrMx.RLock()
+		remote := v.remoteAddr
+		v.remoteAddrMx.RUnlock()
 		
-		// Implementation Strategy: Use pre-calculated templates or simple construction.
-		v.sendPhantomPacket(data)
+		if !remote.IsValid() { continue }
+
+		v.sendPhantomPacket(data, remote)
 	}
 }
 
-func (v *VPNInstance) handleRawPacket(payload []byte, conn *net.UDPConn) {
+func (v *VPNInstance) handleRawPacket(payload []byte, conn *net.UDPConn, target *net.UDPAddr) {
+	if len(payload) == 0 { return }
+
 	// 1. Check for Handshake (0xFE)
-	if len(payload) > 0 && payload[0] == 0xFE {
-		// Handle Handshake (Update Keys)
-		// ... implementation of handshake verify ...
+	if payload[0] == 0xFE {
+		// Log handshake presence, but we likely just rely on Side-Channel to keep session alive?
+		// Actually, if we receive 0xFE, we should parse it to update Remote if roaming?
+		// For now simple pass-through logic: 0xFE packets are NOT for WireGuard.
 		return
 	}
+
+	// 2. Decrypt
+	nonce := payload[:NonceSize]
+	cipherText := payload[NonceSize:]
 	
-	// 2. Decrypt Data
-	// ... AEAD Open ...
-	// 3. Write to Local UDP
-	// conn.WriteToUDP(plain, &net.UDPAddr{IP: 127.0.0.1, Port: XXX})
-	// We need to know where the local WG client is listening.
-	// Usually invalid packet source fix-up?
-	// If NekoLink binds 127.0.0.1:51820, and WG connects to it.
-	// We just WriteTo(remoteAddr) which is the WG client eph port.
-	// We need to track the Local WG Client address (Session Tracking).
+	plain, err := v.AEAD.Open(nil, nonce, cipherText, nil)
+	if err != nil {
+		// Decrypt failed (maybe not ours?), drop
+		return
+	}
+
+	// 3. Forward to Kernel WireGuard
+	conn.WriteToUDP(plain, target)
 }
 
-func (v *VPNInstance) sendPhantomPacket(plain []byte) {
+func (v *VPNInstance) sendPhantomPacket(plain []byte, remote netip.AddrPort) {
 	// Encrypt -> Construct Raw -> Xsk.Transmit
+	
+	// Encrypt
+	nonce := make([]byte, NonceSize)
+	rand.Read(nonce) // Or atomic counter
+	
+	// Cipher = Nonce + AEAD(plain)
+	cipherText := v.AEAD.Seal(nil, nonce, plain, nil)
+	finalPayload := append(nonce, cipherText...)
+	
+	v.sendRawXDP(finalPayload, remote)
 }
 
 func (v *VPNInstance) sendHandshake(bind *RawBind, remote netip.AddrPort, myPub []byte) {
@@ -921,9 +1049,18 @@ func (v *VPNInstance) rawReaderLoop(idx int) {
 		nonce := enc[:NonceSize]
 		cipherText := enc[NonceSize:]
 		
+
+		// Debug Log for Raw Mode connection state
+		if debugMode { 
+			log.Printf("[RAW Rx] Pkt from %s (%d bytes). Seq=%d", addr, n, seq)
+		}
+
 		plain, err := v.AEAD.Open(enc[NonceSize:NonceSize], nonce, cipherText, nil)
 		if err == nil && len(plain) > 0 {
 			// Successful Decrypt
+			if debugMode {
+				log.Printf("[RAW Rx] Decrypt OK. Payload=%d", len(plain))
+			}
 			// Submit to Reorderer
 			v.reorderChan <- &DecryptedPacket{
 				Seq:       seq,
@@ -935,6 +1072,10 @@ func (v *VPNInstance) rawReaderLoop(idx int) {
 			// Allocate NEW buffer for next read
 			bufPtr = bufPool.Get().(*[]byte)
 			buf = *bufPtr
+		} else {
+			if debugMode {
+				log.Printf("[RAW Rx] Decrypt Failed from %s: %v", addr, err)
+			}
 		}
 	}
 }

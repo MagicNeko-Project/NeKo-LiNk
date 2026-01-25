@@ -299,18 +299,37 @@ func (x *Socket) FreeFrame(addr uint64) {
     atomic.StoreUint32(x.Fill.Producer, prod+1)
 }
 
+
 func (x *Socket) Transmit(data []byte) error {
 	prod := atomic.LoadUint32(x.Tx.Producer)
 	cons := atomic.LoadUint32(x.Tx.Consumer)
 	
+	// 1. Check TX Ring Space (Can we enqueue a descriptor?)
 	if prod - cons >= x.Tx.Size {
+		// Ring full, nothing we can do but fail or wait. 
+		// ReclaimTx doesn't help TX Ring space (it helps UMEM space).
+		// Actually, standard drivers update Consumer as they read.
+		return fmt.Errorf("tx ring full")
+	}
+
+	// 2. Check UMEM Space (Do we have a free frame?)
+	// We map Frame[i] to TxSlot[i]. 
+	// A frame is in use if it has been submitted (Tx.Producer) but not yet Completed (Comp.Consumer).
+	compCons := atomic.LoadUint32(x.Comp.Consumer)
+	if prod - compCons >= x.Tx.Size {
+		// Try to reclaim completed frames
 		x.ReclaimTx()
-		cons = atomic.LoadUint32(x.Tx.Consumer)
-		if prod - cons >= x.Tx.Size { return fmt.Errorf("tx full") }
+		compCons = atomic.LoadUint32(x.Comp.Consumer)
+		if prod - compCons >= x.Tx.Size {
+			return fmt.Errorf("tx umem full")
+		}
 	}
 	
-	txSlot := (x.TxCount) % uint64(x.Tx.Size)
-	addr := uint64(x.Tx.Size)*4096 + uint64(txSlot)*4096
+	// Calulcate Slot (Simple Modulo)
+	// Since (prod - compCons) < Size, 'prod' is within [compCons, compCons + Size).
+	// So 'prod % Size' is unique among all outstanding frames.
+	txSlot := uint64(prod) % uint64(x.Tx.Size)
+	addr := uint64(x.Tx.Size)*4096 + txSlot*4096
 	
 	if len(data) > 4096 { return fmt.Errorf("pkt too big") }
 	copy(x.UmemMemory[addr:], data)
