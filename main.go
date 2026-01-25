@@ -173,8 +173,13 @@ func NewVPNInstance(cfg Config) *VPNInstance {
 	if cfg.MTU == 0 { cfg.MTU = 1400 }
 	if cfg.WGInternalPort == 0 { cfg.WGInternalPort = 51820 }
 	if cfg.CustomProtocol == 0 { cfg.CustomProtocol = 233 }
-	if cfg.ServerBindPort == 0 { cfg.ServerBindPort = 23333 }
-	if cfg.ClientRemotePort == 0 { cfg.ClientRemotePort = 23333 }
+	
+	// Only set default ports for wg-raw or explicit UDP (17)
+	if cfg.Protocol == "wg-raw" || cfg.CustomProtocol == 17 {
+		if cfg.ServerBindPort == 0 { cfg.ServerBindPort = 23333 }
+		if cfg.ClientRemotePort == 0 { cfg.ClientRemotePort = 23333 }
+	}
+	
 	if cfg.VPNInterface == "" { cfg.VPNInterface = "neko0" }
 
 	v := &VPNInstance{Cfg: cfg}
@@ -304,11 +309,9 @@ func (v *VPNInstance) setupKernelWireGuard(iface string) {
 	// WireGuard interfaces don't auto-generate IPv6 LL, so we add one.
 	llBuf := make([]byte, 8)
 	rand.Read(llBuf)
-	llIP := fmt.Sprintf("fe80::%04x:%04x:%04x:%04x/64", 
-		binary.BigEndian.Uint16(llBuf[0:2]),
-		binary.BigEndian.Uint16(llBuf[2:4]),
-		binary.BigEndian.Uint16(llBuf[4:6]),
-		binary.BigEndian.Uint16(llBuf[6:8]))
+	// Use explicit blocks to ensure colons are present
+	llIP := fmt.Sprintf("fe80::%02x%02x:%02x%02x:%02x%02x:%02x%02x/64", 
+		llBuf[0], llBuf[1], llBuf[2], llBuf[3], llBuf[4], llBuf[5], llBuf[6], llBuf[7])
 	runCmd("ip", "addr", "add", llIP, "dev", iface)
 	
 	// Safe MTU for tunneled traffic
@@ -439,11 +442,12 @@ func (v *VPNInstance) sendHandshakePacket(remote netip.AddrPort, myPub []byte) {
 	
 	if v.Cfg.Protocol == "wg-raw" {
 		v.sendRawXDP(pkt, remote)
+		log.Printf("[Handshaker] Sent heartbeat to %s (Phantom)", remote)
 	} else if len(v.ConnRaw) > 0 {
 		ipAddr, _ := net.ResolveIPAddr("ip", remote.Addr().String())
 		v.ConnRaw[0].WriteToIP(pkt, ipAddr)
+		log.Printf("[Handshaker] Sent heartbeat to %s (Raw Proto %d)", remote.Addr(), v.Cfg.CustomProtocol)
 	}
-	log.Printf("[Handshaker] Sent heartbeat to %s", remote)
 }
 
 func (v *VPNInstance) sendRawXDP(data []byte, remote netip.AddrPort) {
