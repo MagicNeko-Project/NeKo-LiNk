@@ -255,9 +255,6 @@ func (c *Config) ParseLegacy() (changed bool) {
 	if c.Protocol == "wg-raw" {
 		if c.WGInterface == "" {
 			c.WGInterface = c.InterfaceName
-			if len(c.WGInterface) > 15 {
-				c.WGInterface = c.WGInterface[:15]
-			}
 			changed = true
 		}
 	} else {
@@ -270,6 +267,21 @@ func (c *Config) ParseLegacy() (changed bool) {
 			log.Printf("[%s] 自动分配 AppInterface: %s", c.InterfaceName, c.AppInterface)
 			changed = true
 		}
+	}
+
+	// Final Safety Check for Linux IFNAMSIZ (16 bytes including null)
+	// We MUST truncate here so the entire app uses the same shortened names.
+	if len(c.InterfaceName) > 15 {
+		c.InterfaceName = c.InterfaceName[:15]
+		changed = true
+	}
+	if len(c.AppInterface) > 15 {
+		c.AppInterface = c.AppInterface[:15]
+		changed = true
+	}
+	if len(c.WGInterface) > 15 {
+		c.WGInterface = c.WGInterface[:15]
+		changed = true
 	}
 
 	return
@@ -1068,10 +1080,6 @@ func (v *VPNInstance) InitInterface() {
 	// Raw Mode: Veth
 	hostIf := v.Cfg.InterfaceName
 	appIf := v.Cfg.AppInterface
-
-	// Final Safety Check for Linux IFNAMSIZ (16 bytes including null)
-	if len(hostIf) > 15 { hostIf = hostIf[:15] }
-	if len(appIf) > 15 { appIf = appIf[:15] }
 	
 	// Cleanup
 	runCmdQuiet("ip", "link", "del", hostIf)
