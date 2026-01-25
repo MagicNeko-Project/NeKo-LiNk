@@ -83,14 +83,9 @@ func GetShadowXEngine(ifaceName string, modeHint string) (*ShadowXEngine, error)
 	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(bpfBytes))
 	if err != nil { return nil, fmt.Errorf("failed to load spec from %s: %v", fileName, err) }
 
-	// Prepare objects struct (Union-like)
-	var objs struct {
-		TcIngress   *ebpf.Program `ebpf:"tc_shadow_ingress"`
-		TcEgress    *ebpf.Program `ebpf:"tc_shadow_egress"`
-		PortMap     *ebpf.Map     `ebpf:"port_shadow_map"`
-		RawAllowMap *ebpf.Map     `ebpf:"raw_allow_map"`
-	}
-
+	// Prepare objects struct (Union-like logic but strictly typed for loader)
+	var e *ShadowXEngine
+	
 	// Disable BTF for maps to support kernels without BTF support
 	spec.Types = nil
 	for i, m := range spec.Maps {
@@ -100,32 +95,63 @@ func GetShadowXEngine(ifaceName string, modeHint string) (*ShadowXEngine, error)
 		m.Key = nil
 		m.Value = nil
 	}
-	
 	for i := range spec.Programs {
 		log.Printf("[eBPF] 准备加载 Program (%s): %s", modeHint, i)
 	}
 
-	if err := spec.LoadAndAssign(&objs, nil); err != nil { return nil, err }
-
 	iface, err := net.InterfaceByName(ifaceName)
 	if err != nil { return nil, err }
 
-	e := &ShadowXEngine{
-		ifaceName:   ifaceName,
-		engineType:  modeHint,
-		portMap:     objs.PortMap,     // May be nil if raw
-		rawAllowMap: objs.RawAllowMap, // May be nil if tcp
-		refCount:    1,
+	if modeHint == "raw" {
+		var objs struct {
+			TcIngress   *ebpf.Program `ebpf:"tc_shadow_ingress"`
+			TcEgress    *ebpf.Program `ebpf:"tc_shadow_egress"`
+			RawAllowMap *ebpf.Map     `ebpf:"raw_allow_map"`
+		}
+		if err := spec.LoadAndAssign(&objs, nil); err != nil { return nil, fmt.Errorf("Raw BPF Load FAILED: %v", err) }
+		
+		e = &ShadowXEngine{
+			ifaceName:   ifaceName,
+			engineType:  modeHint,
+			rawAllowMap: objs.RawAllowMap,
+			refCount:    1,
+		}
+		
+		// Attach Links
+		if err := attachLinks(e, objs.TcEgress, objs.TcIngress, iface); err != nil { return nil, err }
+		
+	} else {
+		var objs struct {
+			TcIngress   *ebpf.Program `ebpf:"tc_shadow_ingress"`
+			TcEgress    *ebpf.Program `ebpf:"tc_shadow_egress"`
+			PortMap     *ebpf.Map     `ebpf:"port_shadow_map"`
+		}
+		if err := spec.LoadAndAssign(&objs, nil); err != nil { return nil, fmt.Errorf("TCP BPF Load FAILED: %v", err) }
+
+		e = &ShadowXEngine{
+			ifaceName:   ifaceName,
+			engineType:  modeHint,
+			portMap:     objs.PortMap,
+			refCount:    1,
+		}
+		
+		// Attach Links
+		if err := attachLinks(e, objs.TcEgress, objs.TcIngress, iface); err != nil { return nil, err }
 	}
 
+	engineRegistry[ifaceName] = e
+	return e, nil
+}
+
+func attachLinks(e *ShadowXEngine, progEgress, progIngress *ebpf.Program, iface *net.Interface) error {
 	// 1. Try Modern TCX
 	te, errE := link.AttachTCX(link.TCXOptions{
-		Program:   objs.TcEgress,
+		Program:   progEgress,
 		Interface: iface.Index,
 		Attach:    ebpf.AttachTCXEgress,
 	})
 	ti, errI := link.AttachTCX(link.TCXOptions{
-		Program:   objs.TcIngress,
+		Program:   progIngress,
 		Interface: iface.Index,
 		Attach:    ebpf.AttachTCXIngress,
 	})
@@ -133,33 +159,31 @@ func GetShadowXEngine(ifaceName string, modeHint string) (*ShadowXEngine, error)
 	if errE == nil && errI == nil {
 		e.tcLinkEgress = te
 		e.tcLinkIngress = ti
-		log.Printf("[eBPF] 喵！Modern TCX (%s) 挂载成功在 %s 上！✨", modeHint, ifaceName)
+		log.Printf("[eBPF] 喵！Modern TCX (%s) 挂载成功在 %s 上！✨", e.engineType, iface.Name)
 	} else {
 		// 2. Fallback to Legacy TC (Command line)
-		log.Printf("[eBPF] TCX 不支持喵，正在回退到 Legacy TC (%s)...", modeHint)
+		log.Printf("[eBPF] TCX 不支持喵，正在回退到 Legacy TC (%s)...", e.engineType)
 		e.isLegacy = true
 		
 		// Setup clsact qdisc (ignore error if exists)
-		exec.Command("tc", "qdisc", "add", "dev", ifaceName, "clsact").Run()
+		exec.Command("tc", "qdisc", "add", "dev", iface.Name, "clsact").Run()
 		
-		pinPath := fmt.Sprintf("/sys/fs/bpf/neko_%s", ifaceName)
+		pinPath := fmt.Sprintf("/sys/fs/bpf/neko_%s", iface.Name)
 		exec.Command("rm", "-rf", pinPath).Run()
 		exec.Command("mkdir", "-p", pinPath).Run()
 		
-		if err := objs.TcEgress.Pin(pinPath + "/egp"); err != nil {
+		if err := progEgress.Pin(pinPath + "/egp"); err != nil {
 			log.Printf("[eBPF] Egress 固定失败: %v", err)
 		}
-		if err := objs.TcIngress.Pin(pinPath + "/igp"); err != nil {
+		if err := progIngress.Pin(pinPath + "/igp"); err != nil {
 			log.Printf("[eBPF] Ingress 固定失败: %v", err)
 		}
 		
-		exec.Command("tc", "filter", "replace", "dev", ifaceName, "egress", "bpf", "da", "pinned", pinPath+"/egp").Run()
-		exec.Command("tc", "filter", "replace", "dev", ifaceName, "ingress", "bpf", "da", "pinned", pinPath+"/igp").Run()
-		log.Printf("[eBPF] Legacy TC 已通过 Shell 命令挂载在 %s 上！🐾", ifaceName)
+		exec.Command("tc", "filter", "replace", "dev", iface.Name, "egress", "bpf", "da", "pinned", pinPath+"/egp").Run()
+		exec.Command("tc", "filter", "replace", "dev", iface.Name, "ingress", "bpf", "da", "pinned", pinPath+"/igp").Run()
+		log.Printf("[eBPF] Legacy TC 已通过 Shell 命令挂载在 %s 上！🐾", iface.Name)
 	}
-
-	engineRegistry[ifaceName] = e
-	return e, nil
+	return nil
 }
 
 func (e *ShadowXEngine) Register(cfg ShadowXConfig) error {
