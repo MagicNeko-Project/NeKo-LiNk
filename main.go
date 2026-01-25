@@ -1042,7 +1042,7 @@ func (v *VPNInstance) Start() {
 		// 启动并行读取器 (Producers) (IPConn -> Decrypt -> Reorder)
 		log.Printf("[RAW] 已恢复并行 RX 读取模式: %d Workers -> 1 Ordered Writer", v.numWorkers)
 		for i := 0; i < v.numWorkers; i++ {
-			go v.rawReaderLoop(i)
+			go v.rawReaderLoop(0)
 		}
 
 		// 启动心跳机制
