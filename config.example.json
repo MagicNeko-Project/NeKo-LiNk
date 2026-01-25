@@ -1,22 +1,22 @@
 [
   {
-    "_comment": "=== NekoLink Configuration Example ===",
-    "_instructions": "Copy this file to config.json and edit it. This array can contain multiple VPN instances.",
+    "_comment": "=== NekoLink 配置文件示例 喵~ ===",
+    "_instructions": "要把这个文件复制成 config.json 然后修改哦！这里可以放好多好多个 VPN 实例哒！",
 
     "_field_guide": {
-      "mode": "Required. 'server' or 'client'",
-      "protocol": "Required. 'wg-raw' (Phantom Mode, Recommended) or 'raw' (Legacy Veth)",
-      "phy_interface": "Required for wg-raw. The physical interface name (e.g. eth0) to attach XDP to.",
-      "vpn_interface": "Required. The name of the VPN interface to create (e.g. wg0 or neko0).",
-      "vpn_addr": "Required. The IP/CIDR to assign to the VPN interface (e.g. 10.0.0.1/24).",
-      "server_bind_port": "SERVER ONLY. The physical port to listen on (Raw) or intercept (WG-Raw).",
-      "client_remote_ip": "CLIENT ONLY. The physical IP of the server.",
-      "client_remote_port": "CLIENT ONLY. The physical port of the server.",
-      "password": "Required. Shared secret for encryption or handshake.",
-      "private_key": "WG-RAW ONLY. WireGuard Private Key (Generate with: wg genkey).",
-      "wg_internal_port": "WG-RAW ONLY. Internal port for Kernel WireGuard (Default 51820).",
-      "tcp_mode": "Optional. If true, disguises traffic as TCP.",
-      "custom_protocol": "Optional. Custom IP Protocol number (Default 233). Set 17 for UDP."
+      "mode": "必填哒！是 'server' (服务端) 还是 'client' (客户端) 呢？",
+      "protocol": "必填哒！推荐用 'wg-raw' (幻影模式) 哦，或者用老旧的 'raw' (Veth模式) 也行喵。",
+      "phy_interface": "wg-raw 模式必须要填的哦！就是你要把 XDP 挂载到哪个物理网卡上呀 (比如 eth0)。",
+      "vpn_interface": "必填哒！我们要创建的 VPN 网卡叫什么名字呢？(比如 wg0 或者 neko0)。",
+      "vpn_addr": "必填哒！给 VPN 网卡分配的 IP 地址是什么呀？要带掩码哦 (比如 10.0.0.1/24)。",
+      "server_bind_port": "服务端专用哦！在物理网卡上监听或者拦截哪个端口呢？",
+      "client_remote_ip": "客户端专用哦！服务端的物理 IP 是多少呀？",
+      "client_remote_port": "客户端专用哦！服务端的物理端口是多少呀？",
+      "password": "必填哒！这是大家共享的秘密密码哦，用来加密握手的喵！",
+      "private_key": "wg-raw 模式专用哦！WireGuard 的私钥填这里 (用 wg genkey 生成一下嘛)。",
+      "wg_internal_port": "wg-raw 模式专用哦！内核 WireGuard 偷偷用的内部端口 (默认 51820)。",
+      "tcp_mode": "选填哒。如果开启的话，会伪装成 TCP 流量哦，很狡猾吧？(true/false)",
+      "custom_protocol": "选填哒。自定义的 IP 协议号 (默认 233)。如果要用 UDP 就填 17 哦！"
     },
 
     "mode": "server",
