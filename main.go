@@ -105,7 +105,8 @@ func (c *Config) ParseLegacy() (changed bool) {
 	
 	// 2. 协议迁移 (UDP/TCP/QUIC -> wg-raw)
 	// 注意：这里移除了 "raw"，因为主人希望保留原有的 legacy raw 模式。
-	oldProto := strings.ToLower(c.Protocol)
+	c.Protocol = strings.ToLower(c.Protocol) // Ensure lowercase normalization
+	oldProto := c.Protocol
 	if oldProto == "udp" || oldProto == "tcp" || oldProto == "quic" || oldProto == "" {
 		if oldProto == "tcp" {
 			c.UseTCP = true
@@ -595,6 +596,8 @@ func (v *VPNInstance) initRaw() {
 			lAddr, _ = net.ResolveIPAddr("ip", v.Cfg.ListenAddr)
 		}
 
+
+
 		if v.Cfg.UseEBPF {
 			addr := &net.UDPAddr{IP: net.IPv4zero, Port: v.Cfg.ListenPort}
 			if v.IsIPv6 { addr.IP = net.IPv6zero }
@@ -623,7 +626,17 @@ func (v *VPNInstance) initRaw() {
 				conn.SetReadBuffer(25 << 20); conn.SetWriteBuffer(25 << 20)
 				v.ConnRaw[i] = conn
 			}
-		} else {
+		} 
+		
+		// Fallback / Standard Raw (If not using eBPF, we MUST clean up any potential eBPF residue)
+		if !v.Cfg.UseEBPF {
+			// Proactive Cleanup: Ensure no zombie TC filters are stealing our packets!
+			// We only do this if we are the "Primary" raw instance (idx 0) and interface looks physical/virtual
+			if i == 0 {
+				log.Printf("[RAW] 正在清理接口 %s 上的旧 eBPF 规则以确保旁路畅通...", v.Cfg.EBPFDevice)
+				exec.Command("tc", "qdisc", "del", "dev", v.Cfg.EBPFDevice, "clsact").Run()
+			}
+
 			conn, err := net.ListenIP(protoStr, lAddr)
 			if err != nil { log.Fatalf("Raw 监听失败: %v", err) }
 			conn.SetReadBuffer(25 << 20); conn.SetWriteBuffer(25 << 20)
