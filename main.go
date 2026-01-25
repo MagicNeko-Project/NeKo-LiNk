@@ -296,6 +296,13 @@ func (v *VPNInstance) setupKernelWireGuard(iface string) {
 	if v.Cfg.VPNAddr != "" {
 		runCmd("ip", "addr", "add", v.Cfg.VPNAddr, "dev", iface)
 	}
+
+	// Generate Random IPv6 Link-Local
+	// WireGuard interfaces don't auto-generate IPv6 LL, so we add one.
+	llBuf := make([]byte, 8)
+	rand.Read(llBuf)
+	llIP := fmt.Sprintf("fe80::%x%x:%x%x/64", llBuf[0:2], llBuf[2:4], llBuf[4:6], llBuf[6:8])
+	runCmd("ip", "addr", "add", llIP, "dev", iface)
 	
 	// Safe MTU for tunneled traffic
 	mtu := v.Cfg.MTU
