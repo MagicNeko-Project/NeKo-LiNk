@@ -70,6 +70,10 @@ type Config struct {
 	Debug         bool `json:"debug,omitempty"`
 	Comment       string `json:"comment,omitempty"`
 
+	// --- Custom Interface Names ---
+	AppInterface  string `json:"app_interface,omitempty"` // For raw mode veth peer
+	WGInterface   string `json:"wg_interface,omitempty"`  // For wg-raw mode kernel interface
+
 	// --- Legacy Fields (Hidden but mapped) ---
 	LegacyServerAddr string `json:"server_addr,omitempty"`
 	LegacyBasePort   int    `json:"base_port,omitempty"`
@@ -240,12 +244,20 @@ func (c *Config) ParseLegacy() (changed bool) {
 		c.InterfaceName = "neko0"
 		changed = true
 	}
-	return
 
-	if c.InterfaceName == "" {
-		c.InterfaceName = "neko0"
-		changed = true
+	// Default secondary interface names if not provided
+	if c.Protocol == "wg-raw" {
+		if c.WGInterface == "" {
+			c.WGInterface = c.InterfaceName + "_wg"
+			changed = true
+		}
+	} else {
+		if c.AppInterface == "" {
+			c.AppInterface = c.InterfaceName + "_app"
+			changed = true
+		}
 	}
+
 	return
 }
 
@@ -419,8 +431,7 @@ func (v *VPNInstance) startWireGuardRaw() {
 	}
 	
 	// 2. Setup Kernel WireGuard Interface
-	// Use a unique name based on WGPort to avoid conflicts
-	wgIf := fmt.Sprintf("wg_%d", v.Cfg.WGPort)
+	wgIf := v.Cfg.WGInterface
 	v.WGInterface = wgIf
 	v.setupKernelWireGuard(wgIf)
 	
@@ -976,9 +987,7 @@ func (v *VPNInstance) Start() {
 		log.Printf("[Init] 启动 Raw Mode 2 (Veth + AF_XDP)")
 		
 		// Initialize AF_XDP
-		prefix := v.Cfg.InterfaceName
-		if len(prefix) > 13 { prefix = prefix[:13] }
-		appIf := prefix + "_x"
+		appIf := v.Cfg.AppInterface
 		
 		xsk, err := xdp.NewSocket(xdp.Config{
 			Interface: appIf,
@@ -1031,15 +1040,7 @@ func (v *VPNInstance) InitInterface() {
 
 	// Raw Mode: Veth
 	hostIf := v.Cfg.InterfaceName
-	
-	// Linux Interface Name Limit is 15 chars.
-	// We append "_x" (2 chars).
-	// So hostIf part must be <= 13 chars.
-	prefix := hostIf
-	if len(prefix) > 13 {
-		prefix = prefix[:13]
-	}
-	appIf := prefix + "_x"
+	appIf := v.Cfg.AppInterface
 	
 	// Cleanup
 	runCmdQuiet("ip", "link", "del", hostIf)
