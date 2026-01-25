@@ -310,6 +310,9 @@ func (c *Config) MapConfigByProtocol() map[string]interface{} {
 		if c.WGInterface != "" { m["wg_interface"] = c.WGInterface }
 		if c.ListenPort != 0 { m["listen_port"] = c.ListenPort }
 		if c.WGPort != 0 { m["wg_port"] = c.WGPort }
+		if c.PeerAddr != "" { m["peer_addr"] = c.PeerAddr }
+		if c.PeerPort != 0 { m["peer_port"] = c.PeerPort }
+		if c.UseTCP { m["use_tcp"] = true }
 	} else {
 		// Only raw (Veth) fields
 		if c.LocalAddr != "" { m["local_addr"] = c.LocalAddr }

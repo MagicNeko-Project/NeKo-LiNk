@@ -24,7 +24,8 @@
   "mode": "client",
   "protocol": "wg-raw",
   "key": "myaespassword",      // 共享加密密码
-  "peer_addr": "1.2.3.4",      // 远程地址
+  "peer_addr": "1.2.3.4",      // [重要] 远端服务端公网 IP (Client必填)
+  "peer_port": 23333,          // [重要] 远端监听端口 (与服务端 listen_port 对齐)
   "parent_interface": "eth0",  // eBPF 挂载的目标物理网卡
   "wg_interface": "tox0",      // 系统中看到的 WG 网卡名
   "local_addr": "10.0.0.2/24", // 隧道内网 IP
