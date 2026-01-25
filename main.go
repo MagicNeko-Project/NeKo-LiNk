@@ -571,14 +571,20 @@ func (v *VPNInstance) initRaw() {
 		// For legacy raw mode here, we don't strictly need to pre-load.
 		// However, if we want to retain the engine handle for registration:
 		
-		engineMode := "raw"
-		if v.Cfg.UseTCP { engineMode = "tcp" }
-		
-		if engine, err := xdp.GetShadowXEngine(v.Cfg.EBPFDevice, engineMode); err != nil {
-			log.Printf("[EBPF] 核心加载失败: %v. 回退到纯用户态 Raw Socket.", err)
+		// ⚠️ [Policy Update] Force Disable eBPF for Legacy Raw Mode
+		if !v.Cfg.UseTCP && v.Cfg.Protocol == "raw" {
+			log.Printf("[RAW] \u26A0\uFE0F 策略调整: Raw 模式已强制关闭 eBPF 加速 (仅 wg-raw 启用). 使用标准内核路径.")
 			v.Cfg.UseEBPF = false
 		} else {
-			v.ebpfRawEngine = engine
+			engineMode := "raw"
+			if v.Cfg.UseTCP { engineMode = "tcp" }
+			
+			if engine, err := xdp.GetShadowXEngine(v.Cfg.EBPFDevice, engineMode); err != nil {
+				log.Printf("[EBPF] 核心加载失败: %v. 回退到纯用户态 Raw Socket.", err)
+				v.Cfg.UseEBPF = false
+			} else {
+				v.ebpfRawEngine = engine
+			}
 		}
 	}
 
