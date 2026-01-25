@@ -48,7 +48,8 @@ type Config struct {
 	InterfaceName string `json:"interface_name"`
 	Mode          string `json:"mode"`
 	LocalAddr     string `json:"local_addr"`
-	Key           string `json:"key"`
+	Key           string `json:"key"` // Shared Secret (Password)
+	PrivateKey    string `json:"private_key,omitempty"` // WireGuard Private Key
 	Protocol      string `json:"protocol"`
 	MTU           int    `json:"mtu"`
 
@@ -107,6 +108,17 @@ func (c *Config) PerformMigration() {
 		// Ensure Config Port exists
 		if c.WGPort == 0 {
 			c.WGPort = 51820
+		}
+	}
+	
+	// Key Generation (Auto-Provisioning)
+	if c.PrivateKey == "" {
+		out, err := exec.Command("wg", "genkey").Output()
+		if err == nil {
+			c.PrivateKey = strings.TrimSpace(string(out))
+			log.Printf("[Config] Assigned new WireGuard Private Key.")
+		} else {
+			log.Printf("Warning: 'wg' tool not found. Cannot auto-generate keys: %v", err)
 		}
 	}
 }
@@ -432,7 +444,10 @@ func (v *VPNInstance) setupKernelWireGuard(iface string) {
 	// We use `wg` utility for simplicity. 
 	// Private Key
 	privKeyFile := "/tmp/neko_wg_priv"
-	os.WriteFile(privKeyFile, []byte(v.Cfg.Key), 0600) // Ensure Cfg.Key is valid Base64 Private Key
+	if v.Cfg.PrivateKey == "" {
+		log.Fatal("[Wg-Raw] Error: No Private Key generated. Please use -migrate or check config.")
+	}
+	os.WriteFile(privKeyFile, []byte(v.Cfg.PrivateKey), 0600)
 	runCmd("wg", "set", iface, "private-key", privKeyFile)
 	os.Remove(privKeyFile)
 	
@@ -477,38 +492,88 @@ func (v *VPNInstance) handshakeLoop() {
 	// For "Kernel WG Mode", the key in v.Cfg.Key is the Private Key.
 	// We need the Public Key to advertise.
 	
-	privBytes, err := base64.StdEncoding.DecodeString(v.Cfg.Key)
-	if err != nil || len(privBytes) != 32 {
-		log.Printf("[Handshaker] Invalid Private Key, disabling side-channel advertisement")
-		return
-	}
-	var privKey [32]byte
-	copy(privKey[:], privBytes)
-	var pubKey [32]byte
-	curve25519.ScalarBaseMult(&pubKey, &privKey) // Standard Curve25519
+	// 1. Prepare Keys
+	// We use the PRIVATE KEY for our Identity (Standard WG)
+	// We use the KEY (Password) for the Shared Secret (AEAD Side-Channel)
 	
+	privateKeyHex := v.Cfg.PrivateKey
+	var myPrivKey [32]byte
+	if slice, err := base64.StdEncoding.DecodeString(privateKeyHex); err == nil && len(slice) == 32 {
+		copy(myPrivKey[:], slice)
+	}
+	
+	var myPubKey [32]byte
+	curve25519.ScalarBaseMult(&myPubKey, &myPrivKey)
+
 	// Ticker for Heartbeat
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
-	
-	// linkBind := NewRawBind(v.Cfg.IPProtocolNum, v.Cfg.UseNATT, v.Cfg.UseTCP, v.Cfg.ListenPort, v.Cfg.PeerPort)
-	// We only use this Bind's SendRaw method to construct/send packets via our XDP socket?
-	// Wait, XDP Socket handles transmission. 
-	// We need a helper to EncryptSideChannel(pubKey) -> []byte
-	
+
 	for {
 		select {
 		case <-ticker.C:
 			// Send Handshake Packet if we have a target
+			// We send OUR Public Key so remote can add us.
 			if v.Cfg.Mode == "client" && v.Cfg.PeerAddr != "" {
 				addr, err := netip.ParseAddr(v.Cfg.PeerAddr)
 				if err == nil {
 					remote := netip.AddrPortFrom(addr, uint16(v.Cfg.PeerPort))
-					v.sendHandshakePacket(remote, pubKey[:])
+					v.sendHandshakePacket(remote, myPubKey[:])
 				}
 			}
 		}
 	}
+}
+
+// Callback for when we receive a valid 0xFE Handshake
+func (v *VPNInstance) onHandshakeReceived(data []byte, remote netip.AddrPort) bool {
+	// [0xFE] [Nonce] [Cipher]
+	if len(data) < 1+NonceSize+Overhead+1 { return false }
+	
+	nonce := data[1:1+NonceSize]
+	cipherText := data[1+NonceSize:]
+	
+	// Decrypt with Shared Password
+	plain, err := v.AEAD.Open(nil, nonce, cipherText, nil)
+	if err != nil {
+		logDebug("[Handshake] Decrypt failed from %s", remote)
+		return false
+	}
+	
+	if len(plain) < 33 { return false }
+	// ver := plain[0]
+	// Previous code: plain[0] = 1, plain[1:] = PubKey
+	
+	peerPubKey := plain[1:33]
+	info := base64.StdEncoding.EncodeToString(peerPubKey)
+	
+	logDebug("[Handshake] Recv validated packet from %s. PeerPub: %s", remote, info)
+	
+	// Update Kernel WireGuard with this Peer
+	// wg set <iface> peer <Pub> allowed-ips 0.0.0.0/0 endpoint 127.0.0.1:WGPort
+	// Note: Endpoint for Kernel is always Local Proxy.
+	// But Proxy needs to know where to send (v.remoteAddr).
+	
+	v.remoteAddrMx.Lock()
+	if v.remoteAddr != remote {
+		v.remoteAddr = remote
+		log.Printf("[Handshake] Roaming: Peer moved to %s", remote)
+	}
+	v.remoteAddrMx.Unlock()
+	
+	// Update WG Peer
+	// We need to know the Interface Name. "neko_wg0"?
+	// We should probably store it.
+	go func() {
+		pubKey64 := base64.StdEncoding.EncodeToString(peerPubKey)
+		// We trust this peer because they knew the Shared Password.
+		// Add/Update Peer. 
+		// Note: PersistentKeepalive is handled by NekoLink heartbeat? Or allow WG to do it?
+		// Since we have Side-Channel, we don't strictly need WG Keepalive, but it helps.
+		runCmdQuiet("wg", "set", "neko_wg0", "peer", pubKey64, "allowed-ips", "0.0.0.0/0,::/0", "endpoint", fmt.Sprintf("127.0.0.1:%d", v.Cfg.WGPort))
+	}()
+	
+	return true
 }
 
 func (v *VPNInstance) sendHandshakePacket(remote netip.AddrPort, myPub []byte) {
@@ -738,9 +803,12 @@ func (v *VPNInstance) handleRawPacket(payload []byte, conn *net.UDPConn, target 
 
 	// 1. Check for Handshake (0xFE)
 	if payload[0] == 0xFE {
-		// Log handshake presence, but we likely just rely on Side-Channel to keep session alive?
-		// Actually, if we receive 0xFE, we should parse it to update Remote if roaming?
-		// For now simple pass-through logic: 0xFE packets are NOT for WireGuard.
+		// Side-Channel Handshake Processing
+		ip := target.IP
+		port := target.Port
+		addrPort := netip.AddrPortFrom(netip.AddrFrom4([4]byte{ip[0],ip[1],ip[2],ip[3]}), uint16(port))
+		
+		v.onHandshakeReceived(payload, addrPort)
 		return
 	}
 
