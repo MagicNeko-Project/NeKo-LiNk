@@ -267,6 +267,7 @@ func (c *Config) ParseLegacy() (changed bool) {
 				prefix = prefix[:11]
 			}
 			c.AppInterface = prefix + "_app"
+			log.Printf("[%s] 自动分配 AppInterface: %s", c.InterfaceName, c.AppInterface)
 			changed = true
 		}
 	}
@@ -1067,6 +1068,10 @@ func (v *VPNInstance) InitInterface() {
 	// Raw Mode: Veth
 	hostIf := v.Cfg.InterfaceName
 	appIf := v.Cfg.AppInterface
+
+	// Final Safety Check for Linux IFNAMSIZ (16 bytes including null)
+	if len(hostIf) > 15 { hostIf = hostIf[:15] }
+	if len(appIf) > 15 { appIf = appIf[:15] }
 	
 	// Cleanup
 	runCmdQuiet("ip", "link", "del", hostIf)
