@@ -151,6 +151,14 @@ func (c *Config) ParseLegacy() (changed bool) {
 		}
 	} else {
 		// Raw 模式 (Pure IP)：严禁出现端口
+		// Client Mode: 修正 ListenAddr 误用 (如果是 Client 且没 PeerAddr，说明 ListenAddr 填的是对面)
+		if c.Mode == "client" && c.PeerAddr == "" && c.ListenAddr != "" {
+			c.PeerAddr = c.ListenAddr
+			c.ListenAddr = "" // Client bind default
+			log.Printf("[%s] 修正配置: 将 ListenAddr 移动至 PeerAddr (Client 模式)", c.InterfaceName)
+			changed = true
+		}
+
 		if c.ListenPort != 0 {
 			c.ListenPort = 0
 			changed = true
@@ -163,7 +171,18 @@ func (c *Config) ParseLegacy() (changed bool) {
 			c.WGPort = 0
 			changed = true
 		}
+		// Raw Mode Client 也不需要 PeerPort
+		if c.PeerPort != 0 {
+			c.PeerPort = 0
+			changed = true
+		}
 	}
+
+	if c.InterfaceName == "" {
+		c.InterfaceName = "neko0"
+		changed = true
+	}
+	return
 
 	if c.InterfaceName == "" {
 		c.InterfaceName = "neko0"
