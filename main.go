@@ -309,7 +309,7 @@ func (v *VPNInstance) setupKernelWireGuard(iface string) {
 	// WireGuard interfaces don't auto-generate IPv6 LL, so we add one.
 	llBuf := make([]byte, 8)
 	rand.Read(llBuf)
-	// Use explicit blocks to ensure colons are present
+	// fe80::aaaa:bbbb:cccc:dddd/64 is the standard 64-bit IID format
 	llIP := fmt.Sprintf("fe80::%02x%02x:%02x%02x:%02x%02x:%02x%02x/64", 
 		llBuf[0], llBuf[1], llBuf[2], llBuf[3], llBuf[4], llBuf[5], llBuf[6], llBuf[7])
 	runCmd("ip", "addr", "add", llIP, "dev", iface)
@@ -863,6 +863,33 @@ func (v *VPNInstance) InitInterface() {
 
 	runCmdQuiet("sysctl", "-w", "net.ipv4.conf.all.rp_filter=0")
 	runCmdQuiet("sysctl", "-w", fmt.Sprintf("net.ipv4.conf.%s.rp_filter=0", hostIf))
+	
+	// FIX: Add Static ARP for Peer (Solves "Destination Host Unreachable" in L2 Tunnel)
+	// We assume a Point-to-Point topology (/30)
+	if ip, network, err := net.ParseCIDR(v.Cfg.VPNAddr); err == nil {
+		ones, _ := network.Mask.Size()
+		if ones == 30 {
+			ip4 := ip.To4()
+			if ip4 != nil {
+				// /30 Logic: .1 <-> .2
+				// Network: N. Usable: N+1, N+2.
+				// If lastByte & 3 == 1 -> Peer is +1
+				// If lastByte & 3 == 2 -> Peer is -1
+				lastByte := ip4[3]
+				var peerByte byte
+				rem := lastByte & 3
+				if rem == 1 { peerByte = lastByte + 1 }
+				if rem == 2 { peerByte = lastByte - 1 }
+				
+				if peerByte != 0 {
+					peerIP := net.IPv4(ip4[0], ip4[1], ip4[2], peerByte)
+					log.Printf("[%s] Auto-detected Peer IP: %s -> Adding Static ARP", hostIf, peerIP.String())
+					runCmd("ip", "neigh", "add", peerIP.String(), "lladdr", "00:00:00:00:00:01", "dev", hostIf, "nud", "permanent")
+				}
+			}
+		}
+	}
+
 	runCmdQuiet("sysctl", "-w", "net.ipv6.conf.all.forwarding=1")
 
 	v.setupNFTables(hostIf)
