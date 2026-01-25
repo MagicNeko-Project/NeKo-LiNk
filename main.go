@@ -1352,58 +1352,94 @@ func (v *VPNInstance) packetOrderedWriter() {
 	
 	firstPacket := true
 
-	for pkt := range v.reorderChan {
-		// Session Reset Detection
-		if pkt.SessionID != currentSessionID {
-			if !firstPacket {
-				log.Printf("[Reorderer] Session Change Detected: %x -> %x. Resetting Sequence.", currentSessionID, pkt.SessionID)
-			}
-			currentSessionID = pkt.SessionID
-			// Clear buffer for old session
-			for k, p := range buffer {
-				bufPool.Put(p.BufReq)
-				delete(buffer, k)
-			}
-			// Reset Seq to this packet's seq (Latch on)
-			nextSeq = pkt.Seq
-			firstPacket = false
-		}
+	// Timer for missing packet recovery
+	timer := time.NewTimer(20 * time.Millisecond)
+	defer timer.Stop()
 
-		if firstPacket {
-			nextSeq = pkt.Seq
-			firstPacket = false
-			currentSessionID = pkt.SessionID
-			log.Printf("[Reorderer] Init Sequence: %d (Session %x)", nextSeq, currentSessionID)
-		}
-
-		if pkt.Seq < nextSeq {
-			// Duplicate / Late
-			bufPool.Put(pkt.BufReq)
-			continue
-		}
-		
-		buffer[pkt.Seq] = pkt
-		
-		// Flush consecutive
-		for {
-			p, ok := buffer[nextSeq]
-			if !ok { break }
-			delete(buffer, nextSeq)
+	for {
+		select {
+		case pkt, ok := <-v.reorderChan:
+			if !ok { return }
 			
-			v.writeTUN(p.Data)
-			bufPool.Put(p.BufReq)
-			nextSeq++
+			// Session Reset Detection
+			if pkt.SessionID != currentSessionID {
+				if !firstPacket {
+					log.Printf("[Reorderer] Session Change Detected: %x -> %x. Resetting Sequence.", currentSessionID, pkt.SessionID)
+				}
+				currentSessionID = pkt.SessionID
+				// Clear buffer for old session
+				for k, p := range buffer {
+					bufPool.Put(p.BufReq)
+					delete(buffer, k)
+				}
+				// Reset Seq to this packet's seq (Latch on)
+				nextSeq = pkt.Seq
+				firstPacket = false
+			}
+
+			if firstPacket {
+				nextSeq = pkt.Seq
+				firstPacket = false
+				currentSessionID = pkt.SessionID
+				log.Printf("[Reorderer] Init Sequence: %d (Session %x)", nextSeq, currentSessionID)
+			}
+
+			if pkt.Seq < nextSeq {
+				bufPool.Put(pkt.BufReq)
+				continue
+			}
+			
+			buffer[pkt.Seq] = pkt
+			
+			// Flush consecutive
+			moved := false
+			for {
+				p, ok := buffer[nextSeq]
+				if !ok { break }
+				delete(buffer, nextSeq)
+				v.writeTUN(p.Data)
+				bufPool.Put(p.BufReq)
+				nextSeq++
+				moved = true
+			}
+
+			if moved {
+				if !timer.Stop() { select { case <-timer.C: default: } }
+				timer.Reset(20 * time.Millisecond)
+			}
+
+		case <-timer.C:
+			// Timeout: If waiting for a missing packet, skip it
+			if len(buffer) > 0 {
+				var minSeq uint64 = 0xFFFFFFFFFFFFFFFF
+				for s := range buffer {
+					if s < minSeq { minSeq = s }
+				}
+				if minSeq != 0xFFFFFFFFFFFFFFFF && minSeq > nextSeq {
+					// log.Printf("[Reorderer] Timeout waiting for %d, skipping to %d", nextSeq, minSeq)
+					nextSeq = minSeq
+					
+					// Now flush from current minSeq
+					for {
+						p, ok := buffer[nextSeq]
+						if !ok { break }
+						delete(buffer, nextSeq)
+						v.writeTUN(p.Data)
+						bufPool.Put(p.BufReq)
+						nextSeq++
+					}
+				}
+			}
+			timer.Reset(20 * time.Millisecond)
 		}
-		
-		// Prevent Bloat / Deadlock (Max 512 packets reorder window)
+
+		// Prevent Bloat (Fallback)
 		if len(buffer) > 512 {
-			// Find min seq in buffer to skip to
-			var minSeq uint64 = 0xFFFFFFFFFFFFFFFF // Max
+			var minSeq uint64 = 0xFFFFFFFFFFFFFFFF
 			for s := range buffer {
 				if s < minSeq { minSeq = s }
 			}
 			if minSeq != 0xFFFFFFFFFFFFFFFF {
-				// log.Printf("[Reorderer] Buffer full (%d), skipping %d -> %d", len(buffer), nextSeq, minSeq)
 				nextSeq = minSeq
 			}
 		}
