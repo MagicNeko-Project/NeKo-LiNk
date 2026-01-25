@@ -1,0 +1,17 @@
+[
+  {
+    "interface_name": "neko0",
+    "mode": "server",
+    "local_addr": "10.0.0.1/24",
+    "local_addr_v4": "10.0.0.1/24",
+    "key": "",
+    "protocol": "wg-raw",
+    "mtu": 1400,
+    "listen_port": 23333,
+    "wg_port": 51820,
+    "ip_protocol_num": 233,
+    "comment": "Migrated from: neko0",
+    "wg_interface": "neko0",
+    "parent_interface": "eth0"
+  }
+]

@@ -1741,16 +1741,55 @@ func main() {
 
 	if *migrate {
 		log.Printf(">>> 正在优化并清理配置文件布局...")
-		var outData []byte
-		if true {
-			outData, _ = json.MarshalIndent(configs, "", "  ")
-		} else {
-			outData, _ = json.MarshalIndent(configs[0], "", "  ")
+		
+		fi, err := os.Stat(*cfgPath)
+		if err != nil {
+			log.Fatalf("无法访问配置路径: %v", err)
 		}
-		if err := os.WriteFile(*cfgPath, outData, 0644); err != nil {
-			log.Printf("保存失败: %v", err)
+
+		migrateFile := func(path string) {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				log.Printf("无法读取 %s: %v", path, err)
+				return
+			}
+			
+			var fileConfigs []Config
+			if err := json.Unmarshal(data, &fileConfigs); err != nil {
+				var single Config
+				if err2 := json.Unmarshal(data, &single); err2 == nil {
+					fileConfigs = append(fileConfigs, single)
+				} else {
+					log.Printf("跳过无法解析的文件 %s: %v", path, err)
+					return
+				}
+			}
+			
+			for i := range fileConfigs {
+				fileConfigs[i].ParseLegacy()
+				fileConfigs[i].PerformMigration()
+			}
+			
+			outData, _ := json.MarshalIndent(fileConfigs, "", "  ")
+			if err := os.WriteFile(path, outData, 0644); err != nil {
+				log.Printf("保存失败 %s: %v", path, err)
+			} else {
+				log.Printf("✅ 已优化: %s", path)
+			}
+		}
+
+		if fi.IsDir() {
+			files, err := os.ReadDir(*cfgPath)
+			if err != nil {
+				log.Fatalf("无法读取目录: %v", err)
+			}
+			for _, f := range files {
+				if !f.IsDir() && strings.HasSuffix(f.Name(), ".json") {
+					migrateFile(filepath.Join(*cfgPath, f.Name()))
+				}
+			}
 		} else {
-			log.Printf("✅ 配置文件已精简并保存！")
+			migrateFile(*cfgPath)
 		}
 		os.Exit(0)
 	}

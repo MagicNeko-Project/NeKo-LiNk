@@ -27,7 +27,9 @@ cp $BIN_NAME $BIN_DIR/
 chmod +x $BIN_DIR/$BIN_NAME
 
 echo ">>> 正在自动优化并升级配置文件..."
-$BIN_DIR/$BIN_NAME -migrate -c /etc/neko-link/config.json 2>/dev/null
+if [ -d "/etc/neko-link" ]; then
+    $BIN_DIR/$BIN_NAME -migrate -c /etc/neko-link 2>/dev/null
+fi
 if [ -f "config.json" ]; then
     ./$BIN_NAME -migrate -c config.json 2>/dev/null
 fi

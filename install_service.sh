@@ -32,54 +32,61 @@ read -p "请输入 [1/2]: " choice
 
 CFG_SRC=""
 if [ "$choice" == "1" ]; then
-    CFG_SRC="config.json"
-    if [ ! -f "$CFG_SRC" ]; then
-        echo "当前目录无 $CFG_SRC，是否生成默认服务端配置？(y/n)"
+    TARGET_CONF="$CONF_DIR/server.json"
+    
+    # Check if we need to generate
+    if [ ! -f "$TARGET_CONF" ]; then
+        echo "当前目录无 server.json，是否生成默认服务端配置？(y/n)"
         read -p "> " gen_cfg
         if [ "$gen_cfg" == "y" ]; then
              RAND_KEY=$(openssl rand -hex 32)
-             cat > config.json <<EOF
-{
-  "server_addr": "[::]",
-  "server_addr": "[::]",
-  "protocol": "wg-raw",
-  "ip_protocol_num": 233,
-  "base_port": 9000,
-  "port_count": 4,
-  "key": "$RAND_KEY",
-  "local_addr": "10.0.0.1/24",
-  "mode": "server",
-  "interface_name": "neko0",
-  "mtu": 1400
-}
+             cat > "$TARGET_CONF" <<EOF
+[
+  {
+    "server_addr": "[::]",
+    "protocol": "wg-raw",
+    "ip_protocol_num": 233,
+    "key": "$RAND_KEY",
+    "local_addr": "10.0.0.1/24",
+    "mode": "server",
+    "interface_name": "neko0",
+    "mtu": 1400
+  }
+]
 EOF
-            echo "已生成默认配置 (Key: $RAND_KEY)"
+            echo "已生成默认配置 (Key: $RAND_KEY) -> $TARGET_CONF"
         else
-            echo "错误：找不到配置文件。"; exit 1
+            if [ -f "config.json" ]; then
+                cp config.json "$TARGET_CONF"
+                echo "使用了当前目录的 config.json"
+            else
+                 echo "未生成配置。安装后请手动创建 $TARGET_CONF"
+            fi
         fi
     fi
     SERVICE_DESC="NekoLink VPN Server"
+    
 elif [ "$choice" == "2" ]; then
-    CFG_SRC="client_config.json"
-    if [ ! -f "$CFG_SRC" ]; then
-         echo "警告：当前目录找不到 $CFG_SRC，安装后请务必去 $CONF_DIR/config.json 手动配置！"
-         # 创建一个空模版
-         cat > client_config.json <<EOF
-{
-  "server_addr": "1.2.3.4",
-  "server_addr": "1.2.3.4",
-  "protocol": "wg-raw",
-  "ip_protocol_num": 233,
-  "base_port": 9000,
-  "port_count": 4,
-  "key": "FILL_ME",
-  "local_addr": "10.0.0.2/24",
-  "mode": "client",
-  "interface_name": "eth0",
-  "mtu": 1400,
-  "wg_port": 51820
-}
+    TARGET_CONF="$CONF_DIR/client.json"
+    
+    if [ ! -f "$TARGET_CONF" ]; then
+         echo "生成默认客户端配置模板..."
+         cat > "$TARGET_CONF" <<EOF
+[
+  {
+    "server_addr": "1.2.3.4",
+    "protocol": "wg-raw",
+    "ip_protocol_num": 233,
+    "key": "FILL_ME",
+    "local_addr": "10.0.0.2/24",
+    "mode": "client",
+    "interface_name": "eth0",
+    "mtu": 1400,
+    "wg_port": 51820
+  }
+]
 EOF
+        echo "已生成: $TARGET_CONF (请记得修改 ip 和 key)"
     fi
     SERVICE_DESC="NekoLink VPN Client"
 else
@@ -87,14 +94,12 @@ else
     exit 0
 fi
 
-# 复制配置文件
-echo ">>> 安装配置文件到 $CONF_DIR/config.json ..."
-cp $CFG_SRC $CONF_DIR/config.json
-chmod 600 $CONF_DIR/config.json
+chmod 600 "$TARGET_CONF"
 
 # 创建 Systemd Unit
-# 注意：我们不再指定 -c 参数，让程序自己去读 /etc/neko-link/config.json 或默认值
-# 为了稳妥，我们显式指定配置文件路径
+# 使用目录作为配置源，支持多文件加载
+CONF_ARG="$CONF_DIR"
+
 cat > /etc/systemd/system/${APP_NAME}.service <<EOF
 [Unit]
 Description=$SERVICE_DESC
@@ -102,7 +107,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=$BIN_DIR/$BIN_NAME -c $CONF_DIR/config.json
+ExecStart=$BIN_DIR/$BIN_NAME -c $CONF_ARG
 Restart=always
 RestartSec=5
 User=root

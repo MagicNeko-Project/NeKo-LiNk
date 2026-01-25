@@ -1,28 +1,22 @@
 #!/bin/bash
 if [ "$EUID" -ne 0 ]; then echo "请使用 root 权限运行 (sudo)"; exit 1; fi
 
-CONFIG_FILE="config.json"
-
-if [ ! -f "$CONFIG_FILE" ]; then
-    # Try /etc/neko-link/config.json
-    if [ -f "/etc/neko-link/config.json" ]; then
-        CONFIG_FILE="/etc/neko-link/config.json"
+# 优先使用 /etc/neko-link 目录 (如果存在且非空)
+if [ -d "/etc/neko-link" ] && [ "$(ls -A /etc/neko-link)" ]; then
+    CONFIG_PATH="/etc/neko-link"
+else
+    # 简单的本地回退
+    if [ -f "config.json" ]; then
+        CONFIG_PATH="config.json"
     else
-        echo ">>> 未找到配置文件，正在尝试自动生成..."
+        # 都不存在，初始化到全局目录
+        echo ">>> 未找到有效配置，正在初始化服务端配置..."
         ./neko-link -init -type server
-        if [ -f "/etc/neko-link/config.json" ]; then
-            CONFIG_FILE="/etc/neko-link/config.json"
-        elif [ -f "config.json" ]; then
-             CONFIG_FILE="config.json"
-        else
-            echo ">>> 生成失败，请手动检查。"
-            exit 1
-        fi
-        echo ">>> 已生成默认配置 ($CONFIG_FILE)，请编辑后重新运行！"
-        echo ">>> 编辑命令: nano $CONFIG_FILE"
+        CONFIG_PATH="/etc/neko-link"
+        echo ">>> 已生成默认配置到 $CONFIG_PATH，请编辑后重试。"
         exit 0
     fi
 fi
 
-echo ">>> 启动 NekoLink (Server)..."
-./neko-link -c "$CONFIG_FILE"
+echo ">>> 启动 NekoLink (Server) [Config: $CONFIG_PATH]..."
+./neko-link -c "$CONFIG_PATH"

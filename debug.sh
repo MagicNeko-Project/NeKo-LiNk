@@ -28,12 +28,12 @@ if [ $? -ne 0 ]; then
 fi
 
 # 查找配置
-CONF="/etc/neko-link/config.json"
-if [ ! -f "$CONF" ]; then
+CONF="/etc/neko-link"
+if [ ! -d "$CONF" ] || [ -z "$(ls -A $CONF)" ]; then
     if [ -f "config.json" ]; then
         CONF="config.json"
     else
-        echo -e "\033[0;31m❌ 找不到配置文件喵！(请在 /etc/neko-link/ 或当前目录准备好 config.json)\033[0m"
+        echo -e "\033[0;31m❌ 找不到配置文件喵！(请确保 /etc/neko-link 有文件或当前目录有 config.json)\033[0m"
         exit 1
     fi
 fi
