@@ -642,10 +642,12 @@ func (v *VPNInstance) onHandshakeReceived(data []byte, remote netip.AddrPort) bo
 	}
 	
 	// Update WG Peer (only for wg-raw mode)
-	go func() {
-		pubKey64 := base64.StdEncoding.EncodeToString(peerPubKey)
-		runCmdQuiet("wg", "set", v.WGInterface, "peer", pubKey64, "allowed-ips", "0.0.0.0/0,::/0", "endpoint", fmt.Sprintf("127.0.0.1:%d", v.Cfg.WGPort))
-	}()
+	if v.Cfg.Protocol == "wg-raw" {
+		go func() {
+			pubKey64 := base64.StdEncoding.EncodeToString(peerPubKey)
+			runCmdQuiet("wg", "set", v.WGInterface, "peer", pubKey64, "allowed-ips", "0.0.0.0/0,::/0", "endpoint", fmt.Sprintf("127.0.0.1:%d", v.Cfg.WGPort))
+		}()
+	}
 	
 	return true
 }
@@ -826,7 +828,7 @@ func (v *VPNInstance) proxyXDPToUDP(conn *net.UDPConn) {
 	for {
 		pkts, err := v.Xsk.Receive()
 		if err != nil || len(pkts) == 0 {
-			v.Xsk.Poll(-1)
+			v.Xsk.Poll(2)
 			continue
 		}
 		
@@ -1095,14 +1097,14 @@ func (v *VPNInstance) InitInterface() {
 	runCmd("ip", "link", "set", hostIf, "arp", "on")
 	
 	// Disable Checksum Offloading to fix UDP issues in Veth/XDP
-	runCmdQuiet("ethtool", "-K", hostIf, "tx", "off", "rx", "off", "tso", "off", "gso", "off", "ufo", "off")
+	runCmd("ethtool", "-K", hostIf, "tx", "off", "rx", "off", "tso", "off", "gso", "off", "ufo", "off")
 	
 	runCmd("ip", "link", "set", hostIf, "up")
 	
 	// Configure App Side (AF_XDP Target)
 	runCmd("ip", "link", "set", appIf, "arp", "on")
 	runCmd("ip", "link", "set", appIf, "promisc", "on")
-	runCmdQuiet("ethtool", "-K", appIf, "tx", "off", "rx", "off", "tso", "off", "gso", "off", "ufo", "off")
+	runCmd("ethtool", "-K", appIf, "tx", "off", "rx", "off", "tso", "off", "gso", "off", "ufo", "off")
 	runCmd("ip", "link", "set", appIf, "mtu", fmt.Sprintf("%d", v.Cfg.MTU))
 	runCmd("ip", "link", "set", appIf, "up")
 	runCmdQuiet("sysctl", "-w", fmt.Sprintf("net.ipv6.conf.%s.disable_ipv6=1", appIf))
@@ -1271,7 +1273,7 @@ func (v *VPNInstance) XDPReaderLoop(idx int) {
 	for {
 		pkts, err := v.Xsk.Receive()
 		if err != nil || len(pkts) == 0 {
-			v.Xsk.Poll(-1)
+			v.Xsk.Poll(2)
 			continue
 		}
 		
