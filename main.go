@@ -244,6 +244,9 @@ type VPNInstance struct {
 	AEAD           cipher.AEAD
 	aeadPool       []cipher.AEAD // Raw 模式并发需要
 
+	// Reordering Pipeline
+	reorderChan chan *DecryptedPacket
+
 	// 通用统计
 	SessionID    uint32
 	nonceCounter uint64 // 若 Raw 模式需要
@@ -252,6 +255,12 @@ type VPNInstance struct {
 	
 	// WG Device Ref
 	wgDevice *device.Device
+}
+
+type DecryptedPacket struct {
+	Seq    uint64
+	Data   []byte
+	BufReq *[]byte
 }
 
 func NewVPNInstance(cfg Config) *VPNInstance {
@@ -274,6 +283,8 @@ func NewVPNInstance(cfg Config) *VPNInstance {
 	}
 	v.AEAD = v.aeadPool[0]
 	v.SessionID = uint32(os.Getpid()) ^ uint32(keyHash[0])<<24
+	
+	v.reorderChan = make(chan *DecryptedPacket, 1024)
 
 	return v
 }
@@ -433,13 +444,21 @@ func (v *VPNInstance) Start() {
 	} else {
 		// Legacy Raw 模式 (保留)
 		log.Printf("[Init] 启动 Raw 模式 (High Performance Encrypted IP)")
+		
+		// 启动写入循环
 		for i := 0; i < v.numWorkers; i++ {
 			go v.TUNReaderLoopRaw(i)
 		}
-		// ⚠️ [Stablity Fix] 强制单线程读取以避免 Raw 模式下的包乱序 (Packet Reordering)
-		// 多线程读取会导致 TCP 严重丢包重传。单线程虽然有瓶颈，但更稳定。
-		log.Printf("[RAW] 已启用单线程读取模式以保证顺序 (Anti-Reordering Active)")
-		go v.rawReaderLoop(0)
+		
+		// 启动重排序写入器 (Consumer)
+		go v.packetOrderedWriter()
+
+		// 启动并行读取器 (Producers)
+		// 恢复多线程以提高吞吐，依赖 Reorderer 保证顺序
+		log.Printf("[RAW] 已启用流水线重排序模式 (Pipeline Reordering Active): %d Workers -> 1 Ordered Writer", v.numWorkers)
+		for i := 0; i < v.numWorkers; i++ {
+			go v.rawReaderLoop(0)
+		}
 	}
 }
 
@@ -576,13 +595,40 @@ func (v *VPNInstance) initRaw() {
 
 func (v *VPNInstance) rawReaderLoop(idx int) {
 	conn := v.ConnRaw[idx]
-	buf := make([]byte, BufSize)
+	
+	// Pre-allocate buffer pointer from pool
+	bufPtr := bufPool.Get().(*[]byte)
+	buf := *bufPtr
+	
 	for {
+		// Read into current buffer
 		n, addr, err := conn.ReadFromIP(buf)
 		if err != nil { continue }
 		if n < NonceSize+Overhead { continue }
 		if v.Cfg.Mode == "server" { v.ServerPeerIP.Store(addr) }
-		v.handleIncomingPacket(buf[:n])
+		
+		// 1. Extract Sequence from Nonce (BigEndian uint64 at start)
+		seq := binary.BigEndian.Uint64(buf[0:8])
+		
+		// 2. Decrypt
+		enc := buf[:n]
+		nonce := enc[:NonceSize]
+		cipherText := enc[NonceSize:]
+		
+		plain, err := v.AEAD.Open(enc[NonceSize:NonceSize], nonce, cipherText, nil)
+		if err == nil && len(plain) > 0 {
+			// Successful Decrypt
+			// Submit to Reorderer
+			v.reorderChan <- &DecryptedPacket{
+				Seq:    seq,
+				Data:   plain,  // Slice of buf
+				BufReq: bufPtr, // Ownership passed
+			}
+			
+			// Allocate NEW buffer for next read
+			bufPtr = bufPool.Get().(*[]byte)
+			buf = *bufPtr
+		}
 	}
 }
 
@@ -636,10 +682,55 @@ func (v *VPNInstance) sendRawOptimized(plain []byte, aead cipher.AEAD) {
 	bufPool.Put(dstPtr)
 }
 
+func (v *VPNInstance) packetOrderedWriter() {
+	var nextSeq uint64 = 0
+	buffer := make(map[uint64]*DecryptedPacket)
+	
+	firstPacket := true
+
+	for pkt := range v.reorderChan {
+		if firstPacket {
+			nextSeq = pkt.Seq
+			firstPacket = false
+			log.Printf("[Reorderer] Init Sequence: %d", nextSeq)
+		}
+
+		if pkt.Seq < nextSeq {
+			// Duplicate / Late
+			bufPool.Put(pkt.BufReq)
+			continue
+		}
+		
+		buffer[pkt.Seq] = pkt
+		
+		// Flush consecutive
+		for {
+			p, ok := buffer[nextSeq]
+			if !ok { break }
+			delete(buffer, nextSeq)
+			
+			v.writeTUN(p.Data)
+			bufPool.Put(p.BufReq)
+			nextSeq++
+		}
+		
+		// Prevent Bloat / Deadlock (Max 512 packets reorder window)
+		if len(buffer) > 512 {
+			// Find min seq in buffer to skip to
+			var minSeq uint64 = 0xFFFFFFFFFFFFFFFF // Max
+			for s := range buffer {
+				if s < minSeq { minSeq = s }
+			}
+			if minSeq != 0xFFFFFFFFFFFFFFFF {
+				// log.Printf("[Reorderer] Buffer full (%d), skipping %d -> %d", len(buffer), nextSeq, minSeq)
+				nextSeq = minSeq
+			}
+		}
+	}
+}
+
 func (v *VPNInstance) handleIncomingPacket(enc []byte) {
-	if len(enc) < NonceSize+Overhead { return }
-	plain, err := v.AEAD.Open(enc[NonceSize:NonceSize], enc[:NonceSize], enc[NonceSize:], nil)
-	if err == nil && len(plain) > 0 { v.writeTUN(plain) }
+	// Deprecated: Logic moved to rawReaderLoop & Pipeline
 }
 
 func (v *VPNInstance) writeTUN(data []byte) {
