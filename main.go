@@ -349,6 +349,7 @@ type VPNInstance struct {
 
 	// Reordering Pipeline
 	reorderChan chan *DecryptedPacket
+	rxDispatchChan chan rxPacket // RX Dispatcher
 
 	// 通用统计
 	SessionID    uint32
@@ -368,6 +369,12 @@ type VPNInstance struct {
 	WGInterface  string // Kernel WireGuard Interface Name
 	remoteAddr   netip.AddrPort
 	remoteAddrMx sync.RWMutex
+}
+
+type rxPacket struct {
+	bufPtr *[]byte
+	n      int
+	addr   *net.IPAddr
 }
 
 type DecryptedPacket struct {
@@ -400,6 +407,7 @@ func NewVPNInstance(cfg Config) *VPNInstance {
 	
 	// High throughput reorder buffer
 	v.reorderChan = make(chan *DecryptedPacket, 8192)
+	v.rxDispatchChan = make(chan rxPacket, 8192)
 
 	// Initialize Phantom Remote if Client
 	if cfg.Mode == "client" && cfg.PeerAddr != "" {
@@ -1043,6 +1051,12 @@ func (v *VPNInstance) Start() {
 		log.Printf("[RAW] 启用高性能并行 TX 流水线: 1 Producer -> %d Encryption Workers", v.numWorkers)
 		go v.XDPReaderLoop(0)
 		
+		// 启动 RX Workers
+		log.Printf("[RAW] 启用高性能并行 RX 流水线: %d Decryption Workers", v.numWorkers)
+		for i := 0; i < v.numWorkers; i++ {
+			go v.rxWorkerLoop(i)
+		}
+
 		// 启动重排序写入器 (Consumer) (Decrypt -> Reorder -> AF_XDP)
 		go v.packetOrderedWriter()
 
@@ -1248,29 +1262,14 @@ func (v *VPNInstance) rawReaderLoop(idx int) {
 			continue // Handshake doesn't need reordering, reuse buffer
 		}
 
-		// 1. Extract Sequence and SessionID
-		seq := binary.BigEndian.Uint64(buf[0:8])
-		sess := binary.BigEndian.Uint32(buf[8:12])
-		
-		// 2. Decrypt
-		enc := buf[:n]
-		nonce := enc[:NonceSize]
-		cipherText := enc[NonceSize:]
-		
-		plain, err := v.AEAD.Open(enc[NonceSize:NonceSize], nonce, cipherText, nil)
-		if err == nil && len(plain) > 0 {
-			// Submit to Reorderer
-			v.reorderChan <- &DecryptedPacket{
-				Seq:       seq,
-				SessionID: sess,
-				Data:      plain,  // Slice of currently active buffer
-				BufReq:    bufPtr, // Ownership passed to reorderer
-			}
-			
-			// Ownership transferred, MUST get a new buffer for next read
+		// Dispatch to RX Workers (Parallel Decryption)
+		select {
+		case v.rxDispatchChan <- rxPacket{bufPtr: bufPtr, n: n, addr: addr}:
+			// Ownership transferred, get new buffer
 			bufPtr = bufPool.Get().(*[]byte)
+		default:
+			// Drop if full to apply backpressure (Reuse buffer)
 		}
-		// If decrypt failed, we just reuse the current buffer for next packet.
 	}
 }
 
@@ -1350,6 +1349,45 @@ func (v *VPNInstance) XDPReaderLoop(idx int) {
 // --- XDP Reader/Writer (Raw Mode 2) ---
 // Note: XDPReaderLoop implemented above to resolve scope issues.
 
+func (v *VPNInstance) rxWorkerLoop(wIdx int) {
+	aead := v.aeadPool[wIdx%len(v.aeadPool)]
+
+	for pkt := range v.rxDispatchChan {
+		buf := (*pkt.bufPtr)[:pkt.n]
+
+		// Handshake already handled by Dispatcher
+		if len(buf) < NonceSize+Overhead {
+			bufPool.Put(pkt.bufPtr)
+			continue
+		}
+
+		// 1. Extract Sequence and SessionID
+		seq := binary.BigEndian.Uint64(buf[0:8])
+		sess := binary.BigEndian.Uint32(buf[8:12])
+
+		// 2. Decrypt
+		// Re-slice to separate Nonce and CipherText
+		nonce := buf[:NonceSize]
+		cipherText := buf[NonceSize:]
+
+		// Decrypt in-place (overwrite cipherText)
+		// We use buf[NonceSize:NonceSize] as dst to start writing where cipherText begins
+		plain, err := aead.Open(buf[NonceSize:NonceSize], nonce, cipherText, nil)
+
+		if err == nil {
+			v.reorderChan <- &DecryptedPacket{
+				Seq:       seq,
+				SessionID: sess,
+				Data:      plain,
+				BufReq:    pkt.bufPtr,
+			}
+		} else {
+			// Decrypt failed
+			bufPool.Put(pkt.bufPtr)
+		}
+	}
+}
+
 func (v *VPNInstance) encryptInto(plain []byte, aead cipher.AEAD, dst []byte) []byte {
 	outSize := NonceSize + len(plain) + Overhead
 	if len(dst) < outSize { return nil }
@@ -1384,7 +1422,11 @@ func (v *VPNInstance) packetOrderedWriter() {
 	firstPacket := true
 
 	// Timer for missing packet recovery
-	timer := time.NewTimer(20 * time.Millisecond)
+	// Optimized: Reduced from 20ms to 5ms to reduce RTT spikes
+	const ReorderTimeout = 5 * time.Millisecond
+	const HeadOfLineLimit = 50
+
+	timer := time.NewTimer(ReorderTimeout)
 	defer timer.Stop()
 
 	for {
@@ -1422,6 +1464,12 @@ func (v *VPNInstance) packetOrderedWriter() {
 			
 			buffer[pkt.Seq] = pkt
 			
+			// OPTIMIZATION: Check Head Of Line Limit
+			// If we have packets far ahead, assume packet loss and skip nextSeq to unblock stream
+			if _, ok := buffer[nextSeq+HeadOfLineLimit]; ok {
+				nextSeq++ // Skip the missing one
+			}
+
 			// Flush consecutive
 			moved := false
 			for {
@@ -1436,7 +1484,7 @@ func (v *VPNInstance) packetOrderedWriter() {
 
 			if moved {
 				if !timer.Stop() { select { case <-timer.C: default: } }
-				timer.Reset(20 * time.Millisecond)
+				timer.Reset(ReorderTimeout)
 			}
 
 		case <-timer.C:
@@ -1447,7 +1495,7 @@ func (v *VPNInstance) packetOrderedWriter() {
 					if s < minSeq { minSeq = s }
 				}
 				if minSeq != 0xFFFFFFFFFFFFFFFF && minSeq > nextSeq {
-					// 30ms timeout is safe for local/LAN jitter
+					// Timeout occurred, skip to next available packet
 					nextSeq = minSeq
 					
 					// Now flush from current minSeq
@@ -1461,7 +1509,7 @@ func (v *VPNInstance) packetOrderedWriter() {
 					}
 				}
 			}
-			timer.Reset(30 * time.Millisecond)
+			timer.Reset(ReorderTimeout)
 		}
 
 		// Prevent Bloat (Dynamic Window)
