@@ -319,6 +319,8 @@ type VPNInstance struct {
 	
 	// Phantom Mode State
 	GatewayMAC   [6]byte
+	PhyMAC       [6]byte
+	WGInterface  string // Kernel WireGuard Interface Name
 	remoteAddr   netip.AddrPort
 	remoteAddrMx sync.RWMutex
 }
@@ -381,15 +383,32 @@ func generateWGKey() ([]byte, []byte) {
 func (v *VPNInstance) startWireGuardRaw() {
 	// Phantom Mode (Mode 3): Kernel WireGuard <-> UDP Listener <-> AF_XDP Proxy
 	
-	// 1. Initialize XDP on Physical Interface
-	log.Printf("[WG-RAW] Initializing Phantom XDP on %s", v.Cfg.InterfaceName)
+	// Determine BPF Mode
+	bpfMode := 2 // Default Raw
+	bpfTarget := v.Cfg.IPProtocolNum
+
+	// Check for UDP Mode
+	if v.Cfg.UseNATT || v.Cfg.IPProtocolNum == 17 {
+		bpfMode = 1
+		bpfTarget = v.Cfg.ListenPort
+	}
+
+	// 1. Get Physical MAC
+	iface, err := net.InterfaceByName(v.Cfg.InterfaceName)
+	if err == nil && len(iface.HardwareAddr) >= 6 {
+		copy(v.PhyMAC[:], iface.HardwareAddr)
+		log.Printf("[WG-RAW] Physical MAC: %x", v.PhyMAC)
+	}
+
+	// 2. Initialize XDP on Physical Interface
+	log.Printf("[WG-RAW] Initializing Phantom XDP on %s (Mode: %d, Target: %d)", v.Cfg.InterfaceName, bpfMode, bpfTarget)
 	// Note: In Phantom Mode, v.Cfg.InterfaceName IS the physical interface (e.g. eth0)
 	xsk, err := xdp.NewSocket(xdp.Config{
 		Interface: v.Cfg.InterfaceName,
 		QueueID:   0,
 		RingSize:  2048,
-		Mode:      1, // UDP Filter Mode
-		Target:    v.Cfg.ListenPort,
+		Mode:      bpfMode,
+		Target:    bpfTarget,
 	})
 	if err != nil {
 		log.Fatalf("Phantom XDP Init Failed: %v", err)
@@ -400,7 +419,9 @@ func (v *VPNInstance) startWireGuardRaw() {
 	}
 	
 	// 2. Setup Kernel WireGuard Interface
-	wgIf := "neko_wg0"
+	// Use a unique name based on WGPort to avoid conflicts
+	wgIf := fmt.Sprintf("wg_%d", v.Cfg.WGPort)
+	v.WGInterface = wgIf
 	v.setupKernelWireGuard(wgIf)
 	
 	// 3. Start Local UDP Proxy Listener
@@ -570,7 +591,7 @@ func (v *VPNInstance) onHandshakeReceived(data []byte, remote netip.AddrPort) bo
 		// Add/Update Peer. 
 		// Note: PersistentKeepalive is handled by NekoLink heartbeat? Or allow WG to do it?
 		// Since we have Side-Channel, we don't strictly need WG Keepalive, but it helps.
-		runCmdQuiet("wg", "set", "neko_wg0", "peer", pubKey64, "allowed-ips", "0.0.0.0/0,::/0", "endpoint", fmt.Sprintf("127.0.0.1:%d", v.Cfg.WGPort))
+		runCmdQuiet("wg", "set", v.WGInterface, "peer", pubKey64, "allowed-ips", "0.0.0.0/0,::/0", "endpoint", fmt.Sprintf("127.0.0.1:%d", v.Cfg.WGPort))
 	}()
 	
 	return true
@@ -613,7 +634,14 @@ func (v *VPNInstance) sendHandshakePacket(remote netip.AddrPort, myPub []byte) {
 }
 
 func (v *VPNInstance) sendRawXDP(data []byte, remote netip.AddrPort) {
-	pkt := make([]byte, 14 + 20 + 8 + len(data))
+	isRaw := !v.Cfg.UseNATT && v.Cfg.IPProtocolNum != 17
+
+	pktLen := 14 + 20 + 8 + len(data)
+	if isRaw {
+		pktLen = 14 + 20 + len(data)
+	}
+
+	pkt := make([]byte, pktLen)
 	
 	// 1. Ethernet
 	// Dst: Gateway MAC (or Broadcast if unknown)
@@ -631,8 +659,13 @@ func (v *VPNInstance) sendRawXDP(data []byte, remote netip.AddrPort) {
 	} else {
 		copy(pkt[0:6], gwMac[:])
 	}
-	// Src: 02:00:00:00:00:01 (Fixed for now, or learn form system?)
-	copy(pkt[6:12], []byte{0x02,0x00,0x00,0x00,0x00,0x01})
+	// Src: Physical MAC
+	if v.PhyMAC != [6]byte{0,0,0,0,0,0} {
+		copy(pkt[6:12], v.PhyMAC[:])
+	} else {
+		// Fallback
+		copy(pkt[6:12], []byte{0x02,0x00,0x00,0x00,0x00,0x01})
+	}
 	
 	// EtherType IPv4
 	binary.BigEndian.PutUint16(pkt[12:14], 0x0800)
@@ -642,11 +675,22 @@ func (v *VPNInstance) sendRawXDP(data []byte, remote netip.AddrPort) {
 	ipOff := 14
 	pkt[ipOff] = 0x45 // Ver=4, IHL=5
 	pkt[ipOff+1] = 0x00 // TOS
-	binary.BigEndian.PutUint16(pkt[ipOff+2:ipOff+4], uint16(20 + 8 + len(data))) // Total Len
+
+	totalLen := uint16(20 + 8 + len(data))
+	if isRaw {
+		totalLen = uint16(20 + len(data))
+	}
+	binary.BigEndian.PutUint16(pkt[ipOff+2:ipOff+4], totalLen) // Total Len
+
 	pkt[ipOff+4], pkt[ipOff+5] = 0x00, 0x01 // ID
 	pkt[ipOff+6], pkt[ipOff+7] = 0x00, 0x00 // Flags/Frag
 	pkt[ipOff+8] = 64 // TTL
-	pkt[ipOff+9] = 17 // UDP
+
+	if isRaw {
+		pkt[ipOff+9] = uint8(v.Cfg.IPProtocolNum)
+	} else {
+		pkt[ipOff+9] = 17 // UDP
+	}
 	// Checksum (Zero for now, fill later)
 	
 	// Src IP (My IP)
@@ -661,21 +705,26 @@ func (v *VPNInstance) sendRawXDP(data []byte, remote netip.AddrPort) {
 	cs := checksum(pkt[ipOff:ipOff+20])
 	binary.BigEndian.PutUint16(pkt[ipOff+10:ipOff+12], cs)
 	
-	// 3. UDP Header
-	udpOff := ipOff + 20
-	// Src Port (My Listen Port)
-	binary.BigEndian.PutUint16(pkt[udpOff:udpOff+2], uint16(v.Cfg.ListenPort))
-	// Dst Port
-	binary.BigEndian.PutUint16(pkt[udpOff+2:udpOff+4], remote.Port())
-	// Length
-	binary.BigEndian.PutUint16(pkt[udpOff+4:udpOff+6], uint16(8 + len(data)))
-	// Checksum (Pseudo Header)
-	// Calculate UDP Checksum
-	udpCs := checksumUDP(pkt[ipOff+12:ipOff+16], pkt[ipOff+16:ipOff+20], pkt[udpOff:udpOff+8+len(data)])
-	binary.BigEndian.PutUint16(pkt[udpOff+6:udpOff+8], udpCs)
-	
-	// 4. Payload
-	copy(pkt[udpOff+8:], data)
+	if isRaw {
+		// 3. Raw Payload
+		copy(pkt[ipOff+20:], data)
+	} else {
+		// 3. UDP Header
+		udpOff := ipOff + 20
+		// Src Port (My Listen Port)
+		binary.BigEndian.PutUint16(pkt[udpOff:udpOff+2], uint16(v.Cfg.ListenPort))
+		// Dst Port
+		binary.BigEndian.PutUint16(pkt[udpOff+2:udpOff+4], remote.Port())
+		// Length
+		binary.BigEndian.PutUint16(pkt[udpOff+4:udpOff+6], uint16(8 + len(data)))
+		// Checksum (Pseudo Header)
+		// Calculate UDP Checksum
+		udpCs := checksumUDP(pkt[ipOff+12:ipOff+16], pkt[ipOff+16:ipOff+20], pkt[udpOff:udpOff+8+len(data)])
+		binary.BigEndian.PutUint16(pkt[udpOff+6:udpOff+8], udpCs)
+
+		// 4. Payload
+		copy(pkt[udpOff+8:], data)
+	}
 	
 	// Transmit
 	if v.Xsk != nil {
@@ -728,6 +777,8 @@ func (v *VPNInstance) proxyXDPToUDP(conn *net.UDPConn) {
 	// We need to route traffic to KernelWG which is listening on 127.0.0.1:(WGPort+1)
 	kernelAddr, _ := net.ResolveUDPAddr("udp", fmt.Sprintf("127.0.0.1:%d", v.Cfg.WGPort+1))
 
+	isRaw := !v.Cfg.UseNATT && v.Cfg.IPProtocolNum != 17
+
 	for {
 		pkts, err := v.Xsk.Receive()
 		if err != nil || len(pkts) == 0 {
@@ -736,7 +787,7 @@ func (v *VPNInstance) proxyXDPToUDP(conn *net.UDPConn) {
 		}
 		
 		for _, pkt := range pkts {
-			if len(pkt) < 42 { continue } 
+			if len(pkt) < 34 { continue }
 			
 			// 1. Learn Gateway MAC (Src MAC of incoming frame)
 			// SrcMAC is at [6:12]
@@ -747,16 +798,28 @@ func (v *VPNInstance) proxyXDPToUDP(conn *net.UDPConn) {
 			var ipHdrLen int
 			var srcIP net.IP
 			var srcPort int
+			var payload []byte
 
 			if ethType == 0x0800 { // IPv4
 				ipHdrLen = int((pkt[14] & 0x0F) * 4)
 				srcIP = net.IP(pkt[14+12 : 14+16])
-				// UDP Header at 14+ipHdrLen
-				udpStart := 14 + ipHdrLen
-				if len(pkt) < udpStart+8 { continue }
-				srcPort = int(binary.BigEndian.Uint16(pkt[udpStart : udpStart+2]))
-				// Payload
-				payload := pkt[udpStart+8:]
+
+				if isRaw {
+					proto := pkt[14+9]
+					if int(proto) != v.Cfg.IPProtocolNum { continue }
+
+					payloadStart := 14 + ipHdrLen
+					if len(pkt) <= payloadStart { continue }
+					payload = pkt[payloadStart:]
+					srcPort = 0 // No port in Raw mode
+				} else {
+					// UDP Header at 14+ipHdrLen
+					udpStart := 14 + ipHdrLen
+					if len(pkt) < udpStart+8 { continue }
+					srcPort = int(binary.BigEndian.Uint16(pkt[udpStart : udpStart+2]))
+					// Payload
+					payload = pkt[udpStart+8:]
+				}
 				
 				// Update Remote State
 				newRemote := netip.AddrPortFrom(netip.AddrFrom4([4]byte{srcIP[0], srcIP[1], srcIP[2], srcIP[3]}), uint16(srcPort))
@@ -831,7 +894,13 @@ func (v *VPNInstance) sendPhantomPacket(plain []byte, remote netip.AddrPort) {
 	
 	// Encrypt
 	nonce := make([]byte, NonceSize)
-	rand.Read(nonce) // Or atomic counter
+
+	// Structure Nonce: [Seq (8)] + [SessionID (4)] + [Padding (12)]
+	// This matches the expectation of the Reordering Logic on the receiver side.
+	vVal := atomic.AddUint64(&v.nonceCounter, 1)
+	binary.BigEndian.PutUint64(nonce[0:8], vVal)
+	binary.BigEndian.PutUint32(nonce[8:12], v.SessionID)
+	// Remaining bytes are 0 (make initializes to 0)
 	
 	// Cipher = Nonce + AEAD(plain)
 	cipherText := v.AEAD.Seal(nil, nonce, plain, nil)
@@ -1158,7 +1227,13 @@ func (v *VPNInstance) XDPReaderLoop(idx int) {
 			
 			// Encrypt
 			nonce := make([]byte, NonceSize)
-			rand.Read(nonce)
+
+			// Structure Nonce: [Seq (8)] + [SessionID (4)] + [Padding (12)]
+			vVal := atomic.AddUint64(&v.nonceCounter, 1)
+			binary.BigEndian.PutUint64(nonce[0:8], vVal)
+			binary.BigEndian.PutUint32(nonce[8:12], v.SessionID)
+			// Remaining bytes are 0
+
 			cipherText := v.AEAD.Seal(nil, nonce, payload, nil)
 			finalPayload := append(nonce, cipherText...)
 			

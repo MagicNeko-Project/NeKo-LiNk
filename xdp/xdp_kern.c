@@ -1,5 +1,6 @@
 // +build ignore
 
+#include <stddef.h>
 #include <linux/bpf.h>
 #include <linux/if_ether.h>
 #include <linux/ip.h>
@@ -59,9 +60,6 @@ int xdp_prog(struct xdp_md *ctx) {
          // We only attached AF_XDP to Queue 0.
          return bpf_redirect_map(&xsks_map, 0, 0);
     }
-
-    struct ethhdr *eth = data;
-    if (data + sizeof(*eth) > data_end) return XDP_PASS;
 
     // Filter Logic for Mode 1 & 2 (IP Only)
     struct iphdr *ip = NULL;
