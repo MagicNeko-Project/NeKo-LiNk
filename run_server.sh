@@ -4,29 +4,24 @@ if [ "$EUID" -ne 0 ]; then echo "请使用 root 权限运行 (sudo)"; exit 1; fi
 CONFIG_FILE="config.json"
 
 if [ ! -f "$CONFIG_FILE" ]; then
-    echo ">>> 生成服务端配置..."
-    
-    RAND_KEY=$(openssl rand -hex 32)
-    
-    cat > "$CONFIG_FILE" <<EOF
-[
-  {
-    "mode": "server",
-    "protocol": "wg-raw",
-    "interface_name": "eth0",
-    "listen_addr": "0.0.0.0",
-    "listen_port": 23333,
-    "wg_port": 51820,
-    "ip_protocol_num": 233,
-    "local_addr": "10.0.0.1/24",
-    "key": "$RAND_KEY",
-    "mtu": 1400,
-    "comment": "Mode 3 (Phantom): InterfaceName 是物理网卡(eth0)，wg_port 是内核 WG 端口(127.0.0.1)"
-  }
-]
-EOF
-    echo "配置已生成 (Key: $RAND_KEY)"
-    exit 0
+    # Try /etc/neko-link/config.json
+    if [ -f "/etc/neko-link/config.json" ]; then
+        CONFIG_FILE="/etc/neko-link/config.json"
+    else
+        echo ">>> 未找到配置文件，正在尝试自动生成..."
+        ./neko-link -init -type server
+        if [ -f "/etc/neko-link/config.json" ]; then
+            CONFIG_FILE="/etc/neko-link/config.json"
+        elif [ -f "config.json" ]; then
+             CONFIG_FILE="config.json"
+        else
+            echo ">>> 生成失败，请手动检查。"
+            exit 1
+        fi
+        echo ">>> 已生成默认配置 ($CONFIG_FILE)，请编辑后重新运行！"
+        echo ">>> 编辑命令: nano $CONFIG_FILE"
+        exit 0
+    fi
 fi
 
 echo ">>> 启动 NekoLink (Server)..."

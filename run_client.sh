@@ -4,26 +4,25 @@ if [ "$EUID" -ne 0 ]; then echo "请使用 root 权限运行 (sudo)"; exit 1; fi
 CONFIG_FILE="client_config.json"
 
 if [ ! -f "$CONFIG_FILE" ]; then
-    echo ">>> 生成客户端配置..."
+    echo ">>> 未找到配置文件 '$CONFIG_FILE'，正在尝试自动生成..."
     
-    cat > "$CONFIG_FILE" <<EOF
-[
-  {
-    "mode": "client",
-    "protocol": "wg-raw",
-    "interface_name": "eth0",
-    "peer_addr": "1.2.3.4",
-    "peer_port": 23333,
-    "wg_port": 51820,
-    "ip_protocol_num": 233,
-    "local_addr": "10.0.0.2/24",
-    "key": "YOUR_PRIVATE_KEY",
-    "mtu": 1400,
-    "comment": "Mode 3 (Phantom): interface_name 填物理网卡(eth0)。NekoLink 不创建虚接口，直接劫持eth0。"
-  }
-]
-EOF
-    echo "配置已生成！请编辑 key 和 server_ip。"
+    ./neko-link -init -type client
+    
+    if [ -f "/etc/neko-link/config.json" ]; then
+        echo ">>> 配置已生成到 /etc/neko-link/config.json。"
+        echo ">>> 为了作为客户端运行，建议将其复制为 $CONFIG_FILE 或直接使用。"
+        # Logic adjustment for client script preference
+        CONFIG_FILE="/etc/neko-link/config.json"
+    elif [ -f "config.json" ]; then
+        mv config.json $CONFIG_FILE
+        echo ">>> 已生成默认客户端配置: $CONFIG_FILE"
+    else
+        echo ">>> 生成失败。"
+        exit 1
+    fi
+    
+    echo ">>> 请务必编辑配置文件填写服务器地址！"
+    echo ">>> 编辑命令: nano $CONFIG_FILE"
     exit 0
 fi
 

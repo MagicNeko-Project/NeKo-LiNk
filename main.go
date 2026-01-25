@@ -47,7 +47,9 @@ func logDebug(format string, v ...interface{}) {
 type Config struct {
 	InterfaceName string `json:"interface_name"`
 	Mode          string `json:"mode"`
-	LocalAddr     string `json:"local_addr"`
+	LocalAddr     string `json:"local_addr"` // Legacy (Keep for compatibility)
+	LocalAddrV4   string `json:"local_addr_v4,omitempty"`
+	LocalAddrV6   string `json:"local_addr_v6,omitempty"`
 	Key           string `json:"key"` // Shared Secret (Password)
 	PrivateKey    string `json:"private_key,omitempty"` // WireGuard Private Key
 	Protocol      string `json:"protocol"`
@@ -147,6 +149,25 @@ func (c *Config) ParseLegacy() (changed bool) {
 		changed = true
 	}
 	c.LegacyServerAddr = "" // Clear always to clean up JSON
+
+
+	// 1. IP Version Split (Migration for new dual-stack fields)
+	if c.LocalAddr != "" {
+		// Legacy -> New
+		if c.LocalAddrV4 == "" && !strings.Contains(c.LocalAddr, ":") {
+			c.LocalAddrV4 = c.LocalAddr
+		} else if c.LocalAddrV6 == "" && strings.Contains(c.LocalAddr, ":") {
+			c.LocalAddrV6 = c.LocalAddr
+		}
+	}
+	// New -> Legacy (Fill back for code that still uses LocalAddr)
+	if c.LocalAddr == "" {
+		if c.LocalAddrV4 != "" {
+			c.LocalAddr = c.LocalAddrV4
+		} else if c.LocalAddrV6 != "" {
+			c.LocalAddr = c.LocalAddrV6
+		}
+	}
 
 	if c.ListenPort == 0 && c.LegacyBasePort != 0 {
 		c.ListenPort = c.LegacyBasePort
@@ -1539,12 +1560,115 @@ func (v *VPNInstance) writeTUN(data []byte) {
 	}
 }
 
+
+func genExampleConfig(mode string) {
+	// Detect physical interface
+	phyIf := "eth0"
+	if ifaces, err := net.Interfaces(); err == nil {
+		for _, i := range ifaces {
+			if i.Flags&net.FlagUp != 0 && i.Flags&net.FlagLoopback == 0 {
+				phyIf = i.Name
+				break
+			}
+		}
+	}
+
+	baseConfig := Config{
+		InterfaceName: "neko0",
+		MTU:           1400,
+		Debug:         true,
+		Key:           "CHANGE_ME_PLEASE_NYA_QAQ",
+	}
+
+	if mode == "raw" {
+		// Raw Tunnel Mode (No WireGuard, Simple IP Tunnel)
+		baseConfig.Mode = "server" // Logic is same, just different generic name
+		baseConfig.Protocol = "raw"
+		baseConfig.LocalAddrV4 = "192.168.100.1/24"
+		baseConfig.LocalAddrV6 = "fsc0::1/64"
+		baseConfig.PeerAddr = "1.2.3.4" // Remote IP required
+		baseConfig.Comment = "Raw IP Tunnel (Veth Mode)"
+		baseConfig.IPProtocolNum = 233
+	} else {
+		// Phantom Mode (Standard)
+		baseConfig.Protocol = "wg-raw"
+		baseConfig.ParentInterface = phyIf
+		baseConfig.WGInterface = "wg0"
+		baseConfig.WGPort = 51820
+		baseConfig.ListenPort = 23333
+		baseConfig.LocalAddrV4 = "10.0.0.1/24"
+		
+		if mode == "client" {
+			baseConfig.Mode = "client"
+			baseConfig.PeerAddr = "SERVER_IP"
+			baseConfig.PeerPort = 23333
+			baseConfig.LocalAddrV4 = "10.0.0.2/24"
+		} else {
+			baseConfig.Mode = "server"
+		}
+	}
+
+	data, _ := json.MarshalIndent(baseConfig, "  ", "  ")
+	jsonStr := string(data)
+	
+	// Strip outer { and }
+    start := strings.Index(jsonStr, "{")
+    end := strings.LastIndex(jsonStr, "}")
+    if start != -1 && end != -1 {
+        jsonStr = jsonStr[start+1 : end]
+    }
+
+	// Prepare content
+	content := fmt.Sprintf(`[
+  {
+    "_comment": "NekoLink 自动生成配置 (%s 模式) 🐾",
+    "_note": "请修改 key 和 peer_addr 等关键信息。",
+%s
+  }
+]`, mode, jsonStr)
+
+	targetDir := "/etc/neko-link"
+	targetFile := targetDir + "/config.json"
+
+	// Check if directory exists and is writable
+	if _, err := os.Stat(targetDir); os.IsNotExist(err) {
+		// Try to create if root
+		if err := os.MkdirAll(targetDir, 0755); err != nil {
+			targetFile = "config.json" // Fallback to local
+			fmt.Printf(">>> 无法创建 %s (%v), 将在当前目录生成。\n", targetDir, err)
+		}
+	} else if syscall.Access(targetDir, syscall.O_RDWR) != nil {
+		targetFile = "config.json" // Fallback
+	}
+
+	if _, err := os.Stat(targetFile); err == nil {
+		fmt.Printf(">>> 配置文件 %s 已存在，跳过生成。\n", targetFile)
+		return
+	}
+
+	err := os.WriteFile(targetFile, []byte(content), 0644)
+	if err != nil {
+		fmt.Printf(">>> 写入失败: %v\n", err)
+	} else {
+		fmt.Printf(">>> 已生成示例配置: %s (模式: %s)\n", targetFile, mode)
+	}
+}
+
+
+
 func main() {
 	cfgPath := flag.String("c", "config.json", "Config path")
 	debug := flag.Bool("debug", false, "Debug mode")
 	migrate := flag.Bool("migrate", false, "Migrate legacy config to new format and exit")
+	initCfg := flag.Bool("init", false, "Generate example config")
+	cfgType := flag.String("type", "server", "Config type: 'server', 'client', or 'raw' (for raw tunnel)")
 	flag.Parse()
 	debugMode = *debug
+
+	if *initCfg {
+		genExampleConfig(*cfgType)
+		return
+	}
 
 	// Allow BPF Maps Memlock 
 	if err := rlimit.RemoveMemlock(); err != nil {
