@@ -1211,7 +1211,13 @@ func (v *VPNInstance) XDPReaderLoop(idx int) {
 			
 			// Encrypt
 			nonce := make([]byte, NonceSize)
-			rand.Read(nonce)
+
+			// Structure Nonce: [Seq (8)] + [SessionID (4)] + [Padding (12)]
+			vVal := atomic.AddUint64(&v.nonceCounter, 1)
+			binary.BigEndian.PutUint64(nonce[0:8], vVal)
+			binary.BigEndian.PutUint32(nonce[8:12], v.SessionID)
+			// Remaining bytes are 0
+
 			cipherText := v.AEAD.Seal(nil, nonce, payload, nil)
 			finalPayload := append(nonce, cipherText...)
 			
