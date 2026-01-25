@@ -13,14 +13,15 @@ if [ ! -f "$CONFIG_FILE" ]; then
   {
     "mode": "server",
     "protocol": "wg-raw",
+    "interface_name": "eth0",
     "listen_addr": "0.0.0.0",
     "listen_port": 23333,
+    "wg_port": 51820,
     "ip_protocol_num": 233,
     "local_addr": "10.0.0.1/24",
     "key": "$RAND_KEY",
-    "interface_name": "neko0",
     "mtu": 1400,
-    "wg_port": 51820
+    "comment": "Mode 3 (Phantom): InterfaceName 是物理网卡(eth0)，wg_port 是内核 WG 端口(127.0.0.1)"
   }
 ]
 EOF

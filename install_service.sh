@@ -9,7 +9,11 @@ CONF_DIR="/etc/neko-link"
 BIN_DIR="/usr/local/bin"
 
 echo ">>> 正在编译 $APP_NAME ..."
-go build -o $BIN_NAME main.go
+# Detect Local Go
+GO_CMD="./.go/bin/go"
+if [ ! -f "$GO_CMD" ]; then GO_CMD="go"; fi
+
+$GO_CMD build -o $BIN_NAME .
 if [ $? -ne 0 ]; then echo "编译失败"; exit 1; fi
 
 echo ">>> 安装二进制文件到 $BIN_DIR ..."
@@ -37,7 +41,8 @@ if [ "$choice" == "1" ]; then
              cat > config.json <<EOF
 {
   "server_addr": "[::]",
-  "protocol": "udp",
+  "server_addr": "[::]",
+  "protocol": "wg-raw",
   "ip_protocol_num": 233,
   "base_port": 9000,
   "port_count": 4,
@@ -62,15 +67,17 @@ elif [ "$choice" == "2" ]; then
          cat > client_config.json <<EOF
 {
   "server_addr": "1.2.3.4",
-  "protocol": "udp",
+  "server_addr": "1.2.3.4",
+  "protocol": "wg-raw",
   "ip_protocol_num": 233,
   "base_port": 9000,
   "port_count": 4,
   "key": "FILL_ME",
   "local_addr": "10.0.0.2/24",
   "mode": "client",
-  "interface_name": "neko0",
-  "mtu": 1400
+  "interface_name": "eth0",
+  "mtu": 1400,
+  "wg_port": 51820
 }
 EOF
     fi

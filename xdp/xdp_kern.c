@@ -7,22 +7,31 @@
 #include <linux/in.h>
 #include <bpf/bpf_helpers.h>
 
-struct {
-    __uint(type, BPF_MAP_TYPE_XSKMAP);
-    __uint(key_size, sizeof(int));
-    __uint(value_size, sizeof(int));
-    __uint(max_entries, 64);
-} xsks_map SEC(".maps");
+// Basic Map Def for legacy support
+struct bpf_map_def {
+	unsigned int type;
+	unsigned int key_size;
+	unsigned int value_size;
+	unsigned int max_entries;
+	unsigned int map_flags;
+};
+
+struct bpf_map_def SEC("maps") xsks_map = {
+    .type = BPF_MAP_TYPE_XSKMAP,
+    .key_size = sizeof(int),
+    .value_size = sizeof(int),
+    .max_entries = 64,
+};
 
 // Config Map
 // Key 0: Mode (1=UDP, 2=Raw)
 // Key 1: Target Value (Port or ProtocolNum)
-struct {
-    __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(key_size, sizeof(int));
-    __uint(value_size, sizeof(int));
-    __uint(max_entries, 4);
-} config_map SEC(".maps");
+struct bpf_map_def SEC("maps") config_map = {
+    .type = BPF_MAP_TYPE_ARRAY,
+    .key_size = sizeof(int),
+    .value_size = sizeof(int),
+    .max_entries = 4,
+};
 
 SEC("xdp")
 int xdp_prog(struct xdp_md *ctx) {

@@ -11,14 +11,15 @@ if [ ! -f "$CONFIG_FILE" ]; then
   {
     "mode": "client",
     "protocol": "wg-raw",
+    "interface_name": "eth0",
     "peer_addr": "1.2.3.4",
     "peer_port": 23333,
+    "wg_port": 51820,
     "ip_protocol_num": 233,
     "local_addr": "10.0.0.2/24",
-    "key": "PASSWORD_HERE",
-    "interface_name": "neko0",
+    "key": "YOUR_PRIVATE_KEY",
     "mtu": 1400,
-    "wg_port": 51820
+    "comment": "Mode 3 (Phantom): interface_name 填物理网卡(eth0)。NekoLink 不创建虚接口，直接劫持eth0。"
   }
 ]
 EOF

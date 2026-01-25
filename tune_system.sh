@@ -3,6 +3,9 @@
 # NekoLink System Tuning Script 🚀
 # 解决高吞吐下的 "No Buffer Space Available" 和内核级丢包问题
 
+# 注意: 在 LXC 容器中，大多数 sysctl 是只读的。
+# 如果执行报错，请联系宿主机管理员调整，或忽略非关键优化。
+
 echo "Applying kernel optimizations..."
 
 # 1. 增加 UDP/IP 接收和发送缓冲区 (关键！)
