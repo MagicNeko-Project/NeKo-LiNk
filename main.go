@@ -188,12 +188,12 @@ func (c *Config) ParseLegacy() (changed bool) {
 	}
 	
 	// 4. MTU 优化 (避免分片)
-	// 1380 is a very safe value for most public clouds/VPNs to avoid fragmentation
-	if c.MTU == 0 || c.MTU > 1380 {
+	// 1400 is allowed if the physical link supports 1482 byte packets (MTU 1500)
+	if c.MTU == 0 || c.MTU > 1400 {
 		oldMTU := c.MTU
-		c.MTU = 1380
+		c.MTU = 1400
 		if oldMTU != 0 {
-			log.Printf("[%s] 优化 MTU: %d -> 1380", c.InterfaceName, oldMTU)
+			log.Printf("[%s] 优化 MTU: %d -> 1400", c.InterfaceName, oldMTU)
 			changed = true
 		}
 		if oldMTU == 0 {
