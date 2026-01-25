@@ -61,8 +61,6 @@ type XdpUmemReg struct {
 type Config struct {
 	Interface string
 	QueueID   int
-	Mode      int // 1=UDP, 2=Raw
-	Target    int // Port or Proto
 	
 	// Rings
 	RingSize uint32 // Must be power of 2
@@ -88,7 +86,6 @@ type Socket struct {
 	// BPF Objects
 	Link      link.Link
 	XsksMap   *ebpf.Map
-	ConfigMap *ebpf.Map
 	Prog      *ebpf.Program
 }
 
@@ -120,11 +117,9 @@ func NewSocket(cfg Config) (*Socket, error) {
 	var objs struct {
 		XdpProg   *ebpf.Program `ebpf:"xdp_prog"`
 		XsksMap   *ebpf.Map     `ebpf:"xsks_map"`
-		ConfigMap *ebpf.Map     `ebpf:"config_map"`
 	}
 	if err := spec.LoadAndAssign(&objs, nil); err != nil { return nil, err }
 	
-	// Attach XDP
 	// Attach XDP
 	l, err := link.AttachXDP(link.XDPOptions{
 		Program:   objs.XdpProg,
@@ -143,16 +138,9 @@ func NewSocket(cfg Config) (*Socket, error) {
 		log.Printf("[XDP] Attached in Native/Driver mode")
 	}
 	
-	// Write Config Map
-	m := uint32(cfg.Mode)
-	v := uint32(cfg.Target)
-	if cfg.Mode == 1 {
-		v = uint32(htons(uint16(cfg.Target)))
-	}
-	k0 := uint32(0); objs.ConfigMap.Put(&k0, &m)
-	k1 := uint32(1); objs.ConfigMap.Put(&k1, &v)
+	// No Config Map logic anymore
 	
-	log.Printf("XDP Attached to %s (Mode %d, Target %d)", cfg.Interface, cfg.Mode, cfg.Target)
+	log.Printf("XDP Attached to %s (Redirect All)", cfg.Interface)
 
 	// 3. Create Socket
 	fd, err := unix.Socket(unix.AF_XDP, unix.SOCK_RAW, 0)
@@ -165,7 +153,6 @@ func NewSocket(cfg Config) (*Socket, error) {
 		Cfg:       cfg,
 		Link:      l,
 		XsksMap:   objs.XsksMap,
-		ConfigMap: objs.ConfigMap,
 	}
 	
 	// 4. UMEM Allocation
@@ -381,5 +368,4 @@ func getsockopt(fd, level, opt int, val unsafe.Pointer, size *uint32) error {
 	if errno != 0 { return errno }
 	return nil
 }
-func htons(v uint16) uint16 { return (v << 8) | (v >> 8) }
 func atomicAdd(ptr *uint32, val uint32) { atomic.AddUint32(ptr, val) }
