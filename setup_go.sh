@@ -84,5 +84,5 @@ go mod tidy
 echo -e "${GREEN}-------------------------------------------------------${NC}"
 echo -e "${GREEN}✅ 环境配置完成！(Nya~)${NC}"
 echo -e "请使用以下命令编译:"
-echo -e "  ${GREEN}go build -o vpn main.go${NC}"
+echo -e "  ${GREEN}go build -o neko-link .${NC}"
 echo -e "${GREEN}-------------------------------------------------------${NC}"

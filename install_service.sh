@@ -37,23 +37,23 @@ if [ "$choice" == "1" ]; then
         echo "当前目录无 $CFG_SRC，是否生成默认服务端配置？(y/n)"
         read -p "> " gen_cfg
         if [ "$gen_cfg" == "y" ]; then
-             RAND_KEY=$(openssl rand -hex 32)
+             RAND_PASS=$(openssl rand -hex 16)
              cat > config.json <<EOF
-{
-  "server_addr": "[::]",
-  "server_addr": "[::]",
-  "protocol": "wg-raw",
-  "ip_protocol_num": 233,
-  "base_port": 9000,
-  "port_count": 4,
-  "key": "$RAND_KEY",
-  "local_addr": "10.0.0.1/24",
-  "mode": "server",
-  "interface_name": "neko0",
-  "mtu": 1400
-}
+[
+  {
+    "mode": "server",
+    "protocol": "wg-raw",
+    "phy_interface": "eth0",
+    "vpn_interface": "neko0",
+    "vpn_addr": "10.0.0.1/24",
+    "server_bind_port": 23333,
+    "password": "$RAND_PASS",
+    "mtu": 1400,
+    "debug": true
+  }
+]
 EOF
-            echo "已生成默认配置 (Key: $RAND_KEY)"
+            echo "已生成默认配置 (Password: $RAND_PASS)"
         else
             echo "错误：找不到配置文件。"; exit 1
         fi
@@ -62,24 +62,26 @@ EOF
 elif [ "$choice" == "2" ]; then
     CFG_SRC="client_config.json"
     if [ ! -f "$CFG_SRC" ]; then
-         echo "警告：当前目录找不到 $CFG_SRC，安装后请务必去 $CONF_DIR/config.json 手动配置！"
-         # 创建一个空模版
-         cat > client_config.json <<EOF
-{
-  "server_addr": "1.2.3.4",
-  "server_addr": "1.2.3.4",
-  "protocol": "wg-raw",
-  "ip_protocol_num": 233,
-  "base_port": 9000,
-  "port_count": 4,
-  "key": "FILL_ME",
-  "local_addr": "10.0.0.2/24",
-  "mode": "client",
-  "interface_name": "eth0",
-  "mtu": 1400,
-  "wg_port": 51820
-}
+         echo "警告：当前目录找不到 $CFG_SRC，是否生成默认客户端配置？(y/n)"
+         read -p "> " gen_client_cfg
+         if [ "$gen_client_cfg" == "y" ]; then
+             cat > client_config.json <<EOF
+[
+  {
+    "mode": "client",
+    "protocol": "wg-raw",
+    "phy_interface": "eth0",
+    "vpn_interface": "neko0",
+    "vpn_addr": "10.0.0.2/24",
+    "client_remote_ip": "1.2.3.4",
+    "client_remote_port": 23333,
+    "password": "CHANGE_ME",
+    "mtu": 1400,
+    "debug": true
+  }
+]
 EOF
+         fi
     fi
     SERVICE_DESC="NekoLink VPN Client"
 else
