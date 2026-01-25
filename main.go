@@ -45,7 +45,7 @@ func logDebug(format string, v ...interface{}) {
 // --- 配置结构 (保持兼容) ---
 
 type Config struct {
-	Version       string `json:"version,omitempty"` // v2
+	Version       string `json:"version,omitempty"` // v2.1
 	InterfaceName string `json:"interface_name"`
 	Mode          string `json:"mode"`
 	LocalAddr     string `json:"local_addr"`
@@ -287,14 +287,14 @@ func (c *Config) ParseLegacy() (changed bool) {
 	}
 
 	// 6. Version Upgrade
-	c.Version = "v2"
+	c.Version = "v2.1"
 	return
 }
 
 // MapConfigByProtocol returns a filtered map based on the protocol to hide irrelevant fields
 func (c *Config) MapConfigByProtocol() map[string]interface{} {
 	m := make(map[string]interface{})
-	m["version"] = "v2"
+	m["version"] = "v2.1"
 	m["interface_name"] = c.InterfaceName
 	m["mode"] = c.Mode
 	m["protocol"] = c.Protocol
@@ -305,6 +305,7 @@ func (c *Config) MapConfigByProtocol() map[string]interface{} {
 
 	if c.Protocol == "wg-raw" {
 		// Only wg-raw (Phantom) fields
+		m["local_addr"] = c.LocalAddr
 		if c.ParentInterface != "" { m["parent_interface"] = c.ParentInterface }
 		if c.WGInterface != "" { m["wg_interface"] = c.WGInterface }
 		if c.ListenPort != 0 { m["listen_port"] = c.ListenPort }
@@ -542,8 +543,14 @@ func (v *VPNInstance) setupKernelWireGuard(iface string) {
 	}
 	
 	// Config IP
-	runCmd("ip", "addr", "add", v.Cfg.LocalAddr, "dev", iface)
-	runCmd("ip", "link", "set", iface, "mtu", "1360") // Safe MTU
+	if v.Cfg.LocalAddr != "" {
+		runCmd("ip", "addr", "add", v.Cfg.LocalAddr, "dev", iface)
+	}
+	
+	// Safe MTU for tunneled traffic
+	mtu := v.Cfg.MTU
+	if mtu == 0 { mtu = 1380 }
+	runCmd("ip", "link", "set", iface, "mtu", fmt.Sprintf("%d", mtu))
 	runCmd("ip", "link", "set", iface, "up")
 	
 	// Config WireGuard (Keys/Peers)
@@ -730,10 +737,14 @@ func (v *VPNInstance) sendHandshakePacket(remote netip.AddrPort, myPub []byte) {
 
 func (v *VPNInstance) sendRawXDP(data []byte, remote netip.AddrPort) {
 	isRaw := !v.Cfg.UseNATT && v.Cfg.IPProtocolNum != 17
+	useTCP := v.Cfg.UseTCP && isRaw
 
 	pktLen := 14 + 20 + 8 + len(data)
 	if isRaw {
 		pktLen = 14 + 20 + len(data)
+		if useTCP {
+			pktLen += 20 // TCP Header
+		}
 	}
 
 	pkt := make([]byte, pktLen)
@@ -774,6 +785,9 @@ func (v *VPNInstance) sendRawXDP(data []byte, remote netip.AddrPort) {
 	totalLen := uint16(20 + 8 + len(data))
 	if isRaw {
 		totalLen = uint16(20 + len(data))
+		if useTCP {
+			totalLen += 20 // Add TCP header length
+		}
 	}
 	binary.BigEndian.PutUint16(pkt[ipOff+2:ipOff+4], totalLen) // Total Len
 
@@ -801,23 +815,49 @@ func (v *VPNInstance) sendRawXDP(data []byte, remote netip.AddrPort) {
 	binary.BigEndian.PutUint16(pkt[ipOff+10:ipOff+12], cs)
 	
 	if isRaw {
-		// 3. Raw Payload
-		copy(pkt[ipOff+20:], data)
+		payloadOff := ipOff + 20
+		if useTCP {
+			// 3. TCP Disguise
+			tcpOff := ipOff + 20
+			payloadOff = tcpOff + 20
+			
+			binary.BigEndian.PutUint16(pkt[tcpOff:tcpOff+2], uint16(v.Cfg.ListenPort)) // Src Port
+			binary.BigEndian.PutUint16(pkt[tcpOff+2:tcpOff+4], remote.Port())          // Dst Port
+			binary.BigEndian.PutUint32(pkt[tcpOff+4:tcpOff+8], 0xDEADBEEF)             // Seq Num
+			binary.BigEndian.PutUint32(pkt[tcpOff+8:tcpOff+12], 0xCAFEBABE)            // Ack Num
+			pkt[tcpOff+12] = 0x50 // Data Offset (5 * 4 = 20 bytes), Reserved (0)
+			pkt[tcpOff+13] = 0x18 // PSH (0x08) + ACK (0x10) flags
+			binary.BigEndian.PutUint16(pkt[tcpOff+14:tcpOff+16], 0x4000) // Window Size
+			binary.BigEndian.PutUint16(pkt[tcpOff+16:tcpOff+18], 0x0000) // Checksum (initially zero)
+			binary.BigEndian.PutUint16(pkt[tcpOff+18:tcpOff+20], 0x0000) // Urgent Pointer
+
+			// TCP Checksum
+			tcpPseudoHeader := make([]byte, 12)
+			copy(tcpPseudoHeader[0:4], myIP)
+			copy(tcpPseudoHeader[4:8], remote.Addr().AsSlice())
+			tcpPseudoHeader[9] = 6 // Protocol TCP
+			binary.BigEndian.PutUint16(tcpPseudoHeader[10:12], uint16(20+len(data))) // TCP Length
+
+			tcpChecksum := v.calculateTCPChecksum(pkt[tcpOff:tcpOff+20], data, myIP, remote.Addr().AsSlice())
+			binary.BigEndian.PutUint16(pkt[tcpOff+16:tcpOff+18], tcpChecksum)
+		}
+		// 4. Raw Payload
+		copy(pkt[payloadOff:], data)
 	} else {
 		// 3. UDP Header
 		udpOff := ipOff + 20
-		// Src Port (My Listen Port)
-		binary.BigEndian.PutUint16(pkt[udpOff:udpOff+2], uint16(v.Cfg.ListenPort))
-		// Dst Port
-		binary.BigEndian.PutUint16(pkt[udpOff+2:udpOff+4], remote.Port())
-		// Length
-		binary.BigEndian.PutUint16(pkt[udpOff+4:udpOff+6], uint16(8 + len(data)))
-		// Checksum (Pseudo Header)
-		// Calculate UDP Checksum
-		udpCs := checksumUDP(pkt[ipOff+12:ipOff+16], pkt[ipOff+16:ipOff+20], pkt[udpOff:udpOff+8+len(data)])
-		binary.BigEndian.PutUint16(pkt[udpOff+6:udpOff+8], udpCs)
+		binary.BigEndian.PutUint16(pkt[udpOff:udpOff+2], uint16(v.Cfg.ListenPort)) // Src Port
+		binary.BigEndian.PutUint16(pkt[udpOff+2:udpOff+4], remote.Port())          // Dst Port
+		binary.BigEndian.PutUint16(pkt[udpOff+4:udpOff+6], uint16(8+len(data)))    // Length
+		binary.BigEndian.PutUint16(pkt[udpOff+6:udpOff+8], 0x0000)                 // Checksum (initially zero)
 
-		// 4. Payload
+		// UDP Checksum
+		udpPkt := pkt[udpOff : udpOff+8+len(data)]
+		copy(udpPkt[8:], data)
+		udpChecksum := checksumUDP(myIP, remote.Addr().AsSlice(), udpPkt)
+		binary.BigEndian.PutUint16(pkt[udpOff+6:udpOff+8], udpChecksum)
+
+		// 4. UDP Payload
 		copy(pkt[udpOff+8:], data)
 	}
 	
@@ -867,12 +907,46 @@ func checksumUDP(src, dst, udpPkt []byte) uint16 {
 	return ^uint16(sum)
 }
 
+func (v *VPNInstance) calculateTCPChecksum(header []byte, payload []byte, srcIP, dstIP net.IP) uint16 {
+	sum := uint32(0)
+	payloadLen := len(payload)
+	headerLen := len(header)
+	totalLen := uint32(headerLen + payloadLen)
+
+	// Pseudo-header
+	sum += uint32(binary.BigEndian.Uint16(srcIP[0:2])) + uint32(binary.BigEndian.Uint16(srcIP[2:4]))
+	sum += uint32(binary.BigEndian.Uint16(dstIP[0:2])) + uint32(binary.BigEndian.Uint16(dstIP[2:4]))
+	sum += uint32(6) // Proto TCP
+	sum += totalLen
+
+	// TCP Header
+	for i := 0; i < headerLen; i += 2 {
+		if i == 16 { continue } // Skip checksum field
+		sum += uint32(binary.BigEndian.Uint16(header[i : i+2]))
+	}
+
+	// TCP Payload
+	for i := 0; i < payloadLen; i += 2 {
+		if i+1 < payloadLen {
+			sum += uint32(binary.BigEndian.Uint16(payload[i : i+2]))
+		} else {
+			sum += uint32(payload[i]) << 8
+		}
+	}
+
+	for sum > 0xffff {
+		sum = (sum & 0xffff) + (sum >> 16)
+	}
+	return ^uint16(sum)
+}
+
 func (v *VPNInstance) proxyXDPToUDP(conn *net.UDPConn) {
 	// External -> XDP -> Decrypt -> Local UDP (KernelWG)
 	// We need to route traffic to KernelWG which is listening on 127.0.0.1:(WGPort+1)
 	kernelAddr, _ := net.ResolveUDPAddr("udp", fmt.Sprintf("127.0.0.1:%d", v.Cfg.WGPort+1))
 
 	isRaw := !v.Cfg.UseNATT && v.Cfg.IPProtocolNum != 17
+	useTCP := v.Cfg.UseTCP && isRaw
 
 	for {
 		pkts, err := v.Xsk.Receive()
@@ -905,8 +979,16 @@ func (v *VPNInstance) proxyXDPToUDP(conn *net.UDPConn) {
 
 					payloadStart := 14 + ipHdrLen
 					if len(pkt) <= payloadStart { continue }
-					payload = pkt[payloadStart:]
-					srcPort = 0 // No port in Raw mode
+					
+					if useTCP {
+						// Strip TCP header disguise
+						if len(pkt) < payloadStart+20 { continue }
+						srcPort = int(binary.BigEndian.Uint16(pkt[payloadStart : payloadStart+2]))
+						payload = pkt[payloadStart+20:]
+					} else {
+						payload = pkt[payloadStart:]
+						srcPort = 0 // No port in Raw mode
+					}
 				} else {
 					// UDP Header at 14+ipHdrLen
 					udpStart := 14 + ipHdrLen
@@ -1629,7 +1711,7 @@ func main() {
 	}
 
 	if *migrate {
-		log.Printf(">>> [Migrate] 正在执行 V2 配置升级...")
+		log.Printf(">>> [Migrate] 正在执行 V2.1 配置升级...")
 		
 		var output interface{}
 		if isArray {
@@ -1654,7 +1736,7 @@ func main() {
 			log.Printf("保存失败: %v", err)
 		} else {
 			log.Printf(">>> [Migrate] 升级完成！新配置文件已生成至: %s", v2Path)
-			log.Printf(">>> 提示: 程序下次启动将优先加载此 V2 配置文件喵~")
+			log.Printf(">>> 提示: 程序下次运行将完美支持 wg-raw 全套特性喵~")
 		}
 		os.Exit(0)
 	}

@@ -3,48 +3,33 @@
 一个为极端环境设计的、全自动、高隐蔽性、基于 eBPF 的 Layer 3 加密隧道。
 现在的 NekoLink 将官方 `wireguard-go` 的安全性与 eBPF/XDP 带来的巅峰性能完美结合，为您提供最智能的隧道体验。
 
-## ✨ 核心特性
+## ✨ 幻影模式高级特性 (wg-raw V2.1)
 
-*   **Shadow WireGuard (wg-raw)**: 官方 WireGuard 内核，但**不走 UDP**。流量被巧妙地封装在自定义 IP 协议号或 **TCP 伪装协议**中。
-*   **eBPF / 幻影模式 (Phantom Mode)**: 采用 Linux 最前沿的 **eBPF/XDP** 技术，直接在物理网卡驱动层捕获和重定向流量。系统甚至不再需要虚拟网卡，彻底隐身！
-*   **L2 (以太网) 隧道支持**: 在 `protocol: "raw"` 模式下，NekoLink 提供完整的 **Layer 2 (以太网帧) 隧道**。它不仅传输 IP，还透传 ARP、DHCP 甚至二层组播流量，让隧道两端像接在同一个交换机上一样。
-*   **多核加速流水线**: 深度优化的“单生产者-多消费者”模型，支持多核并行加解密，即使在 10Gbps 负载下也能保持低延迟。
-*   **全链路内存复用**: 引入自适应 `sync.Pool` 内存池，全链路几乎零内存分配，极大降低了垃圾回收 (GC) 对网络延迟的影响。
-*   **自进化配置引擎**: 内置 `-migrate` 模式，自动识别旧版配置并平滑升级至最新架构，支持物理接口自动探测。
-
-## 🧠 eBPF 技术深度解析 (黑科技揭秘)
-
-NekoLink 的核心威力源自对 **eBPF (Extended Berkeley Packet Filter)** 的深度运用：
-
-1.  **XDP (eXpress Data Path)**:
-    传统的网络处理需要经过 Linux 内核协议栈的层层剥离，开销巨大。NekoLink 在物理网卡接收数据的**第一个瞬间（驱动入口）**就插入了 eBPF 程序。这使得我们可以直接在内核层决定某个包的去向，无需经过繁重的协议栈处理。
-
-2.  **AF_XDP (Address Family XDP)**:
-    我们通过 `AF_XDP` 专用套接字建立了“内核与用户态的极速直连通道”。流量通过 **Zero-copy (零拷贝)** 或 **Copy mode** 直接从网卡 DMA 传输到 NekoLink 的处理流水线，规避了传统 Socket 调用中昂贵的 context switch 成本。
-
-3.  **BPF Maps 自注册**:
-    程序启动时会动态编译并向内核加载 XDP 程序，并利用 **BPF Map** 进行实时的“身份登记”。只有符合我们加密协议特征的“暗号包”才会被重定向到用户态，其余流量依然由操作系统原本的协议栈处理，互不干扰，安全无感。
+*   **真正的“零配置”体验**: 在 `wg-raw` 模式下，NekoLink 会在加密握手中自动完成公钥交换。主人您只需两端设置相同的 `key` (密码) 和 `local_addr`，其余密钥对配对工作由猫咪自动完成喵~
+*   **TCP 伪装层 (Protocol Disguise)**: 开启 `use_tcp: true` 后，VPN 流量将被包裹在仿真度极高的 TCP 报头中（包含 Seq/Ack 模拟及 PSH-ACK 标志）。即使是具备深度包检测 (DPI) 的防火墙，也会将其视为正常的长连接流量。
+*   **二层 (L2) 灵魂注入**: `raw` 协议支持完整的以太网帧透传，让 ARP、DHCP 完美越过隧道。
 
 ## 🛠️ 快速开始
 
-### 1. 编译 (需要安装 Go 1.24+)
+### 1. 编译 (Go 1.24+)
 ```bash
-./setup_go.sh  # 一键配置猫咪生产线
-./.go/bin/go build -o neko-link .
+./setup_go.sh && ./.go/bin/go build -o neko-link .
 ```
 
-### 2. 配置 (config.json) 参考
+### 2. 幻影模式 (WG-Phantom) 示例配置
 ```json
 {
-  "interface_name": "neko0",   // 您心仪的逻辑接口名 (15字符以内)
-  "mode": "server",            // 角色: server 或 client
-  "local_addr": "10.0.0.1/24", // 隧道内网 IP
-  "key": "myaespassword",      // 共享密码 (喵呜~)
-  "protocol": "wg-raw",        // 核心协议: wg-raw (Shadow WG)
-  "parent_interface": "eth0",  // [重要] 真实的物理网卡名
-  "listen_port": 23333,        // 外部通讯端口
-  "wg_port": 51820,            // 内部 WireGuard 端口 (通常不用改)
-  "mtu": 1400                  // 为保证兼容性建议 1380~1400
+  "version": "v2.1",
+  "interface_name": "tox-phantom",
+  "mode": "client",
+  "protocol": "wg-raw",
+  "key": "myaespassword",      // 共享加密密码
+  "peer_addr": "1.2.3.4",      // 远程地址
+  "parent_interface": "eth0",  // eBPF 挂载的目标物理网卡
+  "wg_interface": "tox0",      // 系统中看到的 WG 网卡名
+  "local_addr": "10.0.0.2/24", // 隧道内网 IP
+  "use_tcp": true,             // 开启仿真 TCP 伪装
+  "mtu": 1380
 }
 ```
 

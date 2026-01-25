@@ -1,0 +1,18 @@
+[
+    {
+        "version": "v2.1",
+        "interface_name": "tox-phantom",
+        "mode": "client",
+        "protocol": "wg-raw",
+        "key": "YOUR_SHARED_PASSWORD_FOR_ENCRYPTION",
+        "peer_addr": "1.2.3.4",
+        "peer_port": 23333,
+        "parent_interface": "eth0",
+        "wg_interface": "tox0",
+        "local_addr": "10.0.0.2/24",
+        "wg_port": 51820,
+        "use_tcp": true,
+        "mtu": 1380,
+        "comment": "Mode 3 (WG-Raw Phantom): 幻影模式。自动交换公钥，启用 TCP 伪装。流量直接挂载 eth0，接口隐形。"
+    }
+]
