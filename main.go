@@ -653,8 +653,10 @@ func (v *VPNInstance) rawReaderLoop(idx int) {
 		
 		// 0. Check for Handshake (0xFE)
 		if buf[0] == 0xFE {
-			aPort := netip.AddrPortFrom(netip.AddrFrom4([4]byte{addr.IP[0], addr.IP[1], addr.IP[2], addr.IP[3]}), 0)
-			v.onHandshakeReceived(buf[:n], aPort)
+			if ipAddr, ok := netip.AddrFromSlice(addr.IP); ok {
+				aPort := netip.AddrPortFrom(ipAddr, 0)
+				v.onHandshakeReceived(buf[:n], aPort)
+			}
 			continue
 		}
 
@@ -711,6 +713,12 @@ func (v *VPNInstance) XDPReaderLoop(idx int) {
 		
 		for _, pkt := range pkts {
 			if len(pkt) < 14 { continue }
+
+			// IPv6 Support: Check for IPv6 EtherType (0x86DD)
+			// While logic is transparent, we explicitly identify IPv6 to support future filtering/handling.
+			if pkt[12] == 0x86 && pkt[13] == 0xDD {
+				logDebug("Forwarding IPv6 Packet via XDP (Len: %d)", len(pkt))
+			}
 			
 			bufPtr := bufPool.Get().(*[]byte)
 			if cap(*bufPtr) < len(pkt) {
