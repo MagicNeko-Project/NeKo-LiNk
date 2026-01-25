@@ -621,17 +621,16 @@ func (v *VPNInstance) onHandshakeReceived(data []byte, remote netip.AddrPort) bo
 	peerPubKey := plain[1:33]
 	info := base64.StdEncoding.EncodeToString(peerPubKey)
 	
-	logDebug("[Handshake] Recv validated packet from %s. PeerPub: %s", remote, info)
-	
-	// Update Kernel WireGuard with this Peer
-	// wg set <iface> peer <Pub> allowed-ips 0.0.0.0/0 endpoint 127.0.0.1:WGPort
-	// Note: Endpoint for Kernel is always Local Proxy.
-	// But Proxy needs to know where to send (v.remoteAddr).
+	if v.Cfg.Protocol == "wg-raw" {
+		logDebug("[Handshake] Recv validated packet from %s. PeerPub: %s", remote, info)
+	}
 	
 	v.remoteAddrMx.Lock()
 	if v.remoteAddr != remote {
 		v.remoteAddr = remote
-		log.Printf("[Handshake] Roaming: Peer moved to %s", remote)
+		if v.Cfg.Protocol == "wg-raw" {
+			log.Printf("[Handshake] Roaming: Peer moved to %s", remote)
+		}
 	}
 	v.remoteAddrMx.Unlock()
 
@@ -639,15 +638,14 @@ func (v *VPNInstance) onHandshakeReceived(data []byte, remote netip.AddrPort) bo
 	if v.Cfg.Protocol != "wg-raw" {
 		ipAddr, _ := net.ResolveIPAddr("ip", remote.Addr().String())
 		v.ServerPeerIP.Store(ipAddr)
+		return true // Done for Raw mode
 	}
 	
 	// Update WG Peer (only for wg-raw mode)
-	if v.Cfg.Protocol == "wg-raw" {
-		go func() {
-			pubKey64 := base64.StdEncoding.EncodeToString(peerPubKey)
-			runCmdQuiet("wg", "set", v.WGInterface, "peer", pubKey64, "allowed-ips", "0.0.0.0/0,::/0", "endpoint", fmt.Sprintf("127.0.0.1:%d", v.Cfg.WGPort))
-		}()
-	}
+	go func() {
+		pubKey64 := base64.StdEncoding.EncodeToString(peerPubKey)
+		runCmdQuiet("wg", "set", v.WGInterface, "peer", pubKey64, "allowed-ips", "0.0.0.0/0,::/0", "endpoint", fmt.Sprintf("127.0.0.1:%d", v.Cfg.WGPort))
+	}()
 	
 	return true
 }
@@ -1095,11 +1093,16 @@ func (v *VPNInstance) InitInterface() {
 	runCmd("ip", "link", "set", hostIf, "mtu", fmt.Sprintf("%d", v.Cfg.MTU))
 	// Enable ARP for L2 tunneling
 	runCmd("ip", "link", "set", hostIf, "arp", "on")
+	
+	// Disable Checksum Offloading to fix UDP issues in Veth/XDP
+	runCmdQuiet("ethtool", "-K", hostIf, "tx", "off", "rx", "off", "tso", "off", "gso", "off", "ufo", "off")
+	
 	runCmd("ip", "link", "set", hostIf, "up")
 	
 	// Configure App Side (AF_XDP Target)
 	runCmd("ip", "link", "set", appIf, "arp", "on")
 	runCmd("ip", "link", "set", appIf, "promisc", "on")
+	runCmdQuiet("ethtool", "-K", appIf, "tx", "off", "rx", "off", "tso", "off", "gso", "off", "ufo", "off")
 	runCmd("ip", "link", "set", appIf, "mtu", fmt.Sprintf("%d", v.Cfg.MTU))
 	runCmd("ip", "link", "set", appIf, "up")
 	runCmdQuiet("sysctl", "-w", fmt.Sprintf("net.ipv6.conf.%s.disable_ipv6=1", appIf))

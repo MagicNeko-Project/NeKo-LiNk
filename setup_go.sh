@@ -15,11 +15,11 @@ echo -e "${GREEN}>>> [1/3] 检查并安装系统依赖...${NC}"
 install_deps() {
     if command -v apt &> /dev/null; then
         sudo apt update
-        sudo apt install -y nftables git curl tar
+        sudo apt install -y nftables git curl tar ethtool
     elif command -v pacman &> /dev/null; then
-        sudo pacman -Syu --noconfirm nftables git curl tar
+        sudo pacman -Syu --noconfirm nftables git curl tar ethtool
     elif command -v yum &> /dev/null; then
-        sudo yum install -y nftables git curl tar
+        sudo yum install -y nftables git curl tar ethtool
     else
         echo -e "${RED}⚠️ 未检测到常见包管理器，请手动安装: nftables git curl${NC}"
     fi
