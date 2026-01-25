@@ -255,11 +255,18 @@ func (c *Config) ParseLegacy() (changed bool) {
 	if c.Protocol == "wg-raw" {
 		if c.WGInterface == "" {
 			c.WGInterface = c.InterfaceName
+			if len(c.WGInterface) > 15 {
+				c.WGInterface = c.WGInterface[:15]
+			}
 			changed = true
 		}
 	} else {
 		if c.AppInterface == "" {
-			c.AppInterface = c.InterfaceName + "_app"
+			prefix := c.InterfaceName
+			if len(prefix) > 11 {
+				prefix = prefix[:11]
+			}
+			c.AppInterface = prefix + "_app"
 			changed = true
 		}
 	}
