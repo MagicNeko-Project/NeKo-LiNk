@@ -1,0 +1,22 @@
+[
+    {
+        "interface_name": "neko0",
+        "mode": "server",
+        "protocol": "raw",
+        "local_addr": "10.0.0.1/24",
+        "key": "YOUR_PRIVATE_KEY_BASE64",
+        "ip_protocol_num": 233,
+        "mtu": 1400,
+        "listen_addr": "0.0.0.0",
+        "comment": "Mode 2 (Raw): 创建 veth pair (neko0 <-> neko0_app)，宿主机可见 neko0 网卡，底层使用 AF_XDP 加速。"
+    },
+    {
+        "interface_name": "eth0",
+        "mode": "server",
+        "protocol": "wg-raw",
+        "listen_port": 8888,
+        "wg_port": 51820,
+        "key": "YOUR_PRIVATE_KEY_BASE64",
+        "comment": "Mode 3 (WG-Raw Phantom): 幻影模式。不创建新网卡，直接挂载到 eth0。流量被转发给内核 WireGuard (127.0.0.1:51820)。"
+    }
+]
