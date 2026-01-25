@@ -701,7 +701,10 @@ func (v *VPNInstance) Start() {
 		log.Printf("[Init] 启动 Raw Mode 2 (Veth + AF_XDP)")
 		
 		// Initialize AF_XDP
-		appIf := v.Cfg.InterfaceName + "_app"
+		prefix := v.Cfg.InterfaceName
+		if len(prefix) > 13 { prefix = prefix[:13] }
+		appIf := prefix + "_x"
+		
 		xsk, err := xdp.NewSocket(xdp.Config{
 			Interface: appIf,
 			QueueID:   0,
@@ -754,7 +757,15 @@ func (v *VPNInstance) InitInterface() {
 
 	// Raw Mode: Veth
 	hostIf := v.Cfg.InterfaceName
-	appIf := hostIf + "_app"
+	
+	// Linux Interface Name Limit is 15 chars.
+	// We append "_x" (2 chars).
+	// So hostIf part must be <= 13 chars.
+	prefix := hostIf
+	if len(prefix) > 13 {
+		prefix = prefix[:13]
+	}
+	appIf := prefix + "_x"
 	
 	// Cleanup
 	runCmdQuiet("ip", "link", "del", hostIf)
