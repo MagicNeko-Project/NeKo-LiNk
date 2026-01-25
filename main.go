@@ -319,6 +319,7 @@ type VPNInstance struct {
 	
 	// Phantom Mode State
 	GatewayMAC   [6]byte
+	PhyMAC       [6]byte
 	remoteAddr   netip.AddrPort
 	remoteAddrMx sync.RWMutex
 }
@@ -391,7 +392,14 @@ func (v *VPNInstance) startWireGuardRaw() {
 		bpfTarget = v.Cfg.ListenPort
 	}
 
-	// 1. Initialize XDP on Physical Interface
+	// 1. Get Physical MAC
+	iface, err := net.InterfaceByName(v.Cfg.InterfaceName)
+	if err == nil && len(iface.HardwareAddr) >= 6 {
+		copy(v.PhyMAC[:], iface.HardwareAddr)
+		log.Printf("[WG-RAW] Physical MAC: %x", v.PhyMAC)
+	}
+
+	// 2. Initialize XDP on Physical Interface
 	log.Printf("[WG-RAW] Initializing Phantom XDP on %s (Mode: %d, Target: %d)", v.Cfg.InterfaceName, bpfMode, bpfTarget)
 	// Note: In Phantom Mode, v.Cfg.InterfaceName IS the physical interface (e.g. eth0)
 	xsk, err := xdp.NewSocket(xdp.Config{
@@ -648,8 +656,13 @@ func (v *VPNInstance) sendRawXDP(data []byte, remote netip.AddrPort) {
 	} else {
 		copy(pkt[0:6], gwMac[:])
 	}
-	// Src: 02:00:00:00:00:01 (Fixed for now, or learn form system?)
-	copy(pkt[6:12], []byte{0x02,0x00,0x00,0x00,0x00,0x01})
+	// Src: Physical MAC
+	if v.PhyMAC != [6]byte{0,0,0,0,0,0} {
+		copy(pkt[6:12], v.PhyMAC[:])
+	} else {
+		// Fallback
+		copy(pkt[6:12], []byte{0x02,0x00,0x00,0x00,0x00,0x01})
+	}
 	
 	// EtherType IPv4
 	binary.BigEndian.PutUint16(pkt[12:14], 0x0800)
