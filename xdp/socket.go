@@ -268,6 +268,11 @@ func (x *Socket) Receive() ([][]byte, error) {
 	cons := atomic.LoadUint32(x.Rx.Consumer)
 	prod := atomic.LoadUint32(x.Rx.Producer)
 	
+	// Debug Logic: if prod != cons, log it
+	if prod != cons {
+		// log.Printf("[DEBUG XDP] RX Event: Prod=%d, Cons=%d", prod, cons)
+	}
+
 	if cons == prod { return nil, nil }
 	
 	count := prod - cons
