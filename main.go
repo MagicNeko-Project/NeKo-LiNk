@@ -998,19 +998,15 @@ func (v *VPNInstance) Start() {
 		}
 
 		// 启动写入循环 (AF_XDP -> Encrypt -> IPConn)
-		// We use XDPReaderLoop instead of TUNReaderLoopRaw
-		for i := 0; i < v.numWorkers; i++ {
-			go v.XDPReaderLoop(i)
-		}
+		// 核心：Raw 模式读取必须单线程以避免重复发包 (DUP!)
+		go v.XDPReaderLoop(0)
 		
 		// 启动重排序写入器 (Consumer) (Decrypt -> Reorder -> AF_XDP)
 		go v.packetOrderedWriter()
 
 		// 启动并行读取器 (Producers) (IPConn -> Decrypt -> Reorder)
-		log.Printf("[RAW] 已启用流水线重排序模式 (Pipeline Reordering Active): %d Workers -> 1 Ordered Writer", v.numWorkers)
-		for i := 0; i < v.numWorkers; i++ {
-			go v.rawReaderLoop(0)
-		}
+		log.Printf("[RAW] 已启用顺序读取模式 (Serial Reading Active): 1 Worker -> 1 Ordered Writer")
+		go v.rawReaderLoop(0)
 
 		// 启动心跳机制
 		go v.handshakeLoop()
@@ -1057,9 +1053,8 @@ func (v *VPNInstance) InitInterface() {
 	// Configure Host Side
 	runCmd("ip", "addr", "add", v.Cfg.LocalAddr, "dev", hostIf)
 	runCmd("ip", "link", "set", hostIf, "mtu", fmt.Sprintf("%d", v.Cfg.MTU))
-	// Enable ARP + Promisc for L2 tunneling
+	// Enable ARP for L2 tunneling
 	runCmd("ip", "link", "set", hostIf, "arp", "on")
-	runCmd("ip", "link", "set", hostIf, "promisc", "on")
 	runCmd("ip", "link", "set", hostIf, "up")
 	
 	// Configure App Side (AF_XDP Target)
