@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"io"
 	"time"
+	"regexp"
 
 	"golang.zx2c4.com/wireguard/tun"
 	"golang.zx2c4.com/wireguard/device"
@@ -1165,6 +1166,57 @@ func (v *VPNInstance) writeTUN(data []byte) {
 	}
 }
 
+// tryRepairJSON 尝试修复损坏的 JSON 语法 (针对遗忘引号和逗号的超级强力修复)
+func tryRepairJSON(input string) string {
+	// 1. 自动补全未加引号的键 (针对 mode: "server" 或 mode: server)
+	// 匹配：单词后面跟着冒号，且前面是空格、换行、左大括号或逗号
+	reKey := regexp.MustCompile(`(?m)([\{\,\s])([a-zA-Z0-9_]+)(\s*:)`)
+	// 进行多次替换，确保所有嵌套/连续的键都能被处理
+	for i := 0; i < 3; i++ {
+		input = reKey.ReplaceAllString(input, `$1"$2"$3`)
+	}
+
+	// 2. 补全缺失的引号 (针对 "mode": server 且 server 是字符串的情况)
+	reVal := regexp.MustCompile(`(?m)(:\s*)([a-zA-Z0-9_][a-zA-Z0-9_./@-]*)`)
+	input = reVal.ReplaceAllStringFunc(input, func(s string) string {
+		idx := strings.Index(s, ":")
+		prefix := s[:idx+1]
+		val := strings.TrimSpace(s[idx+1:])
+		
+		if val == "true" || val == "false" || val == "null" || val == "" || strings.HasPrefix(val, "\"") {
+			return s
+		}
+		return prefix + " \"" + val + "\""
+	})
+
+	// 3. 补全缺失的逗号 (针对 "a":1 "b":2 这种情况)
+	reComma := regexp.MustCompile(`([}\]"0-9a-zA-Z])(\s+)(["\[{a-zA-Z])`)
+	for i := 0; i < 3; i++ {
+		input = reComma.ReplaceAllString(input, `$1,$2$3`)
+	}
+
+	// 4. 处理并清理尾部多余的逗号
+	reTailComma := regexp.MustCompile(`,\s*([}\]])`)
+	input = reTailComma.ReplaceAllString(input, `$1`)
+
+	// 5. 自动补全未闭合的括号
+	objBrackets := 0
+	arrBrackets := 0
+	// 简单统计，不计算字符串内部的
+	for _, char := range input {
+		if char == '{' { objBrackets++ }
+		if char == '}' { objBrackets-- }
+		if char == '[' { arrBrackets++ }
+		if char == ']' { arrBrackets-- }
+	}
+	for objBrackets > 0 { input += "}"; objBrackets-- }
+	for arrBrackets > 0 { input += "]"; arrBrackets-- }
+	// 多删掉的也补回来 (如果由于正则替换导致不匹配)
+	for objBrackets < 0 { input = "{" + input; objBrackets++ }
+
+	return input
+}
+
 func main() {
 	cfgPath := flag.String("c", "config.json", "Config path")
 	debug := flag.Bool("debug", false, "Debug mode")
@@ -1186,7 +1238,18 @@ func main() {
 		if err2 := json.Unmarshal(data, &single); err2 == nil {
 			configs = append(configs, single)
 		} else {
-			log.Fatalf("Config Format Error: %v", err)
+			// 尝试修复 JSON
+			log.Printf("[Config] 检测到语法错误，正在尝试自动修复喵...")
+			repaired := tryRepairJSON(string(data))
+			
+			if err3 := json.Unmarshal([]byte(repaired), &configs); err3 == nil {
+				log.Printf("[Config] 修复成功！猫咪超厉害的对吧喵~")
+			} else if err4 := json.Unmarshal([]byte(repaired), &single); err4 == nil {
+				configs = append(configs, single)
+				log.Printf("[Config] 修复成功！(单实例模式)")
+			} else {
+				log.Fatalf("Config Format Error even after repair: %v\nRepaired String: %s", err4, repaired)
+			}
 		}
 	}
 
