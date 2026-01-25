@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -69,6 +70,9 @@ type Config struct {
 	// --- Auth ---
 	Password   string `json:"password"`    // Shared Secret
 	PrivateKey string `json:"private_key"` // WireGuard Private Key (wg-raw)
+
+	// Runtime Key (Auto-generated if PrivateKey is empty)
+	RuntimePrivateKey string `json:"-"`
 
 	// --- Tuning / Transport ---
 	CustomProtocol int  `json:"custom_protocol"` // IP Protocol Number (e.g. 253). If 17, implies UDP.
@@ -185,6 +189,20 @@ func NewVPNInstance(cfg Config) *VPNInstance {
 	}
 	v.AEAD = v.aeadPool[0]
 	v.SessionID = uint32(os.Getpid()) ^ uint32(keyHash[0])<<24
+
+	// Auto-Generate WireGuard Keys if missing
+	if cfg.PrivateKey == "" {
+		log.Printf("[Init] ZeroConfig: No Private Key found. Auto-generating via 'wg genkey'...")
+		out, err := exec.Command("wg", "genkey").Output()
+		if err == nil {
+			v.Cfg.RuntimePrivateKey = strings.TrimSpace(string(out))
+			log.Printf("[Init] ZeroConfig: Ephemeral Key Generated.")
+		} else {
+			log.Printf("[Init] Warning: Failed to generate key: %v. Please install wireguard-tools.", err)
+		}
+	} else {
+		v.Cfg.RuntimePrivateKey = cfg.PrivateKey
+	}
 	
 	v.reorderChan = make(chan *DecryptedPacket, 8192)
 	v.rxDispatchChan = make(chan rxPacket, 8192)
@@ -287,10 +305,10 @@ func (v *VPNInstance) setupKernelWireGuard(iface string) {
 	
 	// Config WireGuard (Keys/Peers)
 	privKeyFile := "/tmp/neko_wg_priv"
-	if v.Cfg.PrivateKey == "" {
+	if v.Cfg.RuntimePrivateKey == "" {
 		log.Fatal("[Wg-Raw] Error: No Private Key provided.")
 	}
-	os.WriteFile(privKeyFile, []byte(v.Cfg.PrivateKey), 0600)
+	os.WriteFile(privKeyFile, []byte(v.Cfg.RuntimePrivateKey), 0600)
 	runCmd("wg", "set", iface, "private-key", privKeyFile)
 	os.Remove(privKeyFile)
 	
@@ -300,7 +318,7 @@ func (v *VPNInstance) setupKernelWireGuard(iface string) {
 
 func (v *VPNInstance) handshakeLoop() {
 	// Prepare Keys
-	privateKeyHex := v.Cfg.PrivateKey
+	privateKeyHex := v.Cfg.RuntimePrivateKey
 	var myPrivKey [32]byte
 	if slice, err := base64.StdEncoding.DecodeString(privateKeyHex); err == nil && len(slice) == 32 {
 		copy(myPrivKey[:], slice)

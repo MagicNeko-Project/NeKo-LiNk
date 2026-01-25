@@ -13,7 +13,7 @@
       "client_remote_ip": "客户端专用哦！服务端的物理 IP 是多少呀？",
       "client_remote_port": "客户端专用哦！服务端的物理端口是多少呀？",
       "password": "必填哒！这是大家共享的秘密密码哦，用来加密握手的喵！",
-      "private_key": "wg-raw 模式专用哦！WireGuard 的私钥填这里 (用 wg genkey 生成一下嘛)。",
+      "private_key": "选填哒！如果不填的话，NekoLink 会自动帮你生成一个哦！(ZeroConfig 喵~)",
       "wg_internal_port": "wg-raw 模式专用哦！内核 WireGuard 偷偷用的内部端口 (默认 51820)。",
       "tcp_mode": "选填哒。如果开启的话，会伪装成 TCP 流量哦，很狡猾吧？(true/false)",
       "custom_protocol": "选填哒。自定义的 IP 协议号 (默认 233)。如果要用 UDP 就填 17 哦！"
@@ -28,7 +28,7 @@
     "server_bind_port": 23333,
 
     "password": "CHANGE_ME_PLEASE",
-    "private_key": "INSERT_PRIVATE_KEY_HERE",
+    "private_key": "",
 
     "wg_internal_port": 51820,
     "mtu": 1400,
