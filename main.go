@@ -188,11 +188,12 @@ func (c *Config) ParseLegacy() (changed bool) {
 	}
 	
 	// 4. MTU 优化 (避免分片)
-	if c.MTU == 0 || c.MTU > 1420 {
+	// 1380 is a very safe value for most public clouds/VPNs to avoid fragmentation
+	if c.MTU == 0 || c.MTU > 1380 {
 		oldMTU := c.MTU
-		c.MTU = 1420
+		c.MTU = 1380
 		if oldMTU != 0 {
-			log.Printf("[%s] 优化 MTU: %d -> 1420", c.InterfaceName, oldMTU)
+			log.Printf("[%s] 优化 MTU: %d -> 1380", c.InterfaceName, oldMTU)
 			changed = true
 		}
 		if oldMTU == 0 {
@@ -391,7 +392,8 @@ func NewVPNInstance(cfg Config) *VPNInstance {
 	v.AEAD = v.aeadPool[0]
 	v.SessionID = uint32(os.Getpid()) ^ uint32(keyHash[0])<<24
 	
-	v.reorderChan = make(chan *DecryptedPacket, 4096)
+	// High throughput reorder buffer
+	v.reorderChan = make(chan *DecryptedPacket, 8192)
 
 	// Initialize Phantom Remote if Client
 	if cfg.Mode == "client" && cfg.PeerAddr != "" {
@@ -1270,17 +1272,19 @@ func (v *VPNInstance) rawReaderLoop(idx int) {
 
 func (v *VPNInstance) XDPReaderLoop(idx int) {
 	// XDP Reader (Producer) + Parallel Encryption Workers
-	txChan := make(chan []byte, 8192)
+	// Use a slightly larger channel to buffer spikes
+	txChan := make(chan *[]byte, 8192)
 
 	for i := 0; i < v.numWorkers; i++ {
 		go func(wIdx int) {
 			aead := v.aeadPool[wIdx%len(v.aeadPool)]
 			nonce := make([]byte, NonceSize)
 			
-			// Get client remote once
 			clientRemote := v.ClientRemoteIP
 
-			for pkt := range txChan {
+			for bufPtr := range txChan {
+				pkt := *bufPtr
+				
 				var target *net.IPAddr
 				if v.Cfg.Mode == "client" {
 					target = clientRemote
@@ -1288,19 +1292,22 @@ func (v *VPNInstance) XDPReaderLoop(idx int) {
 					target = v.ServerPeerIP.Load()
 				}
 				
-				if target == nil { continue }
+				if target != nil && len(v.ConnRaw) > 0 {
+					// Structure Nonce
+					vVal := atomic.AddUint64(&v.nonceCounter, 1)
+					binary.BigEndian.PutUint64(nonce[0:8], vVal)
+					binary.BigEndian.PutUint32(nonce[8:12], v.SessionID)
 
-				// Structure Nonce
-				vVal := atomic.AddUint64(&v.nonceCounter, 1)
-				binary.BigEndian.PutUint64(nonce[0:8], vVal)
-				binary.BigEndian.PutUint32(nonce[8:12], v.SessionID)
+					// Encrypt (Seal into a new slice or pre-allocated?)
+					// For now, simple Seal for correctness. Tag is 16 bytes.
+					cipherText := aead.Seal(nil, nonce, pkt, nil)
+					finalPayload := append(nonce, cipherText...)
 
-				cipherText := aead.Seal(nil, nonce, pkt, nil)
-				finalPayload := append(nonce, cipherText...)
-
-				if len(v.ConnRaw) > 0 {
 					v.ConnRaw[0].WriteToIP(finalPayload, target)
 				}
+				
+				// Return buffer to pool
+				bufPool.Put(bufPtr)
 			}
 		}(i)
 	}
@@ -1314,14 +1321,17 @@ func (v *VPNInstance) XDPReaderLoop(idx int) {
 		
 		for _, pkt := range pkts {
 			if len(pkt) < 14 { continue }
-			// Copy buffer from XDP Umem for asynchronous processing
-			cp := make([]byte, len(pkt))
-			copy(cp, pkt)
+			
+			// Copy buffer from XDP Umem using Pool
+			bufPtr := bufPool.Get().(*[]byte)
+			decPkt := (*bufPtr)[:len(pkt)]
+			copy(decPkt, pkt)
 			
 			select {
-			case txChan <- cp:
+			case txChan <- bufPtr:
 			default:
-				// Drop if channel full to avoid deadlocking XDP
+				// Buffer full: must drop to prevent deadlock
+				bufPool.Put(bufPtr)
 			}
 		}
 	}
@@ -1446,8 +1456,8 @@ func (v *VPNInstance) packetOrderedWriter() {
 			timer.Reset(30 * time.Millisecond)
 		}
 
-		// Prevent Bloat (Fallback)
-		if len(buffer) > 512 {
+		// Prevent Bloat (Dynamic Window)
+		if len(buffer) > 2048 {
 			var minSeq uint64 = 0xFFFFFFFFFFFFFFFF
 			for s := range buffer {
 				if s < minSeq { minSeq = s }
