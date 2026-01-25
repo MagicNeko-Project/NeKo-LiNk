@@ -78,14 +78,14 @@ int xdp_prog(struct xdp_md *ctx) {
         if ((void *)(udp + 1) > data_end) return XDP_PASS;
         
         if (udp->dest == *val) {
-             return bpf_redirect_map(&xsks_map, ctx->rx_queue_index, 0);
+             return bpf_redirect_map(&xsks_map, 0, 0);
         }
     }
     
     // MODE 2: RAW (IP Protocol)
     else if (*mode == 2) {
         if (ip->protocol == *val) {
-            return bpf_redirect_map(&xsks_map, ctx->rx_queue_index, 0);
+            return bpf_redirect_map(&xsks_map, 0, 0);
         }
     }
 

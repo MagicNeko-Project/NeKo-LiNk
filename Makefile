@@ -1,5 +1,5 @@
 CLANG ?= clang
-CFLAGS := -O2 -g -Wall -target bpf
+CFLAGS := -O2 -g -Wall -target bpf -I/usr/include/x86_64-linux-gnu -Ixdp
 
 # Check for local Go installation
 GO := $(shell if [ -f ./.go/bin/go ]; then echo "./.go/bin/go"; else echo "go"; fi)
