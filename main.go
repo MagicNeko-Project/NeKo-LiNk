@@ -258,9 +258,10 @@ type VPNInstance struct {
 }
 
 type DecryptedPacket struct {
-	Seq    uint64
-	Data   []byte
-	BufReq *[]byte
+	Seq       uint64
+	SessionID uint32
+	Data      []byte
+	BufReq    *[]byte
 }
 
 func NewVPNInstance(cfg Config) *VPNInstance {
@@ -607,8 +608,9 @@ func (v *VPNInstance) rawReaderLoop(idx int) {
 		if n < NonceSize+Overhead { continue }
 		if v.Cfg.Mode == "server" { v.ServerPeerIP.Store(addr) }
 		
-		// 1. Extract Sequence from Nonce (BigEndian uint64 at start)
+		// 1. Extract Sequence and SessionID from Nonce
 		seq := binary.BigEndian.Uint64(buf[0:8])
+		sess := binary.BigEndian.Uint32(buf[8:12])
 		
 		// 2. Decrypt
 		enc := buf[:n]
@@ -620,9 +622,10 @@ func (v *VPNInstance) rawReaderLoop(idx int) {
 			// Successful Decrypt
 			// Submit to Reorderer
 			v.reorderChan <- &DecryptedPacket{
-				Seq:    seq,
-				Data:   plain,  // Slice of buf
-				BufReq: bufPtr, // Ownership passed
+				Seq:       seq,
+				SessionID: sess,
+				Data:      plain,  // Slice of buf
+				BufReq:    bufPtr, // Ownership passed
 			}
 			
 			// Allocate NEW buffer for next read
@@ -684,15 +687,33 @@ func (v *VPNInstance) sendRawOptimized(plain []byte, aead cipher.AEAD) {
 
 func (v *VPNInstance) packetOrderedWriter() {
 	var nextSeq uint64 = 0
+	var currentSessionID uint32 = 0
 	buffer := make(map[uint64]*DecryptedPacket)
 	
 	firstPacket := true
 
 	for pkt := range v.reorderChan {
+		// Session Reset Detection
+		if pkt.SessionID != currentSessionID {
+			if !firstPacket {
+				log.Printf("[Reorderer] Session Change Detected: %x -> %x. Resetting Sequence.", currentSessionID, pkt.SessionID)
+			}
+			currentSessionID = pkt.SessionID
+			// Clear buffer for old session
+			for k, p := range buffer {
+				bufPool.Put(p.BufReq)
+				delete(buffer, k)
+			}
+			// Reset Seq to this packet's seq (Latch on)
+			nextSeq = pkt.Seq
+			firstPacket = false
+		}
+
 		if firstPacket {
 			nextSeq = pkt.Seq
 			firstPacket = false
-			log.Printf("[Reorderer] Init Sequence: %d", nextSeq)
+			currentSessionID = pkt.SessionID
+			log.Printf("[Reorderer] Init Sequence: %d (Session %x)", nextSeq, currentSessionID)
 		}
 
 		if pkt.Seq < nextSeq {
