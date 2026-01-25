@@ -366,6 +366,22 @@ func (x *Socket) Poll(timeout int) {
 
 func (x *Socket) GetFD() int { return x.Fd }
 
+func (x *Socket) Close() error {
+	if x.Link != nil {
+		x.Link.Close()
+	}
+	if x.XsksMap != nil {
+		x.XsksMap.Close()
+	}
+	if x.ConfigMap != nil {
+		x.ConfigMap.Close()
+	}
+	if x.Fd > 0 {
+		unix.Close(x.Fd)
+	}
+	return nil
+}
+
 // Helpers
 func setsockopt(fd, level, opt int, val unsafe.Pointer, size uintptr) error {
 	_, _, errno := unix.Syscall6(unix.SYS_SETSOCKOPT, uintptr(fd), uintptr(level), uintptr(opt), uintptr(val), size, 0)

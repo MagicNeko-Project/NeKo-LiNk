@@ -814,6 +814,10 @@ func (v *VPNInstance) Start() {
 
 func (v *VPNInstance) Cleanup() {
 	log.Printf("[%s] Cleaning up...", v.Cfg.VPNInterface)
+	if v.Xsk != nil {
+		v.Xsk.Close()
+	}
+
 	if v.Cfg.Protocol == "wg-raw" {
 		if v.Cfg.VPNInterface != "" {
 			runCmdQuiet("ip", "link", "del", v.Cfg.VPNInterface)
