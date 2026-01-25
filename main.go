@@ -73,6 +73,7 @@ type Config struct {
 	// --- Custom Interface Names ---
 	AppInterface  string `json:"app_interface,omitempty"` // For raw mode veth peer
 	WGInterface   string `json:"wg_interface,omitempty"`  // For wg-raw mode kernel interface
+	ParentInterface string `json:"parent_interface,omitempty"` // Physical interface for XDP (e.g. eth0)
 
 	// --- Legacy Fields (Hidden but mapped) ---
 	LegacyServerAddr string `json:"server_addr,omitempty"`
@@ -103,10 +104,15 @@ func (c *Config) PerformMigration() {
 					c.Comment = fmt.Sprintf("%s (Migrated from: %s)", c.Comment, c.InterfaceName)
 				}
 				
-				log.Printf("[Migrate] '%s': Detected Logical Name '%s' for Phantom Mode. Auto-switching to Physical '%s'.", 
+				log.Printf("[Migrate] '%s': Detected Logical Name '%s' for Phantom Mode. Using Physical '%s' as Parent.", 
 					c.Comment, c.InterfaceName, defIf)
-				c.InterfaceName = defIf
+				c.ParentInterface = defIf
 			}
+		}
+		
+		if c.ParentInterface == "" {
+			// Fallback: If not set, use InterfaceName as Parent (Legacy behavior)
+			c.ParentInterface = c.InterfaceName
 		}
 		
 		// Ensure Config Port exists
@@ -248,7 +254,7 @@ func (c *Config) ParseLegacy() (changed bool) {
 	// Default secondary interface names if not provided
 	if c.Protocol == "wg-raw" {
 		if c.WGInterface == "" {
-			c.WGInterface = c.InterfaceName + "_wg"
+			c.WGInterface = c.InterfaceName
 			changed = true
 		}
 	} else {
@@ -406,17 +412,16 @@ func (v *VPNInstance) startWireGuardRaw() {
 	}
 
 	// 1. Get Physical MAC
-	iface, err := net.InterfaceByName(v.Cfg.InterfaceName)
+	iface, err := net.InterfaceByName(v.Cfg.ParentInterface)
 	if err == nil && len(iface.HardwareAddr) >= 6 {
 		copy(v.PhyMAC[:], iface.HardwareAddr)
 		log.Printf("[WG-RAW] Physical MAC: %x", v.PhyMAC)
 	}
 
-	// 2. Initialize XDP on Physical Interface
-	log.Printf("[WG-RAW] Initializing Phantom XDP on %s (Mode: %d, Target: %d)", v.Cfg.InterfaceName, bpfMode, bpfTarget)
-	// Note: In Phantom Mode, v.Cfg.InterfaceName IS the physical interface (e.g. eth0)
+	// 2. Initialize XDP on Parent Interface
+	log.Printf("[WG-RAW] Initializing Phantom XDP on %s (Mode: %d, Target: %d)", v.Cfg.ParentInterface, bpfMode, bpfTarget)
 	xsk, err := xdp.NewSocket(xdp.Config{
-		Interface: v.Cfg.InterfaceName,
+		Interface: v.Cfg.ParentInterface,
 		QueueID:   0,
 		RingSize:  2048,
 		Mode:      bpfMode,
