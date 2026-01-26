@@ -24,7 +24,15 @@ echo "Updating binary..."
 cp target/release/neko-link "$INSTALL_PATH"
 chmod +x "$INSTALL_PATH"
 
-# 5. 重启
+# 5. 更新 Systemd 配置
+SERVICE_FILE="neko-link.service"
+if [ -f "$SERVICE_FILE" ]; then
+    echo "Updating systemd service file..."
+    cp "$SERVICE_FILE" "/etc/systemd/system/$SERVICE_FILE"
+    systemctl daemon-reload
+fi
+
+# 6. 重启
 echo "Restarting service..."
 systemctl start $SERVICE_NAME
 systemctl status $SERVICE_NAME --no-pager
