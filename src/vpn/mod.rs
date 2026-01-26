@@ -133,6 +133,8 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     let raw_rx_aead = aead.clone();
     let raw_rx_state = state.clone();
 
+    let raw_rx_cfg = cfg.clone(); // Clone config for RX loop
+
     // Raw RX Loop (Peer -> Raw -> Decrypt -> Veth)
     tasks.push(tokio::spawn(async move {
          let mut buf = [0u8; 65536];
@@ -145,15 +147,6 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                 _ = flush_interval.tick() => {
                     let packets = gro_table.flush_stale();
                     for p in packets {
-                         // Write to Veth
-                         // TODO: Encapsulate writing
-                         // For now reuse the fd writing logic
-                         // We need raw_rx_target to be accessible
-                         // Note: readable() gives ReadGuard, writable() gives WriteGuard.
-                         // We can't hold it across await if we await inside write?
-                         // Actually AsyncFd::writable().await gives a guard, then try_io.
-                         
-                         // Block until writable?
                          if let Ok(mut guard) = raw_rx_target.writable().await {
                              let _ = guard.try_io(|inner_fd| unsafe {
                                   let fd = *inner_fd.get_ref();
@@ -187,6 +180,9 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                                  match raw_rx_aead.decrypt(nonce, Payload { msg: ciphertext, aad: &[] }) {
                                      Ok(plain) => {
                                          if plain == b"NEKO_HEARTBEAT" {
+                                              if raw_rx_cfg.debug {
+                                                  info!("[{}] RX Heartbeat from {}", raw_rx_cfg.interface_name, addr);
+                                              }
                                               // Update Peer
                                               let update = {
                                                   let lock = raw_rx_state.remote_addr.read().unwrap();
@@ -210,6 +206,9 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                                  
                                  match raw_rx_aead.decrypt(nonce, Payload { msg: ciphertext, aad: &[] }) {
                                      Ok(plain) => {
+                                          if raw_rx_cfg.debug {
+                                              info!("[{}] RX Data: {} bytes from {}", raw_rx_cfg.interface_name, plain.len(), addr);
+                                          }
                                           // Ingest to GRO
                                           let packets = gro_table.ingest(&plain);
                                           for p in packets {
@@ -242,7 +241,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     
     let buffers = Arc::new(buffers::BufferPool::new(1024));
     let buffers = buffers.clone();
-    let rx_cfg = cfg.clone();
+    let rx_cfg = cfg.clone(); // This is for the TX loop (reading Veth RX -> Sending Raw TX)
     
     // Start simple loop
     tasks.push(tokio::spawn(async move {
@@ -284,6 +283,10 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
             // Set content length for logic
             unsafe { buf.set_len(n); }
             
+            if rx_cfg.debug {
+                 info!("[{}] TX Data: {} bytes (Veth -> Raw)", rx_cfg.interface_name, n);
+            }
+
             // GSO Segmentation
             // TODO: Detect MTU from config? Assuming 1400 from config
             let segments = gso::segment_packet(&buf, rx_cfg.mtu as usize);
