@@ -45,6 +45,21 @@ impl GROTable {
              return output;
         }
 
+        use pnet::packet::ethernet::{EthernetPacket, EtherTypes};
+        
+        let eth_packet = match EthernetPacket::new(&packet[..ETH_HEADER_LEN]) {
+             Some(p) => p,
+             None => {
+                 output.push(packet.to_vec());
+                 return output;
+             }
+        };
+
+        if eth_packet.get_ethertype() != EtherTypes::Ipv4 {
+            output.push(packet.to_vec());
+            return output;
+        }
+
         let ip_packet = match Ipv4Packet::new(&packet[ETH_HEADER_LEN..]) {
             Some(p) => p,
             None => {

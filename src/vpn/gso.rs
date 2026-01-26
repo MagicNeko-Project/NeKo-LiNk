@@ -14,10 +14,22 @@ pub fn segment_packet(packet_data: &[u8], mtu: usize) -> Vec<Vec<u8>> {
 
     // Parse Headers
     // Assume standard Ethernet II
-    let _eth_header = &packet_data[..ETH_HEADER_LEN];
+    use pnet::packet::ethernet::{EthernetPacket, EtherTypes};
+
+    // Parse Headers
+    // Check EtherType
+    let eth_packet = match EthernetPacket::new(&packet_data[..ETH_HEADER_LEN]) {
+        Some(p) => p,
+        None => return vec![packet_data.to_vec()],
+    };
+    
+    if eth_packet.get_ethertype() != EtherTypes::Ipv4 {
+        return vec![packet_data.to_vec()];
+    }
+
     let ip_packet = match Ipv4Packet::new(&packet_data[ETH_HEADER_LEN..]) {
         Some(p) => p,
-        None => return vec![packet_data.to_vec()], // Not IPv4
+        None => return vec![packet_data.to_vec()], 
     };
 
     let ip_header_len = (ip_packet.get_header_length() as usize) * 4;
