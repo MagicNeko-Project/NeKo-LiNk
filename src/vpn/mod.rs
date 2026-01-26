@@ -313,7 +313,10 @@ fn init_interface(cfg: &Config) -> anyhow::Result<()> {
     // App Config
     run_cmd("ip", &["link", "set", app_if, "arp", "on"])?;
     run_cmd("ip", &["link", "set", app_if, "promisc", "on"])?;
-    // run_cmd_ignore_fail("ethtool", &["-K", app_if, "tx", "on", "rx", "on", "tso", "on", "gso", "on", "gro", "on"]);
+    
+    // User Feedback: Disable GRO/LRO for XDP to see individual packets
+    run_cmd_ignore_fail("ethtool", &["-K", app_if, "gro", "off", "lro", "off"]);
+    
     run_cmd("ip", &["link", "set", app_if, "mtu", &cfg.mtu.to_string()])?;
     run_cmd("ip", &["link", "set", app_if, "up"])?;
     
@@ -333,9 +336,14 @@ fn init_interface(cfg: &Config) -> anyhow::Result<()> {
         }
     };
     
-    // Sysctl
+    // Sysctl Optimizations
+    // 1. Disable IPv6 (if not used)
     let _ = Command::new("sysctl").args(&["-w", &format!("net.ipv6.conf.{}.disable_ipv6=1", app_if)]).status();
+    // 2. Disable rp_filter (prevent packet drop due to asymmetric routing)
     let _ = Command::new("sysctl").args(&["-w", "net.ipv4.conf.all.rp_filter=0"]).status();
+    let _ = Command::new("sysctl").args(&["-w", &format!("net.ipv4.conf.{}.rp_filter=0", app_if)]).status();
+    // 3. Enable IP Forwarding
+    let _ = Command::new("sysctl").args(&["-w", "net.ipv4.ip_forward=1"]).status();
     
     setup_nftables(cfg)?;
     
