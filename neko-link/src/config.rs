@@ -41,6 +41,9 @@ pub struct Config {
     
     #[serde(default)]
     pub app_interface: String,
+
+    #[serde(default)]
+    pub phys_interface: String,
     
     // Legacy Mappings
     #[serde(default)]
@@ -126,6 +129,12 @@ impl Config {
             }
             self.app_interface = format!("{}_app", prefix);
             info!("[{}] Auto-assigned AppInterface: {}", self.interface_name, self.app_interface);
+            changed = true;
+        }
+
+        if self.phys_interface.is_empty() {
+            self.phys_interface = "eth0".to_string();
+            info!("[{}] Defaulting PhysInterface to eth0", self.interface_name);
             changed = true;
         }
 

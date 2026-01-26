@@ -13,6 +13,9 @@ network-types = "0.0.5"
 name = "neko-link"
 path = "src/main.rs"
 
+[profile.dev]
+panic = "abort"
+
 [profile.release]
 opt-level = 3
 debug = true

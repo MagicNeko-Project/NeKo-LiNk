@@ -3,9 +3,12 @@ use std::process::Command;
 use log::{info, error, warn};
 use std::sync::Arc;
 use aya::Bpf;
-use aya::programs::{Xdp, XdpFlags, SchedClassifier, TcAttachType};
+use aya::programs::{Xdp, XdpFlags, SchedClassifier, TcAttachType, Syscall};
 use neko_link_common::{CryptoConfig};
 use std::convert::TryInto;
+use nix::net::if_::if_nametoindex;
+use std::net::Ipv4Addr;
+use std::str::FromStr;
 
 pub async fn run(cfg: Config) -> anyhow::Result<()> {
     info!("[{}] NekoLink (Aya eBPF Edition) Starting", cfg.interface_name);
@@ -18,39 +21,56 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     let bpf_bytes = include_bytes!("bpf_bytes.o");
     let mut bpf = Bpf::load(bpf_bytes)?;
 
+    // Resolve Indices
+    let phys_if_idx = if_nametoindex(cfg.phys_interface.as_str())?;
+    // We assume neko0 (interface_name) is the target for Decapsulated traffic
+    let veth_if_idx = if_nametoindex(cfg.interface_name.as_str())?;
+
     // 3. Configure Crypto in BPF Maps
-    /*
     {
         let mut config_map = aya::maps::HashMap::try_from(bpf.map_mut("CRYPTO_CONFIG").unwrap())?;
+
+        let mut key = [0u8; 32];
+        let cfg_key_bytes = cfg.key.as_bytes();
+        let len = std::cmp::min(cfg_key_bytes.len(), 32);
+        key[..len].copy_from_slice(&cfg_key_bytes[..len]);
+
+        let local_ip_val = Ipv4Addr::from_str(cfg.local_addr_v4.split('/').next().unwrap_or("")).unwrap_or(Ipv4Addr::new(0,0,0,0));
+        let remote_ip_val = Ipv4Addr::from_str(&cfg.peer_addr).unwrap_or(Ipv4Addr::new(0,0,0,0));
+
         let crypto_cfg = CryptoConfig {
             cipher_suite: 1, // Default to AES-GCM
-            key: [0u8; 32], // TODO: Use key from cfg
-            protocol_number: 115, // Simple IP protocol number for tunnel
-            remote_ip: 0, // Fill if known
+            key,
+            protocol_number: cfg.ip_protocol_num,
+            local_ip: u32::from(local_ip_val).to_be(),
+            remote_ip: u32::from(remote_ip_val).to_be(),
+            phys_if_index: phys_if_idx as u32,
+            veth_if_index: veth_if_idx as u32,
         };
         config_map.insert(0, crypto_cfg, 0)?;
         info!("BPF Crypto Configured");
     }
-    */
 
     // 4. Trigger Syscall Program to init Crypto Context
-    /*
+    // Note: We need to load and run it once.
     let syscall_prog: &mut Syscall = bpf.program_mut("init_crypto_ctx").unwrap().try_into()?;
     syscall_prog.load()?;
-    */
+    syscall_prog.test_run(1, &[], &mut [], &mut [])?;
     
-    // 5. Attach XDP (RX)
-    let xdp_app_if = &cfg.app_interface;
+    // 5. Attach XDP (RX - Physical Interface)
+    let xdp_if = &cfg.phys_interface;
     let xdp_prog: &mut Xdp = bpf.program_mut("xdp_ingress").unwrap().try_into()?;
     xdp_prog.load()?;
-    xdp_prog.attach(xdp_app_if, XdpFlags::default())?;
-    info!("XDP Attached to {}", xdp_app_if);
+    xdp_prog.attach(xdp_if, XdpFlags::default())?;
+    info!("XDP Attached to {}", xdp_if);
 
-    // 6. Attach TC (TX)
+    // 6. Attach TC (TX - Virtual Interface)
+    // We attach to Egress of neko0.
+    let tc_if = &cfg.interface_name;
     let tc_prog: &mut SchedClassifier = bpf.program_mut("tc_egress").unwrap().try_into()?;
     tc_prog.load()?;
-    tc_prog.attach(xdp_app_if, TcAttachType::Egress)?;
-    info!("TC Attached to {}", xdp_app_if);
+    tc_prog.attach(tc_if, TcAttachType::Egress)?;
+    info!("TC Attached to {}", tc_if);
 
     // Keep alive until signal
     match tokio::signal::ctrl_c().await {
@@ -81,9 +101,12 @@ fn init_interface(cfg: &Config) -> anyhow::Result<()> {
     
     // CRITICAL: Disable GRO for XDP performance and correctness
     run_cmd_ignore_fail("ethtool", &["-K", app_if, "gro", "off", "lro", "off", "tso", "off"]);
+    // Also disable on host_if and phys_if
+    run_cmd_ignore_fail("ethtool", &["-K", host_if, "gro", "off", "lro", "off", "tso", "off"]);
+    run_cmd_ignore_fail("ethtool", &["-K", &cfg.phys_interface, "gro", "off", "lro", "off", "tso", "off"]);
     
-    // Setup clsact qdisc for TC
-    run_cmd_ignore_fail("tc", &["qdisc", "add", "dev", app_if, "clsact"]);
+    // Setup clsact qdisc for TC on host_if (neko0)
+    run_cmd_ignore_fail("tc", &["qdisc", "add", "dev", host_if, "clsact"]);
 
     Ok(())
 }
