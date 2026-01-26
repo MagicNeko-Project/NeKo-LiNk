@@ -15,6 +15,10 @@ apt-get install -y build-essential curl git pkg-config libssl-dev protobuf-compi
 
 # 3. 安装 Rust (如果不存在)
 # 3. 安装 Rust (使用 Debian 源)
+if command -v rustup &> /dev/null; then
+    echo "Rustup detected. Uninstalling to avoid conflicts..."
+    rustup self uninstall -y
+fi
 echo "Installing System Rust..."
 apt-get install -y rustc cargo
 
