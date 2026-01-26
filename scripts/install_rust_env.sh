@@ -36,7 +36,8 @@ cargo --version
 # 5. 安装/检查绑定生成工具
 echo "Installing bpf-linker (with llvm-19)..."
 # Explicitly use llvm-19 feature for newer Debian versions
-cargo install bpf-linker --no-default-features --features llvm-19
+# Use --locked to avoid pulling in dependencies that require newer rustc (e.g. time crate)
+cargo install bpf-linker --no-default-features --features llvm-19 --locked
 
 echo ">>> 环境准备完成! 喵! 🐾"
 echo "请记得运行: source \"$HOME/.bashrc\" (如果需要使用 bpf-linker)"
