@@ -212,6 +212,22 @@ impl GROTable {
              let mut new_ip = MutableIpv4Packet::new(&mut buffer[ETH_HEADER_LEN..]).unwrap();
              new_ip.set_total_length(total_len as u16);
              new_ip.set_checksum(pnet::packet::ipv4::checksum(&new_ip.to_immutable()));
+             
+             let src = new_ip.get_source();
+             let dst = new_ip.get_destination();
+             let ip_header_len = (new_ip.get_header_length() as usize) * 4;
+             let tcp_start = ETH_HEADER_LEN + ip_header_len;
+             
+             if tcp_start < buffer.len() {
+                 if let Some(mut new_tcp) = MutableTcpPacket::new(&mut buffer[tcp_start..]) {
+                     new_tcp.set_checksum(0);
+                     new_tcp.set_checksum(pnet::packet::tcp::ipv4_checksum(
+                         &new_tcp.to_immutable(),
+                         &src,
+                         &dst
+                     ));
+                 }
+             }
         }
     }
 }

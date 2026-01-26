@@ -101,11 +101,9 @@ pub fn segment_packet(packet_data: &[u8], mtu: usize) -> Vec<Vec<u8>> {
                  new_tcp.set_flags(flags & !pnet::packet::tcp::TcpFlags::FIN & !pnet::packet::tcp::TcpFlags::PSH);
             }
             
-            // Re-calculate checksum is complex due to pseudo-header.
-            // However, since we are tunneling via Raw IP (Protocol 233), 
-            // and the receiver (kernel) might re-verify, we SHOULD update checksums.
-            // OR we can rely on hardware or set it to 0 if valid.
-            // For correctness, let's update it.
+            // Re-calculate checksum
+            // IMPORTANT: Must set to 0 before calculation
+            new_tcp.set_checksum(0);
             let src = ip_packet.get_source();
             let dst = ip_packet.get_destination();
             new_tcp.set_checksum(pnet::packet::tcp::ipv4_checksum(
