@@ -1,7 +1,5 @@
 mod socket;
 mod buffers;
-mod gso;
-mod gro;
 mod xdp;
 use crate::config::Config;
 use std::process::Command;
@@ -55,11 +53,6 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
 
     // State Init
     let initial_peer = if !cfg.peer_addr.is_empty() {
-        // Parse peer_addr (it might be IP or IP:Port)
-        // Go logic: if no port, maybe default? Or just IP.
-        // Raw socket send_to expects SocketAddr.
-        // For Raw IP, port is irrelevant but SocketAddr requires it.
-        // We use port 0.
         let ip: std::net::IpAddr = cfg.peer_addr.parse().unwrap_or_else(|_| "0.0.0.0".parse().unwrap());
         Some(SocketAddr::new(ip, 0))
     } else {
@@ -87,26 +80,19 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
             };
             
             if let Some(addr) = target {
-                // Construct Handshake Packet
-                // [0xFE] [Nonce 24] [Cipher]
-                let mut pkt = vec![0u8; 1 + NONCE_SIZE + magic.len() + 16]; // 16 overhead
+                let mut pkt = vec![0u8; 1 + NONCE_SIZE + magic.len() + 16]; 
                 pkt[0] = 0xFE;
                 
-                // Random Nonce
                 let nonce_slice = &mut pkt[1..1 + NONCE_SIZE];
                 rand::thread_rng().fill_bytes(nonce_slice);
                 let nonce = *GenericArray::from_slice(nonce_slice);
                 
-                // Encrypt
-                // Checksum/Tag is appended
                  match hs_aead.encrypt(&nonce, Payload {
                     msg: magic,
                     aad: &[],
                 }) {
                     Ok(ciphertext) => {
-                         // Copy ciphertext after nonce
                          pkt[1+NONCE_SIZE..].copy_from_slice(&ciphertext);
-                         // socket2 send
                          let _ = hs_socket.send_to(&pkt, addr).await;
                     },
                     Err(e) => error!("Handshake Encrypt Fail: {}", e),
@@ -115,13 +101,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         }
     });
 
-    // RX: Fallback (AF_PACKET) -> Decrypt -> ...
-    // Note: We need to implement the reader loop.
-    // For now, let's just test connectivity (receive packets)
-    
-    let f_async = Arc::new(fallback_async); // AsyncFd isn't easily cloneable/shareable like Arc<Socket>
-    // Actually AsyncFd holds the fd. We might need a structural change to share it or just move it.
-    // Since we have one reader, move is fine.
+    let f_async = Arc::new(fallback_async); 
 
     let rx_aead = aead.clone();
 
@@ -133,38 +113,17 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     let raw_rx_aead = aead.clone();
     let raw_rx_state = state.clone();
 
-    let raw_rx_cfg = cfg.clone(); // Clone config for RX loop
+    let raw_rx_cfg = cfg.clone(); 
 
     // Raw RX Loop (Peer -> Raw -> Decrypt -> Veth)
     tasks.push(tokio::spawn(async move {
          let mut buf = [0u8; 65536];
-         let mut gro_table = gro::GROTable::new();
-         // Flush stale flows every 10ms
-         let mut flush_interval = tokio::time::interval(tokio::time::Duration::from_millis(10));
 
          loop {
              tokio::select! {
-                _ = flush_interval.tick() => {
-                    let packets = gro_table.flush_stale();
-                    for p in packets {
-                         if let Ok(mut guard) = raw_rx_target.writable().await {
-                             let _ = guard.try_io(|inner_fd| unsafe {
-                                  let fd = *inner_fd.get_ref();
-                                  let res = libc::send(fd, p.as_ptr() as *const _, p.len(), 0);
-                                  if res < 0 { 
-                                      Err(std::io::Error::last_os_error()) 
-                                  } else { 
-                                      Ok(res as usize) 
-                                  }
-                             });
-                         }
-                    }
-                }
                 res = raw_rx_socket.recv_from(&mut buf) => {
                      match res {
                          Ok((n, addr)) => {
-                             // Linux SOCK_RAW includes IP header (usually 20 bytes)
-                             // Simple heuristic: Skip 20 bytes. 
                              let payload_offset = if n > 20 { 20 } else { 0 };
                              if n <= payload_offset { continue; }
                              
@@ -183,7 +142,6 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                                               if raw_rx_cfg.debug {
                                                   info!("[{}] RX Heartbeat from {}", raw_rx_cfg.interface_name, addr);
                                               }
-                                              // Update Peer
                                               let update = {
                                                   let lock = raw_rx_state.remote_addr.read().unwrap();
                                                   lock.map_or(true, |a| a != addr)
@@ -209,21 +167,18 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                                           if raw_rx_cfg.debug {
                                               info!("[{}] RX Data: {} bytes from {}", raw_rx_cfg.interface_name, plain.len(), addr);
                                           }
-                                          // Ingest to GRO
-                                          let packets = gro_table.ingest(&plain);
-                                          for p in packets {
-                                              // Write to Veth
-                                              if let Ok(mut guard) = raw_rx_target.writable().await {
-                                                  let _ = guard.try_io(|inner_fd| unsafe {
-                                                       let fd = *inner_fd.get_ref();
-                                                       let res = libc::send(fd, p.as_ptr() as *const _, p.len(), 0);
-                                                       if res < 0 { 
-                                                           Err(std::io::Error::last_os_error()) 
-                                                       } else { 
-                                                           Ok(res as usize) 
-                                                       }
-                                                  });
-                                              }
+                                          // DIRECT WRITE TO VETH (No GRO)
+                                          // TODO: Handle MTU violations if any?
+                                          if let Ok(mut guard) = raw_rx_target.writable().await {
+                                              let _ = guard.try_io(|inner_fd| unsafe {
+                                                   let fd = *inner_fd.get_ref();
+                                                   let res = libc::send(fd, plain.as_ptr() as *const _, plain.len(), 0);
+                                                   if res < 0 { 
+                                                       Err(std::io::Error::last_os_error()) 
+                                                   } else { 
+                                                       Ok(res as usize) 
+                                                   }
+                                              });
                                           }
                                      },
                                      Err(_) => {
@@ -241,11 +196,10 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     
     let buffers = Arc::new(buffers::BufferPool::new(1024));
     let buffers = buffers.clone();
-    let rx_cfg = cfg.clone(); // This is for the TX loop (reading Veth RX -> Sending Raw TX)
+    let rx_cfg = cfg.clone(); 
     
-    // Start simple loop
+    // Start simple loop (Veth TX -> Encrypt -> Raw Send)
     tasks.push(tokio::spawn(async move {
-        // ... (Keep existing fallback loop for now, we will replace it next)
         loop {
             // Wait for readability
             let mut guard = f_async.readable().await.unwrap();
@@ -275,31 +229,21 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                     continue;
                 },
                 Err(_would_block) => {
-                    buffers.release(buf); // Release on would_block (recv didn't happen)
+                    buffers.release(buf); 
                     continue;
                 }
             };
 
-            // Set content length for logic
             unsafe { buf.set_len(n); }
             
             if rx_cfg.debug {
                  info!("[{}] TX Data: {} bytes (Veth -> Raw)", rx_cfg.interface_name, n);
             }
 
-            // GSO Segmentation
-            // TODO: Detect MTU from config? Assuming 1400 from config
-            let segments = gso::segment_packet(&buf, rx_cfg.mtu as usize);
-            
-            // We no longer need the original large buffer if we have segments 
-            // (segments are copies for now, optimization: use slices/Cow later)
-            buffers.release(buf);
-
-            // Process Each Segment
-            for segment in segments {
+            // NO GSO: Direct Encrypt & Send
+            let segment = &buf;
+            {
                 let mut nonce_bytes = [0u8; NONCE_SIZE];
-                
-                // Use Atomic Counter
                 let counter = rx_cfg_state.nonce_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 nonce_bytes[0..8].copy_from_slice(&counter.to_be_bytes());
                 nonce_bytes[8..12].copy_from_slice(&rx_cfg_state.session_id.to_be_bytes());
@@ -311,9 +255,6 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                     aad: &[],
                 }) {
                     Ok(ciphertext) => {
-                         // Packet: [Nonce][Ciphertext]
-                         // TODO: Use BufferPool for valid packet construction too?
-                         // For now simplified vec.
                          let mut pkt = Vec::with_capacity(NONCE_SIZE + ciphertext.len());
                          pkt.extend_from_slice(&nonce_bytes);
                          pkt.extend_from_slice(&ciphertext);
@@ -329,6 +270,8 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                     }
                 }
             }
+            
+            buffers.release(buf);
         }
     }));
     
@@ -374,15 +317,18 @@ fn init_interface(cfg: &Config) -> anyhow::Result<()> {
     run_cmd("ip", &["link", "set", app_if, "mtu", &cfg.mtu.to_string()])?;
     run_cmd("ip", &["link", "set", app_if, "up"])?;
     
-    // Try AF_XDP
-    let _xdp_handle = match xdp::init_xdp(app_if) {
+    // Setup clsact qdisc for TC
+    run_cmd_ignore_fail("tc", &["qdisc", "add", "dev", app_if, "clsact"]);
+
+    // Try BPF (XDP + TC)
+    let _bpf_handle = match xdp::init_bpf(app_if) {
         Ok(Some(h)) => {
-            info!("AF_XDP Enabled (BPF Side Only)");
+            info!("BPF Programs (XDP/TC) Loaded & Attached");
             Some(h)
         },
         Ok(None) => None,
         Err(e) => {
-            warn!("AF_XDP Init Failed: {}", e);
+            warn!("BPF Init Failed: {}", e);
             None
         }
     };

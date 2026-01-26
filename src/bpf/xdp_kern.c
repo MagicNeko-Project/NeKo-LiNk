@@ -1,27 +1,28 @@
 #include <linux/bpf.h>
+#include <linux/if_ether.h>
+#include <linux/ip.h>
+#include <linux/in.h>
 #include <bpf/bpf_helpers.h>
 
-struct {
-    __uint(type, BPF_MAP_TYPE_XSKMAP);
-    __uint(max_entries, 64);
-    __uint(key_size, sizeof(int));
-    __uint(value_size, sizeof(int));
-} xsks_map SEC(".maps");
+// Define XDP Frags support
+// This tells the kernel/verifier we support multi-buffer packets.
+char _license[] SEC("license") = "GPL";
 
-SEC("xdp")
-int xdp_sock_prog(struct xdp_md *ctx)
-{
-    int index = ctx->rx_queue_index;
+SEC("xdp.frags")
+int xdp_pass_func(struct xdp_md *ctx) {
+    // Simple pass-through for now.
+    // In future: Traffic Stats, DDoS mitigation, etc.
+    
+    // We can parse headers even in frags, but usually just checking the first buffer is enough for headers.
+    void *data_end = (void *)(long)ctx->data_end;
+    void *data = (void *)(long)ctx->data;
 
-    // Debug logging (cat /sys/kernel/debug/tracing/trace_pipe)
-    // bpf_printk("AF_XDP: Packet received on queue %d\n", index);
+    struct ethhdr *eth = data;
+    if ((void *)(eth + 1) > data_end) {
+        return XDP_PASS;
+    }
 
-    // Redirect to AF_XDP socket if map entry exists
-    if (bpf_map_lookup_elem(&xsks_map, &index))
-        return bpf_redirect_map(&xsks_map, index, 0);
-
-    // Default: Pass to kernel stack
+    // Example: Count packets (we need a map for that, skipping for minimal implementation)
+    
     return XDP_PASS;
 }
-
-char _license[] SEC("license") = "GPL";
