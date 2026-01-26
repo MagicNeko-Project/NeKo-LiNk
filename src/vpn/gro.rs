@@ -17,10 +17,13 @@ struct FlowKey {
 }
 
 struct Flow {
-    // We store the *header* of the first packet as the template
+    // We store the header of the *latest* packet as the template (for ACK/Window)
     headers: Vec<u8>,
     // We store the payload separately to append easily
     payload: Vec<u8>,
+    // The sequence number of the *first* packet in the flow
+    first_seq: u32,
+    // The expected sequence number of the next packet
     next_seq: u32,
     last_seen: Instant,
     // Accumulate flags (OR logic)
@@ -145,6 +148,8 @@ impl GROTable {
 
                 if is_sequential && fits_size {
                     // Append
+                    // Update headers to latest packet (to capture new ACK, Window, Options)
+                    flow.headers = packet[..payload_offset].to_vec();
                     flow.payload.extend_from_slice(payload);
                     flow.next_seq += payload_len as u32;
                     flow.last_seen = Instant::now();
@@ -212,14 +217,10 @@ impl Flow {
         Self {
             headers: packet[..payload_offset].to_vec(),
             payload: packet[payload_offset..].to_vec(),
+            first_seq: seq,
             next_seq: seq + payload_len as u32,
             last_seen: Instant::now(),
-            flags: 0, // Flags from the *first* packet? No, we need to preserve them.
-            // Actually, usually we take flags from the last packet (e.g. PSH).
-            // But we might have accumulated flags.
-            // Let's set initial flags from packet.
-            // But wait, the `headers` contains the flags of the first packet.
-            // We'll update the headers on assemble.
+            flags: 0,
         }
     }
 
@@ -243,12 +244,10 @@ impl Flow {
              // Fixup TCP
              if tcp_start < total_len {
                  if let Some(mut tcp) = MutableTcpPacket::new(&mut pkt[tcp_start..]) {
-                     // Update accumulated flags?
-                     // If we had PSH in the middle, we should probably set it?
-                     // Or just keep the flags from the first packet + accumulated?
-                     // For GRO, usually the last packet's flags matter (like PSH).
-                     // But we kept the first packet's headers.
-                     // Let's OR the accumulated flags.
+                     // Restore First Sequence Number
+                     tcp.set_sequence(self.first_seq);
+
+                     // Merge accumulated flags
                      let old_flags = tcp.get_flags();
                      tcp.set_flags(old_flags | self.flags);
 
@@ -310,19 +309,36 @@ mod tests {
     fn test_gro_coalescing() {
         let mut gro = GROTable::new();
 
-        let p1 = build_packet(1000, &[1u8; 10], 0);
-        let p2 = build_packet(1010, &[2u8; 10], 0);
-        let p3 = build_packet(1020, &[3u8; 10], TcpFlags::PSH); // PSH should trigger flush
+        // Packet 1: Seq 1000, Ack 50
+        let mut p1 = build_packet(1000, &[1u8; 10], 0);
+        {
+             let mut tcp = MutableTcpPacket::new(&mut p1[34..54]).unwrap();
+             tcp.set_acknowledgement(50);
+        }
 
-        // Ingest 1: Buffered
+        // Packet 2: Seq 1010, Ack 60 (Newer Ack)
+        let mut p2 = build_packet(1010, &[2u8; 10], 0);
+        {
+             let mut tcp = MutableTcpPacket::new(&mut p2[34..54]).unwrap();
+             tcp.set_acknowledgement(60);
+        }
+
+        // Packet 3: Seq 1020, Ack 70 (Newest Ack), PSH
+        let mut p3 = build_packet(1020, &[3u8; 10], TcpFlags::PSH);
+        {
+             let mut tcp = MutableTcpPacket::new(&mut p3[34..54]).unwrap();
+             tcp.set_acknowledgement(70);
+        }
+
+        // Ingest 1
         let out1 = gro.ingest(&p1);
         assert_eq!(out1.len(), 0);
 
-        // Ingest 2: Buffered (Sequential)
+        // Ingest 2
         let out2 = gro.ingest(&p2);
         assert_eq!(out2.len(), 0);
 
-        // Ingest 3: Flush due to PSH
+        // Ingest 3
         let out3 = gro.ingest(&p3);
         assert_eq!(out3.len(), 1);
 
@@ -330,7 +346,13 @@ mod tests {
         assert_eq!(merged.len(), 54 + 30);
 
         let tcp = TcpPacket::new(&merged[34..]).unwrap();
+
+        // Important: Sequence should be 1000 (from P1)
         assert_eq!(tcp.get_sequence(), 1000);
+
+        // Important: Ack should be 70 (from P3, the latest packet)
+        assert_eq!(tcp.get_acknowledgement(), 70);
+
         assert_eq!(tcp.get_flags() & TcpFlags::PSH, TcpFlags::PSH);
 
         // Verify payload content
