@@ -14,6 +14,10 @@ use tokio::io::unix::AsyncFd;
 use std::os::unix::io::FromRawFd;
 use rand::RngCore;
 use chacha20poly1305::aead::generic_array::GenericArray;
+use pnet::packet::ipv4::{MutableIpv4Packet, checksum as ipv4_checksum};
+use pnet::packet::tcp::{MutableTcpPacket, ipv4_checksum as tcp_checksum};
+use pnet::packet::udp::{MutableUdpPacket, ipv4_checksum as udp_checksum};
+use pnet::packet::Packet;
 
 const NONCE_SIZE: usize = 24;
 
@@ -240,6 +244,45 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                  info!("[{}] TX Data: {} bytes (Veth -> Raw)", rx_cfg.interface_name, n);
             }
 
+            // SOFTWARE CHECKSUM FIXUP
+            // Since we can't reliably disable TX Offload in containers, we must recalculate checksums manually.
+            let buf_slice = unsafe { std::slice::from_raw_parts_mut(buf.as_mut_ptr(), n) };
+            // Simple heuristic: IPv4 is usually at offset 14 (Ethernet) or 0 (TUN)
+            // But we operate on L3 or L2? Veth is L2 (Ethernet).
+            // So offset 14.
+            if n > 14 {
+                 // Check EtherType (IPv4 = 0x0800)
+                 if buf_slice[12] == 0x08 && buf_slice[13] == 0x00 {
+                     if let Some(mut ip) = MutableIpv4Packet::new(&mut buf_slice[14..]) {
+                         // Recalculate IP Checksum
+                         let ip_csum = ipv4_checksum(&ip.to_immutable());
+                         ip.set_checksum(ip_csum);
+                         
+                         let src = ip.get_source();
+                         let dst = ip.get_destination();
+                         let protocol = ip.get_next_level_protocol();
+                         let hl = (ip.get_header_length() as usize) * 4;
+                         
+                         if n > 14 + hl {
+                             let payload = &mut buf_slice[14+hl..];
+                             if protocol == pnet::packet::ip::IpNextHeaderProtocols::Tcp {
+                                 if let Some(mut tcp) = MutableTcpPacket::new(payload) {
+                                     tcp.set_checksum(0);
+                                     let csum = tcp_checksum(&tcp.to_immutable(), &src, &dst);
+                                     tcp.set_checksum(csum);
+                                 }
+                             } else if protocol == pnet::packet::ip::IpNextHeaderProtocols::Udp {
+                                 if let Some(mut udp) = MutableUdpPacket::new(payload) {
+                                     udp.set_checksum(0);
+                                     let csum = udp_checksum(&udp.to_immutable(), &src, &dst);
+                                     udp.set_checksum(csum);
+                                 }
+                             }
+                         }
+                     }
+                 }
+            }
+
             // NO GSO: Direct Encrypt & Send
             let segment = &buf;
             {
@@ -315,7 +358,10 @@ fn init_interface(cfg: &Config) -> anyhow::Result<()> {
     run_cmd("ip", &["link", "set", app_if, "promisc", "on"])?;
     
     // User Feedback: Disable GRO/LRO for XDP to see individual packets
-    run_cmd_ignore_fail("ethtool", &["-K", app_if, "gro", "off", "lro", "off"]);
+    // CRITICAL: Disable TX Checksum Offload ("tx off").
+    // If "tx on", kernel sends packets with partial checksums.
+    // Since we encrypt/tunnel them without recalculating, the peer receives invalid checksums and drops them.
+    run_cmd_ignore_fail("ethtool", &["-K", app_if, "tx", "off", "gro", "off", "lro", "off"]);
     
     run_cmd("ip", &["link", "set", app_if, "mtu", &cfg.mtu.to_string()])?;
     run_cmd("ip", &["link", "set", app_if, "up"])?;
