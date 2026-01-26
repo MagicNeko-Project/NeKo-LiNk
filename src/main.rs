@@ -43,7 +43,17 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Load Configs
-    let configs = load_configs(&args.config)?;
+    let default_config = "config.json";
+    let etc_config = "/etc/neko-link";
+
+    let config_path = if args.config == default_config && !Path::new(default_config).exists() && Path::new(etc_config).exists() {
+        etc_config.to_string()
+    } else {
+        args.config.clone()
+    };
+    
+    log::info!("Loading configuration from: {}", config_path);
+    let configs = load_configs(&config_path)?;
     
     let mut tasks = Vec::new();
     
