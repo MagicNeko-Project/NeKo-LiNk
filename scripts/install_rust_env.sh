@@ -11,7 +11,7 @@ apt-get update
 echo "Installing base dependencies (Debian 13 Trixie/Sid)..."
 # Try installing LLVM 19 explicitly.
 apt-get install -y build-essential curl git pkg-config libssl-dev protobuf-compiler libbpf-dev \
-    clang-19 llvm-19 libclang-19-dev
+    clang-19 llvm-19 libclang-19-dev llvm-19-dev libpolly-19-dev
 
 # 3. 安装 Rust (如果不存在)
 if ! command -v cargo &> /dev/null; then
