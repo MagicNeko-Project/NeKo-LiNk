@@ -1,5 +1,7 @@
 use aya::Bpf;
 use aya::programs::{Xdp, XdpFlags, SchedClassifier, TcAttachType};
+use aya::programs::xdp::XdpLinkId;
+use aya::programs::tc::SchedClassifierLinkId;
 use std::convert::TryInto;
 use log::{info, warn, error};
 
@@ -7,8 +9,8 @@ pub struct BpfHandle {
     // Keep Bpf instances alive
     _xdp_bpf: Bpf,
     _tc_bpf: Bpf,
-    _xdp_link: Option<aya::programs::xdp::XdpLink>,
-    _tc_link: Option<aya::programs::tc::TcLink>,
+    _xdp_link: Option<XdpLinkId>,
+    _tc_link: Option<SchedClassifierLinkId>,
 }
 
 pub fn init_bpf(interface_name: &str) -> anyhow::Result<Option<BpfHandle>> {
