@@ -213,16 +213,26 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                                           let packets = gro_table.ingest(&plain);
                                           for p in packets {
                                               // Write to Veth
-                                              if let Ok(mut guard) = raw_rx_target.writable().await {
-                                                  let _ = guard.try_io(|inner_fd| unsafe {
-                                                       let fd = *inner_fd.get_ref();
-                                                       let res = libc::send(fd, p.as_ptr() as *const _, p.len(), 0);
-                                                       if res < 0 { 
-                                                           Err(std::io::Error::last_os_error()) 
-                                                       } else { 
-                                                           Ok(res as usize) 
-                                                       }
-                                                  });
+                                              // We must loop until write succeeds, or use non-blocking logic correctly.
+                                              // Since we are in an async select loop, blocking here is bad.
+                                              // But typically writing to Veth is fast unless ring is full.
+                                              // For robustness, we try_io.
+                                              // Ideally we should have a TX queue for Veth, but simple send is okay for now.
+
+                                              // Note: 'raw_rx_target' is the AsyncFd<RawSocket>.
+                                              match raw_rx_target.writable().await {
+                                                  Ok(mut guard) => {
+                                                      let _ = guard.try_io(|inner_fd| unsafe {
+                                                           let fd = *inner_fd.get_ref();
+                                                           let res = libc::send(fd, p.as_ptr() as *const _, p.len(), 0);
+                                                           if res < 0 {
+                                                               Err(std::io::Error::last_os_error())
+                                                           } else {
+                                                               Ok(res as usize)
+                                                           }
+                                                      });
+                                                  },
+                                                  Err(_) => {} // Shutdown?
                                               }
                                           }
                                      },
