@@ -1,0 +1,12 @@
+{
+    "interface_name": "nekos0",
+    "app_interface": "nekos0_app",
+    "mode": "server",
+    "local_addr": "192.168.200.1/24",
+    "key": "TEST_KEY_123",
+    "protocol": "raw",
+    "listen_addr": "10.0.0.1",
+    "listen_port": 0,
+    "mtu": 1200,
+    "debug": true
+}

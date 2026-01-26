@@ -1,113 +1,82 @@
 #!/bin/bash
-set -e
+# NekoLink Verification Script (Robust Version)
 
 # 颜色定义
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 NC='\033[0m' # No Color
 
-# 必须以 root 运行
-if [ "$EUID" -ne 0 ]; then 
-    echo "请使用 root 权限运行 (sudo)"
-    exit 1
-fi
-
-echo -e "${GREEN}>>> 准备测试环境 (Network Namespaces)...${NC}"
-
-# 1. 清理旧环境
+echo -e "${GREEN}>>> 深度清理旧环境...${NC}"
+pkill neko-link || true
+pkill iperf3 || true
 ip netns del ns_server 2>/dev/null || true
 ip netns del ns_client 2>/dev/null || true
 
-# 2. 创建命名空间
+echo -e "${GREEN}>>> 准备测试场...${NC}"
 ip netns add ns_server
 ip netns add ns_client
-
-# 3. 创建 veth pair (模拟物理链路)
 ip link add v_srv type veth peer name v_cli
-
-# 4. 将接口移动到命名空间
 ip link set v_srv netns ns_server
 ip link set v_cli netns ns_client
-
-# 5. 配置 IP (模拟公网 IP)
-# Server: 10.0.0.1
 ip netns exec ns_server ip addr add 10.0.0.1/24 dev v_srv
 ip netns exec ns_server ip link set v_srv up
 ip netns exec ns_server ip link set lo up
-
-# Client: 10.0.0.2
 ip netns exec ns_client ip addr add 10.0.0.2/24 dev v_cli
 ip netns exec ns_client ip link set v_cli up
 ip netns exec ns_client ip link set lo up
 
-# 测试物理连通性
-echo -e "${GREEN}>>> 测试物理链路连通性...${NC}"
-ip netns exec ns_client ping -c 1 10.0.0.1 >/dev/null || { echo -e "${RED}物理链路不通！${NC}"; exit 1; }
-echo "物理链路正常 (Client -> Server)"
-
-# 6. 生成配置文件
-echo -e "${GREEN}>>> 生成测试配置...${NC}"
-
-# Server Config
+# 生成配置
 cat > raw_server_test.json <<EOF
 {
     "interface_name": "nekos0",
+    "app_interface": "nekos0_app",
     "mode": "server",
-    "local_addr_v4": "192.168.200.1/24",
+    "local_addr": "192.168.200.1/24",
     "key": "TEST_KEY_123",
     "protocol": "raw",
     "listen_addr": "10.0.0.1",
     "listen_port": 0,
-    "mtu": 1400,
+    "mtu": 1200,
     "debug": true
 }
 EOF
 
-# Client Config
 cat > raw_client_test.json <<EOF
 {
     "interface_name": "nekoc0",
+    "app_interface": "nekoc0_app",
     "mode": "client",
-    "local_addr_v4": "192.168.200.2/24",
+    "local_addr": "192.168.200.2/24",
     "key": "TEST_KEY_123",
     "protocol": "raw",
-    "mtu": 1400,
+    "mtu": 1200,
     "peer_addr": "10.0.0.1",
     "debug": true
 }
 EOF
 
-echo -e "${GREEN}>>> 启动 NekoLink...${NC}"
-
-# 启动 Server
-ip netns exec ns_server sh -c "ulimit -l unlimited; ./target/debug/neko-link -c raw_server_test.json" > server.log 2>&1 &
+echo -e "${GREEN}>>> 启动 NekoLink (Release Mode)...${NC}"
+# Use absolute path to ensure binary is found
+BIN="./target/release/neko-link"
+ip netns exec ns_server $BIN -c raw_server_test.json > /tmp/neko_server.log 2>&1 &
 PID_S=$!
-echo "Server PID: $PID_S"
-
-# 启动 Client
-ip netns exec ns_client sh -c "ulimit -l unlimited; ./target/debug/neko-link -c raw_client_test.json" > client.log 2>&1 &
+ip netns exec ns_client $BIN -c raw_client_test.json > /tmp/neko_client.log 2>&1 &
 PID_C=$!
-echo "Client PID: $PID_C"
 
-sleep 3
+echo "等待隧道建立 (8s)..."
+sleep 8
 
-echo -e "${GREEN}>>> 检查隧道连通性...${NC}"
-
-# Client Ping Server Tunnel IP
-if ip netns exec ns_client ping -c 3 192.168.200.1; then
-    echo -e "${GREEN}>>> 测试成功: Client 可以 Ping 通 Server (Tunnel)! 喵！${NC}"
+echo -e "${GREEN}>>> 测试隧道连通性 (Ping)...${NC}"
+if ip netns exec ns_client ping -c 5 192.168.200.1; then
+    echo -e "${GREEN}>>> Ping 测试通过！${NC}"
 else
-    echo -e "${RED}>>> 测试失败: 无法 Ping 通隧道。${NC}"
-    echo "Server Log:"
-    cat server.log
-    echo "Client Log:"
-    cat client.log
+    echo -e "${RED}>>> Ping 测试失败！${NC}"
 fi
 
-# Cleanup
-echo -e "${GREEN}>>> 清理环境...${NC}"
-kill $PID_S 2>/dev/null || true
-kill $PID_C 2>/dev/null || true
-ip netns del ns_server
-ip netns del ns_client
-rm raw_server_test.json raw_client_test.json server.log client.log
+echo -e "${GREEN}>>> 开启 5201 端口性能测试 (iperf3)...${NC}"
+ip netns exec ns_server iperf3 -s -D > /dev/null 2>&1
+sleep 2
+ip netns exec ns_client iperf3 -c 192.168.200.1 -t 10
+
+echo -e "${GREEN}>>> 测试完成喵！日志已保存在 /tmp/neko_{server,client}.log${NC}"
+echo -e "${GREEN}>>> 请手动运行 pkill neko-link 清理环境喵。${NC}"

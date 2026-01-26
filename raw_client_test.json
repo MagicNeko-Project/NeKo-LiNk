@@ -1,0 +1,11 @@
+{
+    "interface_name": "nekoc0",
+    "app_interface": "nekoc0_app",
+    "mode": "client",
+    "local_addr": "192.168.200.2/24",
+    "key": "TEST_KEY_123",
+    "protocol": "raw",
+    "mtu": 1200,
+    "peer_addr": "10.0.0.1",
+    "debug": true
+}
