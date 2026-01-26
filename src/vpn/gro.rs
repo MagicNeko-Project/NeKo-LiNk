@@ -40,6 +40,11 @@ impl GROTable {
         let mut output = Vec::new();
 
         // 1. Parse Headers (Eth + IP + TCP)
+        // DISABLE GRO: Immediately return packet to avoid MTU issues on Veth write.
+        output.push(packet.to_vec());
+        return output;
+
+        /*
         if packet.len() < 54 {
              output.push(packet.to_vec());
              return output;
