@@ -1,0 +1,18 @@
+[Unit]
+Description=Neko-Link High Performance Network Tunnel 🐾
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/neko-link
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=1048576
+
+# Security Hardening (Optional but Recommended)
+# ProtectSystem=full
+# ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
