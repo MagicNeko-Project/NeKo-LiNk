@@ -1,14 +1,20 @@
-# Binaries
-vpn
+# Rust
+target/
+**/*.rs.bk
+Cargo.lock
 
-# OS specific
-.DS_Store
-
-# User configs (Templates are okay, but if these contain real secrets we should ignore them. 
-# For this demo, we keep them as they are basically templates)
-# client_config.json
-# config.json.bak
-/.go/
+# App
 neko-link
+neko-link-debug
+
+# BPF
+**/*.o
+src/bpf/vmlinux.h
+
+# Config
 config.json
-config_old.json
+!config.json.example
+
+# Backup
+*.bak
+*.old

@@ -80,12 +80,12 @@ EOF
 echo -e "${GREEN}>>> 启动 NekoLink...${NC}"
 
 # 启动 Server
-ip netns exec ns_server sh -c "ulimit -l unlimited; ./neko-link -c raw_server_test.json" > server.log 2>&1 &
+ip netns exec ns_server sh -c "ulimit -l unlimited; ./target/debug/neko-link -c raw_server_test.json" > server.log 2>&1 &
 PID_S=$!
 echo "Server PID: $PID_S"
 
 # 启动 Client
-ip netns exec ns_client sh -c "ulimit -l unlimited; ./neko-link -c raw_client_test.json" > client.log 2>&1 &
+ip netns exec ns_client sh -c "ulimit -l unlimited; ./target/debug/neko-link -c raw_client_test.json" > client.log 2>&1 &
 PID_C=$!
 echo "Client PID: $PID_C"
 
