@@ -307,13 +307,13 @@ fn init_interface(cfg: &Config) -> anyhow::Result<()> {
     run_cmd("ip", &["addr", "add", &cfg.local_addr, "dev", host_if])?;
     run_cmd("ip", &["link", "set", host_if, "mtu", &cfg.mtu.to_string()])?;
     run_cmd("ip", &["link", "set", host_if, "arp", "on"])?;
-    run_cmd_ignore_fail("ethtool", &["-K", host_if, "tx", "on", "rx", "on", "tso", "on", "gso", "on", "gro", "on"]);
+    // run_cmd_ignore_fail("ethtool", &["-K", host_if, "tx", "on", "rx", "on", "tso", "on", "gso", "on", "gro", "on"]);
     run_cmd("ip", &["link", "set", host_if, "up"])?;
     
     // App Config
     run_cmd("ip", &["link", "set", app_if, "arp", "on"])?;
     run_cmd("ip", &["link", "set", app_if, "promisc", "on"])?;
-    run_cmd_ignore_fail("ethtool", &["-K", app_if, "tx", "on", "rx", "on", "tso", "on", "gso", "on", "gro", "on"]);
+    // run_cmd_ignore_fail("ethtool", &["-K", app_if, "tx", "on", "rx", "on", "tso", "on", "gso", "on", "gro", "on"]);
     run_cmd("ip", &["link", "set", app_if, "mtu", &cfg.mtu.to_string()])?;
     run_cmd("ip", &["link", "set", app_if, "up"])?;
     
