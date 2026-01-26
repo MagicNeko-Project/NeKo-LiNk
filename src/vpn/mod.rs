@@ -139,111 +139,94 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     tasks.push(tokio::spawn(async move {
          let mut buf = [0u8; 65536];
          let mut gro_table = gro::GROTable::new();
-         // Flush stale flows every 10ms
+         // Flush stale flows every 10ms.
+         // In addition to this interval, we will flush if we drain the socket.
          let mut flush_interval = tokio::time::interval(tokio::time::Duration::from_millis(10));
 
+         // Using loop + try_recv for batching
          loop {
              tokio::select! {
                 _ = flush_interval.tick() => {
                     let packets = gro_table.flush_stale();
                     for p in packets {
-                         if let Ok(mut guard) = raw_rx_target.writable().await {
-                             let _ = guard.try_io(|inner_fd| unsafe {
-                                  let fd = *inner_fd.get_ref();
-                                  let res = libc::send(fd, p.as_ptr() as *const _, p.len(), 0);
-                                  if res < 0 { 
-                                      Err(std::io::Error::last_os_error()) 
-                                  } else { 
-                                      Ok(res as usize) 
-                                  }
-                             });
-                         }
+                        write_packet_to_veth(&raw_rx_target, &p).await;
                     }
                 }
-                res = raw_rx_socket.recv_from(&mut buf) => {
-                     match res {
-                         Ok((n, addr)) => {
-                             // Linux SOCK_RAW includes IP header (usually 20 bytes)
-                             // Simple heuristic: Skip 20 bytes. 
-                             let payload_offset = if n > 20 { 20 } else { 0 };
-                             if n <= payload_offset { continue; }
-                             
-                             let pkt = &buf[payload_offset..n];
-                             
-                             // Handshake? [0xFE] ...
-                             if !pkt.is_empty() && pkt[0] == 0xFE {
-                                 if pkt.len() < 1 + NONCE_SIZE + 16 { continue; } 
-                                 
-                                 let nonce = GenericArray::from_slice(&pkt[1..1+NONCE_SIZE]);
-                                 let ciphertext = &pkt[1+NONCE_SIZE..];
-                                 
-                                 match raw_rx_aead.decrypt(nonce, Payload { msg: ciphertext, aad: &[] }) {
-                                     Ok(plain) => {
-                                         if plain == b"NEKO_HEARTBEAT" {
-                                              if raw_rx_cfg.debug {
-                                                  info!("[{}] RX Heartbeat from {}", raw_rx_cfg.interface_name, addr);
-                                              }
-                                              // Update Peer
-                                              let update = {
-                                                  let lock = raw_rx_state.remote_addr.read().unwrap();
-                                                  lock.map_or(true, |a| a != addr)
-                                              };
-                                              
-                                              if update {
-                                                  let mut lock = raw_rx_state.remote_addr.write().unwrap();
-                                                  *lock = Some(addr);
-                                                  info!("Peer Updated: {}", addr);
-                                              }
-                                         }
-                                     },
-                                     Err(_) => {}
-                                 }
-                             } else {
-                                 // Data Packet: [Nonce][Ciphertext]
-                                 if pkt.len() < NONCE_SIZE + 16 { continue; }
-                                 let nonce = GenericArray::from_slice(&pkt[..NONCE_SIZE]);
-                                 let ciphertext = &pkt[NONCE_SIZE..];
-                                 
-                                 match raw_rx_aead.decrypt(nonce, Payload { msg: ciphertext, aad: &[] }) {
-                                     Ok(plain) => {
-                                          if raw_rx_cfg.debug {
-                                              info!("[{}] RX Data: {} bytes from {}", raw_rx_cfg.interface_name, plain.len(), addr);
-                                          }
-                                          // Ingest to GRO
-                                          let packets = gro_table.ingest(&plain);
-                                          for p in packets {
-                                              // Write to Veth
-                                              // We must loop until write succeeds, or use non-blocking logic correctly.
-                                              // Since we are in an async select loop, blocking here is bad.
-                                              // But typically writing to Veth is fast unless ring is full.
-                                              // For robustness, we try_io.
-                                              // Ideally we should have a TX queue for Veth, but simple send is okay for now.
+                // Wait for readability on the UDP socket
+                _ = raw_rx_socket.readable() => {
+                    // Drain loop
+                    let mut packets_processed = 0;
+                    loop {
+                         // Limit batch size to prevent starvation of other tasks
+                         if packets_processed > 64 {
+                             break;
+                         }
 
-                                              // Note: 'raw_rx_target' is the AsyncFd<RawSocket>.
-                                              match raw_rx_target.writable().await {
-                                                  Ok(mut guard) => {
-                                                      let _ = guard.try_io(|inner_fd| unsafe {
-                                                           let fd = *inner_fd.get_ref();
-                                                           let res = libc::send(fd, p.as_ptr() as *const _, p.len(), 0);
-                                                           if res < 0 {
-                                                               Err(std::io::Error::last_os_error())
-                                                           } else {
-                                                               Ok(res as usize)
-                                                           }
-                                                      });
-                                                  },
-                                                  Err(_) => {} // Shutdown?
+                         match raw_rx_socket.try_recv_from(&mut buf) {
+                             Ok((n, addr)) => {
+                                 packets_processed += 1;
+                                 
+                                 let payload_offset = if n > 20 { 20 } else { 0 };
+                                 if n <= payload_offset { continue; }
+                                 
+                                 let pkt = &buf[payload_offset..n];
+                                 
+                                 // Handshake? [0xFE] ...
+                                 if !pkt.is_empty() && pkt[0] == 0xFE {
+                                     // ... (Handshake Logic)
+                                     if pkt.len() < 1 + NONCE_SIZE + 16 { continue; }
+                                     let nonce = GenericArray::from_slice(&pkt[1..1+NONCE_SIZE]);
+                                     let ciphertext = &pkt[1+NONCE_SIZE..];
+
+                                     match raw_rx_aead.decrypt(nonce, Payload { msg: ciphertext, aad: &[] }) {
+                                         Ok(plain) => {
+                                             if plain == b"NEKO_HEARTBEAT" {
+                                                  // Update Peer
+                                                  let update = {
+                                                      let lock = raw_rx_state.remote_addr.read().unwrap();
+                                                      lock.map_or(true, |a| a != addr)
+                                                  };
+                                                  if update {
+                                                      let mut lock = raw_rx_state.remote_addr.write().unwrap();
+                                                      *lock = Some(addr);
+                                                      info!("Peer Updated: {}", addr);
+                                                  }
+                                             }
+                                         },
+                                         Err(_) => {}
+                                     }
+                                 } else {
+                                     // Data Packet
+                                     if pkt.len() < NONCE_SIZE + 16 { continue; }
+                                     let nonce = GenericArray::from_slice(&pkt[..NONCE_SIZE]);
+                                     let ciphertext = &pkt[NONCE_SIZE..];
+
+                                     match raw_rx_aead.decrypt(nonce, Payload { msg: ciphertext, aad: &[] }) {
+                                         Ok(plain) => {
+                                              // Ingest to GRO
+                                              let packets = gro_table.ingest(&plain);
+                                              for p in packets {
+                                                  write_packet_to_veth(&raw_rx_target, &p).await;
                                               }
-                                          }
-                                     },
-                                     Err(_) => {
-                                         // Decrypt failed
+                                         },
+                                         Err(_) => {}
                                      }
                                  }
+                             },
+                             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                 // Socket Empty: Flush GRO immediately to minimize latency
+                                 let packets = gro_table.flush_stale();
+                                 for p in packets {
+                                     write_packet_to_veth(&raw_rx_target, &p).await;
+                                 }
+                                 break;
+                             },
+                             Err(e) => {
+                                 warn!("Raw RX Error: {}", e);
+                                 break;
                              }
-                         },
-                         Err(e) => warn!("Raw RX Error: {}", e),
-                     }
+                         }
+                    }
                 }
              }
          }
@@ -441,5 +424,22 @@ fn run_cmd(cmd: &str, args: &[&str]) -> anyhow::Result<()> {
 fn cleanup(cfg: &Config) {
     if !cfg.interface_name.is_empty() {
         let _ = Command::new("ip").args(&["link", "del", &cfg.interface_name]).status();
+    }
+}
+
+async fn write_packet_to_veth(target: &AsyncFd<i32>, p: &[u8]) {
+    match target.writable().await {
+        Ok(mut guard) => {
+            let _ = guard.try_io(|inner_fd| unsafe {
+                 let fd = *inner_fd.get_ref();
+                 let res = libc::send(fd, p.as_ptr() as *const _, p.len(), 0);
+                 if res < 0 {
+                     Err(std::io::Error::last_os_error())
+                 } else {
+                     Ok(res as usize)
+                 }
+            });
+        },
+        Err(_) => {}
     }
 }
