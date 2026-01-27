@@ -51,26 +51,26 @@ if ! command -v cargo &> /dev/null; then
 fi
 cargo build --release
 
-# 4. 覆盖安装
-echo -e "\n${CYAN}[4/6] 正在注入全新的魔法二进制文件...${NC}"
-# 使用 rm -f 确保即使文件正在使用（虽然已经停止了服务）也能成功替换喵
-sudo rm -f /usr/local/bin/nekolink-cli
-sudo rm -f /usr/local/bin/nekolink-ctl
-sudo cp target/release/nekolink-cli /usr/local/bin/
-sudo cp target/release/nekolink-ctl /usr/local/bin/
-sudo cp neko-link.sh /usr/local/bin/neko-link
-sudo cp nekolink.service /etc/systemd/system/
-sudo chmod +x /usr/local/bin/neko-link
+# 4. 生成并安装 Debian 魔法包
+echo -e "\n${CYAN}[4/5] 正在塑造并应用全新的 Debian 魔法包...${NC}"
+VERSION="2.4.1"
+chmod +x scripts/build_deb.sh
+./scripts/build_deb.sh
 
+DEB_FILE=$(ls NekoLink_${VERSION}_*.deb 2>/dev/null | head -n 1)
+if [ -z "$DEB_FILE" ]; then
+    echo -e "${RED}喵？！找不到生成的 .deb 文件，请检查编译日志喵。${NC}"
+    exit 1
+fi
 
-# 5. 重新赋予特权
-echo -e "\n${CYAN}[5/6] 正在为新核心注入超级权能 (SetCap)...${NC}"
-setcap cap_net_admin,cap_net_raw+epi /usr/local/bin/nekolink-cli
-setcap cap_net_admin,cap_net_raw+epi /usr/local/bin/nekolink-ctl
+echo -e "${PINK}正在通过 apt 执行转生仪式：$DEB_FILE 喵！${NC}"
+apt install -y --reinstall ./"$DEB_FILE"
 
-# 6. 重启服务
-echo -e "\n${CYAN}[6/6] 正在重载并重启 NekoLink 服务...${NC}"
+# 5. 清理现场并重启
+echo -e "\n${CYAN}[5/5] 正在重载并重启 NekoLink 服务...${NC}"
+rm -f ./*.deb
 systemctl daemon-reload
+
 if systemctl is-active --quiet nekolink; then
     systemctl restart nekolink
     echo -e "${PINK}服务已自动重启喵！${NC}"
@@ -79,4 +79,4 @@ else
 fi
 
 echo -e "\n${PINK}✨ 升级成功喵！✨${NC}"
-echo -e "原有的配置文件 (/etc/neko-link/) 已被温柔地保留。你可以使用 'journalctl -u nekolink -f' 查看实时日志喵！"
+echo -e "原有的配置文件 (/etc/neko-link/) 已被温柔地保留。您可以运行 'nekolink' 指令启动交互式助手喵！"
