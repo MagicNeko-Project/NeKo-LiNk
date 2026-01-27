@@ -55,12 +55,24 @@ neko-link
 ```
 在这个过程中，你可以选择节点角色（服务端/客户端）、传输模式（IP 或 UDP）、协议号、内网 IP 等。
 
-### 2. 管理隧道
-配置完成后，启动控制平面：
+### 2. 管理隧道 (Management)
+配置完成后，你可以使用 systemd 来管理隧道服务：
+
 ```bash
-sudo nekolink-ctl
+# 启动服务
+sudo systemctl start nekolink
+
+# 停止服务
+sudo systemctl stop nekolink
+
+# 查看实时日志
+journalctl -u nekolink -f
+
+# 设置/取消开机自启
+sudo systemctl enable/disable nekolink
 ```
-猫娘会自动扫描 `/etc/neko-link/*.json` 下的所有配置并并行启动它们喵！
+
+也会你可以直接运行 `nekolink-ctl` 进行前台调试喵。控制面会自动扫描 `/etc/neko-link/*.json` 下的所有配置并并行启动它们喵！
 
 ---
 

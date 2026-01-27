@@ -21,5 +21,12 @@ sudo setcap cap_net_admin,cap_net_raw+epi /usr/local/bin/nekolink-ctl
 # 4. 创建配置目录
 sudo mkdir -p /etc/neko-link
 
+# 5. 安装 systemd 服务
+echo "正在配置 systemd 服务..."
+sudo cp nekolink.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable nekolink
+
 echo "安装成功喵！"
-echo "请在 /etc/neko-link/ 创建你的 .json 配置文件，然后运行 'nekolink-ctl' 喵！"
+echo "请在 /etc/neko-link/ 创建你的 .json 配置文件，然后运行 'sudo systemctl start nekolink' 启动魔法喵！"
+echo "也可以直接运行 'nekolink-ctl' 进行前台调试喵。"
