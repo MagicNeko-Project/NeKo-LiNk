@@ -215,7 +215,7 @@ fn api_set(reader: &mut BufReader<&UnixStream>, d: &mut LockReadGuard<Device>) -
                     return 0; // Done
                 }
                 {
-                    let parsed_cmd: Vec<&str> = cmd.split('=').collect();
+                    let parsed_cmd: Vec<&str> = cmd.splitn(2, '=').collect();
                     if parsed_cmd.len() != 2 {
                         return EPROTO;
                     }
@@ -321,10 +321,15 @@ fn api_set_peer(
                     Ok(key_bytes) => preshared_key = Some(key_bytes.0),
                     Err(_) => return EINVAL,
                 },
-                "endpoint" => match val.parse::<SocketAddr>() {
-                    Ok(addr) => endpoint = Some(addr),
-                    Err(_) => return EINVAL,
-                },
+                "endpoint" => {
+                    if let Ok(addr) = val.parse::<SocketAddr>() {
+                        endpoint = Some(addr);
+                    } else if let Ok(ip) = val.parse::<std::net::IpAddr>() {
+                        endpoint = Some(SocketAddr::new(ip, 0));
+                    } else {
+                        return EINVAL;
+                    }
+                }
                 "persistent_keepalive_interval" => match val.parse::<u16>() {
                     Ok(interval) => keepalive = Some(interval),
                     Err(_) => return EINVAL,
