@@ -23,9 +23,10 @@ function show_menu() {
     echo "1. 创建新配置文件 (Node Config)"
     echo "2. 启动 NekoLink (nekolink-ctl)"
     echo "3. 查看运行状态 (Status)"
-    echo "4. 查看配置文件列表"
-    echo "5. 退出"
-    read -p "请输入数字 [1-5]: " choice
+    echo "4. 管理密钥与公钥 (Key Management)"
+    echo "5. 查看配置文件列表"
+    echo "6. 退出"
+    read -p "请输入数字 [1-6]: " choice
 }
 
 function create_config() {
@@ -123,14 +124,51 @@ EOF
     echo -e "${PINK}配置已成功保存到 $json_path 喵！${NC}"
 }
 
+function manage_keys() {
+    echo -e "\n${PINK}--- NekoLink 密钥管理魔法 ---${NC}"
+    read -p "请输入要管理的接口名称 ( 默认 nekotun0 ): " iface
+    [ -z "$iface" ] && iface="nekotun0"
+    
+    key_file="$CONFIG_DIR/$iface.key"
+    pub_file="$CONFIG_DIR/$iface.pub"
+
+    echo -e "${CYAN}1. 查看当前密钥"
+    echo "2. 更换/重置密钥 (在线更换)"
+    echo "3. 返回主菜单${NC}"
+    read -p "请选择数字 [1-3]: " km_choice
+
+    case $km_choice in
+        1)
+            if [ -f "$key_file" ]; then
+                echo -e "${PINK}私钥: ${NC}$(cat $key_file)"
+                echo -e "${PINK}公钥: ${NC}$(cat $pub_file 2>/dev/null || echo '尚未生成')"
+            else
+                echo -e "${RED}喵？没找到这个接口的密钥文件。${NC}"
+            fi
+            ;;
+        2)
+            echo -e "${RED}警告：更换密钥会导致当前连接断开，并需要重新与队友交换公钥喵！${NC}"
+            read -p "确定要更换吗？(y/n): " confirm
+            if [ "$confirm" == "y" ]; then
+                rm -f "$key_file" "$pub_file"
+                echo -e "${PINK}旧密钥已驱散！正在尝试重启服务以注入新魔法...${NC}"
+                systemctl restart nekolink || echo "请手动重启 nekolink-ctl 喵！"
+                echo -e "${PINK}新密钥将在启动时自动生成喵！${NC}"
+            fi
+            ;;
+        *) return ;;
+    esac
+}
+
 while true; do
     show_menu
     case $choice in
         1) create_config ;;
         2) nekolink-ctl ;;
         3) nekolink-ctl status ;;
-        4) ls -l "$CONFIG_DIR"/*.json ;;
-        5) exit 0 ;;
+        4) manage_keys ;;
+        5) ls -l "$CONFIG_DIR"/*.json ;;
+        6) exit 0 ;;
         *) echo "无效选择喵！" ;;
     esac
 done

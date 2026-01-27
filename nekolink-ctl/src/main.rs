@@ -52,8 +52,18 @@ struct NekoState {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() > 1 && args[1] == "status" {
-        return show_status().await;
+    if args.len() > 1 {
+        match args[1].as_str() {
+            "status" => return show_status().await,
+            "genkey" => {
+                let priv_key = StaticSecret::random_from_rng(OsRng);
+                let pub_key = PublicKey::from(&priv_key);
+                println!("Private Key: {}", BASE64.encode(priv_key.to_bytes()));
+                println!("Public Key:  {}", BASE64.encode(pub_key.as_bytes()));
+                return Ok(());
+            }
+            _ => {}
+        }
     }
 
     println!("ฅ^•ﻌ•^ฅ NekoLink 控制平面启动中...");
@@ -236,7 +246,10 @@ async fn start_udp_signaling(state: NekoState) -> Result<()> {
         let pub_key_bytes = state.pub_key.as_bytes().to_vec();
         let dynamic_peers = Arc::clone(&dynamic_peers);
         async move {
+            let interface = config.interface.clone();
             loop {
+                let established = get_established_peers(&interface).await;
+                
                 let mut targets = std::collections::HashSet::new();
                 for peer in &config.peers {
                     if let Ok(addr) = peer.endpoint.parse::<SocketAddr>() {
@@ -251,6 +264,9 @@ async fn start_udp_signaling(state: NekoState) -> Result<()> {
                 }
 
                 for addr in targets {
+                    if !established.is_empty() {
+                         continue;
+                    }
                     let mut nonce_bytes = [0u8; 12];
                     OsRng.fill_bytes(&mut nonce_bytes);
                     let nonce = Nonce::from_slice(&nonce_bytes);
@@ -260,7 +276,8 @@ async fn start_udp_signaling(state: NekoState) -> Result<()> {
                         let _ = socket.send_to(&pkt, addr).await;
                     }
                 }
-                time::sleep(Duration::from_secs(10)).await;
+                let sleep_secs = if established.is_empty() { 10 } else { 300 };
+                time::sleep(Duration::from_secs(sleep_secs)).await;
             }
         }
     };
@@ -327,6 +344,8 @@ async fn start_raw_signaling(state: NekoState) -> Result<()> {
         let dynamic_peers = Arc::clone(&dynamic_peers);
         async move {
             loop {
+                let established = get_established_peers(&config.interface).await;
+                
                 let mut targets = std::collections::HashSet::new();
                 for peer in &config.peers {
                     if let Ok(ip) = peer.endpoint.parse::<IpAddr>() {
@@ -341,6 +360,10 @@ async fn start_raw_signaling(state: NekoState) -> Result<()> {
                 }
 
                 for ip in targets {
+                    if !established.is_empty() {
+                        continue;
+                    }
+
                     let mut nonce_bytes = [0u8; 12];
                     OsRng.fill_bytes(&mut nonce_bytes);
                     let nonce = Nonce::from_slice(&nonce_bytes);
@@ -355,7 +378,8 @@ async fn start_raw_signaling(state: NekoState) -> Result<()> {
                         }
                     }
                 }
-                time::sleep(Duration::from_secs(10)).await;
+                let sleep_secs = if established.is_empty() { 10 } else { 300 };
+                time::sleep(Duration::from_secs(sleep_secs)).await;
             }
         }
     };
@@ -516,4 +540,29 @@ async fn get_uapi_info(interface: &str) -> Result<String> {
         response.push_str(&line);
     }
     Ok(response)
+}
+
+async fn get_established_peers(interface: &str) -> std::collections::HashSet<String> {
+    let mut established = std::collections::HashSet::new();
+    if let Ok(info) = get_uapi_info(interface).await {
+        let mut current_peer = String::new();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+            
+        for line in info.lines() {
+            let line = line.trim();
+            if line.starts_with("public_key=") {
+                current_peer = line["public_key=".len()..].to_string();
+            } else if line.starts_with("last_handshake_time_sec=") {
+                if let Ok(sec) = line["last_handshake_time_sec=".len()..].parse::<u64>() {
+                    if sec > 0 && now > sec && (now - sec) < 150 {
+                        established.insert(current_peer.clone());
+                    }
+                }
+            }
+        }
+    }
+    established
 }
