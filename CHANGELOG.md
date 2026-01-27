@@ -3,6 +3,12 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] - 2026-01-28
+
+### 新增功能 (Added)
+- **交互式配置修改**: 现在的 `nekolink` 命令支持直接修改现有的配置文件了喵！无需删除再重建，魔法调整更方便。
+- **安全加固 (PR 453)**: 合并了来自上游 BoringTun 的 PR 453，升级了所有核心加密依赖（aead, chacha20poly1305 等）以消除已知漏洞，并引入了全新的协议模糊测试与安全集成测试。
+
 ## [2.1.0] - 2026-01-28
 
 ### 新增功能 (Added)
