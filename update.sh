@@ -18,10 +18,12 @@ fi
 
 # 1. 清理旧势力
 echo -e "\n${CYAN}[1/6] 正在驱散旧的魔法能量（停止并清理遗留进程/服务）...${NC}"
-sudo pkill nekolink-ctl || true
-sudo pkill nekolink-cli || true
+# 先温柔地停止服务，防止 Text file busy 喵
+sudo systemctl stop nekolink || true
+sudo pkill -9 nekolink-ctl || true
+sudo pkill -9 nekolink-cli || true
 # 预防性清理原始 boringtun 命名残留
-sudo pkill boringtun-cli || true
+sudo pkill -9 boringtun-cli || true
 
 # 清理旧版 neko-link.service (防止与新版 nekolink.service 冲突喵)
 if [ -f /etc/systemd/system/neko-link.service ]; then
@@ -51,11 +53,14 @@ cargo build --release
 
 # 4. 覆盖安装
 echo -e "\n${CYAN}[4/6] 正在注入全新的魔法二进制文件...${NC}"
-cp target/release/nekolink-cli /usr/local/bin/
-cp target/release/nekolink-ctl /usr/local/bin/
-cp neko-link.sh /usr/local/bin/neko-link
-cp nekolink.service /etc/systemd/system/
-chmod +x /usr/local/bin/neko-link
+# 使用 rm -f 确保即使文件正在使用（虽然已经停止了服务）也能成功替换喵
+sudo rm -f /usr/local/bin/nekolink-cli
+sudo rm -f /usr/local/bin/nekolink-ctl
+sudo cp target/release/nekolink-cli /usr/local/bin/
+sudo cp target/release/nekolink-ctl /usr/local/bin/
+sudo cp neko-link.sh /usr/local/bin/neko-link
+sudo cp nekolink.service /etc/systemd/system/
+sudo chmod +x /usr/local/bin/neko-link
 
 
 # 5. 重新赋予特权
