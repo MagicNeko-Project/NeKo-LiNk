@@ -114,6 +114,7 @@ pub struct DeviceConfig {
     pub use_multi_queue: bool,
     #[cfg(target_os = "linux")]
     pub uapi_fd: i32,
+    pub ip_protocol: Option<u8>,
 }
 
 impl Default for DeviceConfig {
@@ -125,6 +126,7 @@ impl Default for DeviceConfig {
             use_multi_queue: true,
             #[cfg(target_os = "linux")]
             uapi_fd: -1,
+            ip_protocol: None,
         }
     }
 }
@@ -426,7 +428,12 @@ impl Device {
         }
 
         // Then open new sockets and bind to the port
-        let udp_sock4 = socket2::Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+        let (sock_type, protocol) = match self.config.ip_protocol {
+            Some(p) => (Type::RAW, Protocol::from(i32::from(p))),
+            None => (Type::DGRAM, Protocol::UDP),
+        };
+
+        let udp_sock4 = socket2::Socket::new(Domain::IPV4, sock_type, Some(protocol))?;
         udp_sock4.set_reuse_address(true)?;
         udp_sock4.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port).into())?;
         udp_sock4.set_nonblocking(true)?;
@@ -436,7 +443,7 @@ impl Device {
             port = udp_sock4.local_addr()?.as_socket().unwrap().port();
         }
 
-        let udp_sock6 = socket2::Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
+        let udp_sock6 = socket2::Socket::new(Domain::IPV6, sock_type, Some(protocol))?;
         udp_sock6.set_reuse_address(true)?;
         udp_sock6.bind(&SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0).into())?;
         udp_sock6.set_nonblocking(true)?;
@@ -607,7 +614,19 @@ impl Device {
                 let src_buf =
                     unsafe { &mut *(&mut t.src_buf[..] as *mut [u8] as *mut [MaybeUninit<u8>]) };
                 while let Ok((packet_len, addr)) = udp.recv_from(src_buf) {
-                    let packet = &t.src_buf[..packet_len];
+                    let mut offset = 0;
+                    if d.config.ip_protocol.is_some() && addr.as_socket().unwrap().is_ipv4() {
+                        if packet_len < 20 {
+                            continue;
+                        }
+                        let ihl = (t.src_buf[0] & 0x0f) as usize * 4;
+                        if packet_len < ihl {
+                            continue;
+                        }
+                        offset = ihl;
+                    }
+
+                    let packet = &t.src_buf[offset..packet_len];
                     // The rate limiter initially checks mac1 and mac2, and optionally asks to send a cookie
                     let parsed_packet = match rate_limiter.verify_packet(
                         Some(addr.as_socket().unwrap().ip()),
@@ -680,7 +699,9 @@ impl Device {
                     let ip_addr = addr.ip();
                     p.set_endpoint(addr);
                     if d.config.use_connected_socket {
-                        if let Ok(sock) = p.connect_endpoint(d.listen_port, d.fwmark) {
+                        if let Ok(sock) =
+                            p.connect_endpoint(d.listen_port, d.fwmark, d.config.ip_protocol)
+                        {
                             d.register_conn_handler(Arc::clone(peer), sock, ip_addr)
                                 .unwrap();
                         }
@@ -705,7 +726,7 @@ impl Device {
     ) -> Result<(), Error> {
         self.queue.new_event(
             udp.as_raw_fd(),
-            Box::new(move |_, t| {
+            Box::new(move |d, t| {
                 // The conn_handler handles packet received from a connected UDP socket, associated
                 // with a known peer, this saves us the hustle of finding the right peer. If another
                 // peer gets the same ip, it will be ignored until the socket does not expire.
@@ -718,11 +739,23 @@ impl Device {
                     unsafe { &mut *(&mut t.src_buf[..] as *mut [u8] as *mut [MaybeUninit<u8>]) };
 
                 while let Ok(read_bytes) = udp.recv(src_buf) {
+                    let mut offset = 0;
+                    if d.config.ip_protocol.is_some() && peer_addr.is_ipv4() {
+                        if read_bytes < 20 {
+                            continue;
+                        }
+                        let ihl = (t.src_buf[0] & 0x0f) as usize * 4;
+                        if read_bytes < ihl {
+                            continue;
+                        }
+                        offset = ihl;
+                    }
+
                     let mut flush = false;
                     let mut p = peer.lock();
                     match p.tunnel.decapsulate(
                         Some(peer_addr),
-                        &t.src_buf[..read_bytes],
+                        &t.src_buf[offset..read_bytes],
                         &mut t.dst_buf[..],
                     ) {
                         TunnResult::Done => {}

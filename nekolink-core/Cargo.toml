@@ -1,5 +1,5 @@
 [package]
-name = "boringtun"
+name = "nekolink-core"
 description = "an implementation of the WireGuard® protocol designed for portability and speed"
 version = "0.7.0"
 authors = [

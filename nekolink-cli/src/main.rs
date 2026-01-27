@@ -1,8 +1,8 @@
 // Copyright (c) 2019 Cloudflare, Inc. All rights reserved.
 // SPDX-License-Identifier: BSD-3-Clause
 
-use boringtun::device::drop_privileges::drop_privileges;
-use boringtun::device::{DeviceConfig, DeviceHandle};
+use nekolink_core::device::drop_privileges::drop_privileges;
+use nekolink_core::device::{DeviceConfig, DeviceHandle};
 use clap::{Arg, Command};
 use daemonize::Daemonize;
 use std::fs::File;
@@ -82,6 +82,11 @@ fn main() {
             Arg::new("disable-multi-queue")
                 .long("disable-multi-queue")
                 .help("Disable using multiple queues for the tunnel interface"),
+            Arg::new("ip-protocol")
+                .long("ip-protocol")
+                .takes_value(true)
+                .env("WG_IP_PROTOCOL")
+                .help("Use a custom IP protocol instead of UDP"),
         ])
         .get_matches();
 
@@ -151,6 +156,7 @@ fn main() {
         use_connected_socket: !matches.is_present("disable-connected-udp"),
         #[cfg(target_os = "linux")]
         use_multi_queue: !matches.is_present("disable-multi-queue"),
+        ip_protocol: matches.value_of("ip-protocol").map(|v| v.parse().expect("Invalid IP protocol")),
     };
 
     let mut device_handle: DeviceHandle = match DeviceHandle::new(tun_name, config) {

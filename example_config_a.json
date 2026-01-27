@@ -1,0 +1,15 @@
+{
+    "interface": "nekotun0",
+    "mode": "ip",
+    "ip_protocol": 141,
+    "listen_port": null,
+    "auto_route": false,
+    "local_address": "10.0.0.1/24",
+    "psk": "NekoMagic_Secret_KEY_666",
+    "peers": [
+        {
+            "endpoint": "对端节点的公网IP:5678"
+        }
+    ],
+    "signal_port": 5678
+}
