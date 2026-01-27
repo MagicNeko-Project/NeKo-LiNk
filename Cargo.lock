@@ -712,6 +712,7 @@ dependencies = [
  "glob",
  "libc",
  "nix 0.26.4",
+ "parking_lot",
  "rand_core",
  "ring",
  "serde",

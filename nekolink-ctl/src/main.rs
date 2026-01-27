@@ -63,11 +63,17 @@ async fn main() -> Result<()> {
     for entry in glob::glob(&format!("{}/*.json", config_dir))? {
         let path = entry?;
         let config_str = fs::read_to_string(&path)?;
-        let config: NekoConfig = serde_json::from_str(&config_str)?;
+        let config: NekoConfig = match serde_json::from_str(&config_str) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("解析配置文件 {:?} 失败喵: {:?}", path, e);
+                continue;
+            }
+        };
 
         let handle = tokio::spawn(async move {
             if let Err(e) = run_instance(config).await {
-                eprintln!("实例运行时出错: {:?}", e);
+                eprintln!("实例 {:?} 运行时出错: {:?}", path, e);
             }
         });
         handles.push(handle);
@@ -81,6 +87,31 @@ async fn main() -> Result<()> {
         let _ = h.await;
     }
 
+    Ok(())
+}
+
+async fn send_uapi(interface: &str, commands: &str) -> Result<()> {
+    let path = format!("/var/run/wireguard/{}.sock", interface);
+    let mut stream = tokio::net::UnixStream::connect(path).await
+        .context("无法连接到 UAPI Socket")?;
+    
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    
+    stream.write_all(commands.as_bytes()).await?;
+    stream.flush().await?;
+    
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    while reader.read_line(&mut line).await? > 0 {
+        if line.starts_with("errno=") {
+            let errno: i32 = line["errno=".len()..].trim().parse()?;
+            if errno != 0 {
+                return Err(anyhow::anyhow!("UAPI 返回错误: {}", errno));
+            }
+            break;
+        }
+        line.clear();
+    }
     Ok(())
 }
 
@@ -104,33 +135,28 @@ async fn run_instance(config: NekoConfig) -> Result<()> {
         }
     }
     
-    // 我们需要把私钥传给 nekolink-cli
-    // 通常 boringtun-cli 通过 UAPI 设置。我们这里为了简单，先启动，后续通过 wg 命令配置。
     let mut child = cmd.spawn().context("启动 nekolink-cli 失败")?;
 
     // 等待接口创建
     time::sleep(Duration::from_secs(2)).await;
 
-    // 3. 配置接口与私钥
-    // 写入临时私钥文件
-    let key_file = format!("/tmp/neko_{}.key", config.interface);
-    fs::write(&key_file, &priv_b64)?;
-
-    run_cmd(&format!("wg set {} private-key {}", config.interface, key_file))?;
+    // 3. 配置接口与私钥 (UAPI 方式)
+    let mut uapi_cmd = format!("set=1\nprivate_key={}\n", priv_b64);
     if let Some(port) = config.listen_port {
-        run_cmd(&format!("wg set {} listen-port {}", config.interface, port))?;
+        uapi_cmd.push_str(&format!("listen_port={}\n", port));
     }
+    uapi_cmd.push('\n');
+
+    send_uapi(&config.interface, &uapi_cmd).await.context("配置私钥失败")?;
+
     run_cmd(&format!("ip addr add {} dev {}", config.local_address, config.interface))?;
     run_cmd(&format!("ip link set up dev {}", config.interface))?;
 
     // 如果开启了 auto_route，则添加默认路由（实验性，谨慎使用喵）
     if config.auto_route {
         println!("警告喵：正在尝试配置系统路由表...");
-        // 这里的逻辑可以以后完善，目前遵循用户“不操作系统路由表”的默认行为喵
     }
     
-    let _ = fs::remove_file(key_file);
-
     // 4. 加密信令任务：交换公钥
     let state = NekoState {
         config: config.clone(),
@@ -168,23 +194,37 @@ async fn start_udp_signaling(state: NekoState) -> Result<()> {
     let socket = Arc::new(tokio::net::UdpSocket::from_std(std_socket)?);
     let cipher = derive_cipher(&state.config.psk);
 
+    let dynamic_peers = Arc::new(parking_lot::Mutex::new(std::collections::HashSet::new()));
+
     let send_task = {
         let config = state.config.clone();
         let socket = Arc::clone(&socket);
         let cipher = cipher.clone();
         let pub_key_bytes = state.pub_key.as_bytes().to_vec();
+        let dynamic_peers = Arc::clone(&dynamic_peers);
         async move {
             loop {
+                let mut targets = std::collections::HashSet::new();
                 for peer in &config.peers {
                     if let Ok(addr) = peer.endpoint.parse::<SocketAddr>() {
-                        let mut nonce_bytes = [0u8; 12];
-                        OsRng.fill_bytes(&mut nonce_bytes);
-                        let nonce = Nonce::from_slice(&nonce_bytes);
-                        if let Ok(ciphertext) = cipher.encrypt(nonce, pub_key_bytes.as_slice()) {
-                            let mut pkt = nonce_bytes.to_vec();
-                            pkt.extend_from_slice(&ciphertext);
-                            let _ = socket.send_to(&pkt, addr).await;
-                        }
+                        targets.insert(addr);
+                    }
+                }
+                {
+                    let dy = dynamic_peers.lock();
+                    for &addr in dy.iter() {
+                        targets.insert(addr);
+                    }
+                }
+
+                for addr in targets {
+                    let mut nonce_bytes = [0u8; 12];
+                    OsRng.fill_bytes(&mut nonce_bytes);
+                    let nonce = Nonce::from_slice(&nonce_bytes);
+                    if let Ok(ciphertext) = cipher.encrypt(nonce, pub_key_bytes.as_slice()) {
+                        let mut pkt = nonce_bytes.to_vec();
+                        pkt.extend_from_slice(&ciphertext);
+                        let _ = socket.send_to(&pkt, addr).await;
                     }
                 }
                 time::sleep(Duration::from_secs(10)).await;
@@ -196,6 +236,7 @@ async fn start_udp_signaling(state: NekoState) -> Result<()> {
         let socket = Arc::clone(&socket);
         let interface = state.config.interface.clone();
         let cipher = cipher.clone();
+        let dynamic_peers = Arc::clone(&dynamic_peers);
         async move {
             let mut known_peers = std::collections::HashSet::new();
             loop {
@@ -209,8 +250,9 @@ async fn start_udp_signaling(state: NekoState) -> Result<()> {
                             let peer_pub_key = BASE64.encode(&decrypted);
                             if !known_peers.contains(&peer_pub_key) {
                                 println!("喵！发现新队友 (UDP): {} 来自 {}", peer_pub_key, addr);
-                                if let Ok(_) = configure_peer(&interface, &peer_pub_key, addr.to_string()) {
+                                if let Ok(_) = configure_peer(&interface, &peer_pub_key, addr.to_string()).await {
                                     known_peers.insert(peer_pub_key);
+                                    dynamic_peers.lock().insert(addr);
                                 }
                             }
                         }
@@ -236,27 +278,41 @@ async fn start_raw_signaling(state: NekoState) -> Result<()> {
     let cipher = derive_cipher(&state.config.psk);
     let magic_byte: u8 = 0x99;
 
+    let dynamic_peers = Arc::new(parking_lot::Mutex::new(std::collections::HashSet::new()));
+
     let send_task = {
         let config = state.config.clone();
         let socket = Arc::clone(&socket);
         let cipher = cipher.clone();
         let pub_key_bytes = state.pub_key.as_bytes().to_vec();
+        let dynamic_peers = Arc::clone(&dynamic_peers);
         async move {
             loop {
+                let mut targets = std::collections::HashSet::new();
                 for peer in &config.peers {
                     if let Ok(ip) = peer.endpoint.parse::<IpAddr>() {
-                        let mut nonce_bytes = [0u8; 12];
-                        OsRng.fill_bytes(&mut nonce_bytes);
-                        let nonce = Nonce::from_slice(&nonce_bytes);
-                        if let Ok(ciphertext) = cipher.encrypt(nonce, pub_key_bytes.as_slice()) {
-                            let mut pkt = vec![magic_byte];
-                            pkt.extend_from_slice(&nonce_bytes);
-                            pkt.extend_from_slice(&ciphertext);
-                            
-                            let addr = socket2::SockAddr::from(SocketAddr::new(ip, 0));
-                            if let Ok(mut guard) = socket.writable().await {
-                                let _ = guard.try_io(|s| s.get_ref().send_to(&pkt, &addr));
-                            }
+                        targets.insert(ip);
+                    }
+                }
+                {
+                    let dy = dynamic_peers.lock();
+                    for &ip in dy.iter() {
+                        targets.insert(ip);
+                    }
+                }
+
+                for ip in targets {
+                    let mut nonce_bytes = [0u8; 12];
+                    OsRng.fill_bytes(&mut nonce_bytes);
+                    let nonce = Nonce::from_slice(&nonce_bytes);
+                    if let Ok(ciphertext) = cipher.encrypt(nonce, pub_key_bytes.as_slice()) {
+                        let mut pkt = vec![magic_byte];
+                        pkt.extend_from_slice(&nonce_bytes);
+                        pkt.extend_from_slice(&ciphertext);
+                        
+                        let addr = socket2::SockAddr::from(SocketAddr::new(ip, 0));
+                        if let Ok(mut guard) = socket.writable().await {
+                            let _ = guard.try_io(|s| s.get_ref().send_to(&pkt, &addr));
                         }
                     }
                 }
@@ -269,6 +325,7 @@ async fn start_raw_signaling(state: NekoState) -> Result<()> {
         let socket = Arc::clone(&socket);
         let interface = state.config.interface.clone();
         let cipher = cipher.clone();
+        let dynamic_peers = Arc::clone(&dynamic_peers);
         async move {
             let mut known_peers = std::collections::HashSet::new();
             loop {
@@ -291,11 +348,14 @@ async fn start_raw_signaling(state: NekoState) -> Result<()> {
                             if decrypted.len() == 32 {
                                 let peer_pub_key = BASE64.encode(&decrypted);
                                 if !known_peers.contains(&peer_pub_key) {
-                                    let ip_str = addr.as_socket().map(|s: SocketAddr| s.ip().to_string()).unwrap_or_else(|| "unknown".to_string());
-                                    println!("喵！发现新队友 (Raw IP): {} 来自 {}", peer_pub_key, ip_str);
-                                    let wg_endpoint = format!("{}:1", ip_str);
-                                    if let Ok(_) = configure_peer(&interface, &peer_pub_key, wg_endpoint) {
-                                        known_peers.insert(peer_pub_key);
+                                    let ip_addr = addr.as_socket().map(|s: SocketAddr| s.ip());
+                                    if let Some(ip) = ip_addr {
+                                        let ip_str = ip.to_string();
+                                        println!("喵！发现新队友 (Raw IP): {} 来自 {}", peer_pub_key, ip_str);
+                                        if let Ok(_) = configure_peer(&interface, &peer_pub_key, ip_str).await {
+                                            known_peers.insert(peer_pub_key);
+                                            dynamic_peers.lock().insert(ip);
+                                        }
                                     }
                                 }
                             }
@@ -326,9 +386,12 @@ fn derive_cipher(psk: &str) -> ChaCha20Poly1305 {
     ChaCha20Poly1305::new(&psk_bytes.into())
 }
 
-fn configure_peer(interface: &str, peer_pub_key: &str, endpoint: String) -> Result<()> {
-    // 这里是一个简化的逻辑：将对端加入状态机
-    run_cmd(&format!("wg set {} peer {} allowed-ips 0.0.0.0/0,::/0 endpoint {}", interface, peer_pub_key, endpoint))?;
+async fn configure_peer(interface: &str, peer_pub_key: &str, endpoint: String) -> Result<()> {
+    let uapi_cmd = format!(
+        "set=1\npublic_key={}\nallowed_ip=0.0.0.0/0\nallowed_ip=::/0\nendpoint={}\n\n",
+        peer_pub_key, endpoint
+    );
+    send_uapi(interface, &uapi_cmd).await.context("配置 Peer 失败")?;
     println!("配置队友 {} 成功喵！", peer_pub_key);
     Ok(())
 }
