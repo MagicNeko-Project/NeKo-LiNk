@@ -255,7 +255,7 @@ async fn start_udp_signaling(state: NekoState) -> Result<()> {
         let cipher = cipher.clone();
         let dynamic_peers = Arc::clone(&dynamic_peers);
         async move {
-            let mut known_peers = std::collections::HashSet::new();
+            let mut known_peers: std::collections::HashMap<String, String> = std::collections::HashMap::new();
             loop {
                 let mut buf = [0u8; 1024];
                 if let Ok((len, addr)) = socket.recv_from(&mut buf).await {
@@ -265,10 +265,16 @@ async fn start_udp_signaling(state: NekoState) -> Result<()> {
                     if let Ok(decrypted) = cipher.decrypt(nonce, encrypted_part) {
                         if decrypted.len() == 32 {
                             let peer_pub_key = BASE64.encode(&decrypted);
-                            if !known_peers.contains(&peer_pub_key) {
-                                println!("喵！发现新队友 (UDP): {} 来自 {}", peer_pub_key, addr);
-                                if let Ok(_) = configure_peer(&interface, &peer_pub_key, addr.to_string()).await {
-                                    known_peers.insert(peer_pub_key);
+                            let addr_str = addr.to_string();
+                            let should_update = match known_peers.get(&peer_pub_key) {
+                                Some(old_addr) => old_addr != &addr_str,
+                                None => true,
+                            };
+
+                            if should_update {
+                                println!("喵！发现/更新队友 (UDP): {} 来自 {}", peer_pub_key, addr_str);
+                                if let Ok(_) = configure_peer(&interface, &peer_pub_key, addr_str.clone()).await {
+                                    known_peers.insert(peer_pub_key, addr_str);
                                     dynamic_peers.lock().insert(addr);
                                 }
                             }
@@ -344,7 +350,7 @@ async fn start_raw_signaling(state: NekoState) -> Result<()> {
         let cipher = cipher.clone();
         let dynamic_peers = Arc::clone(&dynamic_peers);
         async move {
-            let mut known_peers = std::collections::HashSet::new();
+            let mut known_peers: std::collections::HashMap<String, String> = std::collections::HashMap::new();
             loop {
                 let mut buf = [0u8; 1024];
                 if let Ok(mut guard) = socket.readable().await {
@@ -364,13 +370,18 @@ async fn start_raw_signaling(state: NekoState) -> Result<()> {
                         if let Ok(decrypted) = cipher.decrypt(nonce, encrypted_part) {
                             if decrypted.len() == 32 {
                                 let peer_pub_key = BASE64.encode(&decrypted);
-                                if !known_peers.contains(&peer_pub_key) {
-                                    let ip_addr = addr.as_socket().map(|s: SocketAddr| s.ip());
-                                    if let Some(ip) = ip_addr {
-                                        let ip_str = ip.to_string();
-                                        println!("喵！发现新队友 (Raw IP): {} 来自 {}", peer_pub_key, ip_str);
-                                        if let Ok(_) = configure_peer(&interface, &peer_pub_key, ip_str).await {
-                                            known_peers.insert(peer_pub_key);
+                                let ip_addr = addr.as_socket().map(|s: SocketAddr| s.ip());
+                                if let Some(ip) = ip_addr {
+                                    let ip_str = ip.to_string();
+                                    let should_update = match known_peers.get(&peer_pub_key) {
+                                        Some(old_ip) => old_ip != &ip_str,
+                                        None => true,
+                                    };
+
+                                    if should_update {
+                                        println!("喵！发现/更新队友 (Raw IP): {} 来自 {}", peer_pub_key, ip_str);
+                                        if let Ok(_) = configure_peer(&interface, &peer_pub_key, ip_str.clone()).await {
+                                            known_peers.insert(peer_pub_key, ip_str);
                                             dynamic_peers.lock().insert(ip);
                                         }
                                     }
