@@ -31,7 +31,7 @@ fi
 # 4. 这里的魔法重点：使用 apt 安装本地生成的包
 # 它会自动处理依赖，并让系统正式接管文件管理喵！
 echo "正在通过 apt 执行转生仪式：$DEB_FILE 喵！"
-apt install -y ./"$DEB_FILE"
+apt install -y --reinstall ./"$DEB_FILE"
 
 # 5. 清理现场
 echo "正在清理临时构建产物喵..."
