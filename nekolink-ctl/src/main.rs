@@ -342,6 +342,7 @@ async fn start_udp_signaling(state: NekoState) -> Result<()> {
         let cipher = cipher.clone();
         let dynamic_peers = Arc::clone(&dynamic_peers);
         let keepalive = state.config.persistent_keepalive;
+        let config = state.config.clone();
         async move {
             let mut known_peers: std::collections::HashMap<String, String> = std::collections::HashMap::new();
             loop {
@@ -367,13 +368,13 @@ async fn start_udp_signaling(state: NekoState) -> Result<()> {
 
                             if should_update {
                                 println!("喵！发现/更新队友 (UDP): {} 来自 {}", peer_pub_key, addr_str);
-                                if let Ok(_) = configure_peer(&interface, &peer_pub_key, addr_str.clone(), keepalive, &state.config, peer_mtu).await {
+                                if let Ok(_) = configure_peer(&interface, &peer_pub_key, addr_str.clone(), keepalive, &config, peer_mtu).await {
                                     known_peers.insert(peer_pub_key, addr_str);
                                     dynamic_peers.lock().insert(addr);
                                 }
                             } else if let Some(m) = peer_mtu {
                                 // 即使地址没变，MTU 变了也要更新喵
-                                let _ = sync_mtu_if_needed(&state.config, m).await;
+                                let _ = sync_mtu_if_needed(&config, m).await;
                             }
                         }
                     }
@@ -478,7 +479,7 @@ async fn start_raw_signaling(state: NekoState) -> Result<()> {
         }
     };
 
-    let recv_logic = |socket: Arc<tokio::io::unix::AsyncFd<Socket>>, interface: String, cipher: ChaCha20Poly1305, dynamic_peers: Arc<parking_lot::Mutex<std::collections::HashSet<IpAddr>>>, keepalive: Option<u16>| {
+    let recv_logic = |socket: Arc<tokio::io::unix::AsyncFd<Socket>>, interface: String, cipher: ChaCha20Poly1305, dynamic_peers: Arc<parking_lot::Mutex<std::collections::HashSet<IpAddr>>>, keepalive: Option<u16>, local_config: NekoConfig| {
         async move {
             let mut known_peers: std::collections::HashMap<String, String> = std::collections::HashMap::new();
             loop {
@@ -519,12 +520,12 @@ async fn start_raw_signaling(state: NekoState) -> Result<()> {
 
                                     if should_update {
                                         println!("喵！发现/更新队友 (Raw IP): {} 来自 {}", peer_pub_key, ip_str);
-                                        if let Ok(_) = configure_peer(&interface, &peer_pub_key, ip_str.clone(), keepalive, &state_config_recv, peer_mtu).await {
+                                        if let Ok(_) = configure_peer(&interface, &peer_pub_key, ip_str.clone(), keepalive, &local_config, peer_mtu).await {
                                             known_peers.insert(peer_pub_key, ip_str);
                                             dynamic_peers.lock().insert(ip);
                                         }
                                     } else if let Some(m) = peer_mtu {
-                                        let _ = sync_mtu_if_needed(&state_config_recv, m).await;
+                                        let _ = sync_mtu_if_needed(&local_config, m).await;
                                     }
                                 }
                             }
@@ -542,9 +543,10 @@ async fn start_raw_signaling(state: NekoState) -> Result<()> {
         let dynamic_peers = Arc::clone(&dynamic_peers);
         let keepalive = state.config.persistent_keepalive;
         let socket = v4_socket.clone();
+        let config = state.config.clone();
         async move {
             if let Some(s) = socket {
-                recv_logic(s, interface, cipher, dynamic_peers, keepalive).await;
+                recv_logic(s, interface, cipher, dynamic_peers, keepalive, config).await;
             } else {
                 std::future::pending::<()>().await;
             }
@@ -557,9 +559,10 @@ async fn start_raw_signaling(state: NekoState) -> Result<()> {
         let dynamic_peers = Arc::clone(&dynamic_peers);
         let keepalive = state.config.persistent_keepalive;
         let socket = v6_socket.clone();
+        let config = state.config.clone();
         async move {
             if let Some(s) = socket {
-                recv_logic(s, interface, cipher, dynamic_peers, keepalive).await;
+                recv_logic(s, interface, cipher, dynamic_peers, keepalive, config).await;
             } else {
                 std::future::pending::<()>().await;
             }
