@@ -1,0 +1,18 @@
+[Unit]
+Description=NekoLink Intelligent Tunnel Control Plane ฅ^•ﻌ•^ฅ
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 管理进程需要 Root 权限以操作网卡和原始套接字喵
+User=root
+WorkingDirectory=/etc/neko-link
+ExecStart=/usr/local/bin/nekolink-ctl
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

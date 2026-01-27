@@ -56,11 +56,23 @@ neko-link
 Choose your role (Server/Client), transmission mode (IP or UDP), protocol number, and internal IP address.
 
 ### 2. Manage Tunnels
-Once configured, start the control plane:
+Once configured, use systemd to manage the NekoLink service:
+
 ```bash
-sudo nekolink-ctl
+# Start the service
+sudo systemctl start nekolink
+
+# Stop the service
+sudo systemctl stop nekolink
+
+# View real-time logs
+journalctl -u nekolink -f
+
+# Enable/Disable auto-start on boot
+sudo systemctl enable/disable nekolink
 ```
-It will automatically scan and manage all configurations located in `/etc/neko-link/*.json` in parallel.
+
+You can also run `nekolink-ctl` directly for foreground debugging. It will automatically scan and manage all configurations located in `/etc/neko-link/*.json` in parallel.
 
 ---
 

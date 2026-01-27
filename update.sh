@@ -41,16 +41,27 @@ fi
 cargo build --release
 
 # 4. 覆盖安装
-echo -e "\n${CYAN}[4/5] 正在注入全新的魔法二进制文件...${NC}"
+echo -e "\n${CYAN}[4/6] 正在注入全新的魔法二进制文件...${NC}"
 cp target/release/nekolink-cli /usr/local/bin/
 cp target/release/nekolink-ctl /usr/local/bin/
 cp neko-link.sh /usr/local/bin/neko-link
+cp nekolink.service /etc/systemd/system/
 chmod +x /usr/local/bin/neko-link
 
 # 5. 重新赋予特权
-echo -e "\n${CYAN}[5/5] 正在为新核心注入超级权能 (SetCap)...${NC}"
+echo -e "\n${CYAN}[5/6] 正在为新核心注入超级权能 (SetCap)...${NC}"
 setcap cap_net_admin,cap_net_raw+epi /usr/local/bin/nekolink-cli
 setcap cap_net_admin,cap_net_raw+epi /usr/local/bin/nekolink-ctl
 
+# 6. 重启服务
+echo -e "\n${CYAN}[6/6] 正在重载并重启 NekoLink 服务...${NC}"
+systemctl daemon-reload
+if systemctl is-active --quiet nekolink; then
+    systemctl restart nekolink
+    echo -e "${PINK}服务已自动重启喵！${NC}"
+else
+    echo -e "${CYAN}服务当前未运行，输入 'systemctl start nekolink' 即可启动喵！${NC}"
+fi
+
 echo -e "\n${PINK}✨ 升级成功喵！✨${NC}"
-echo -e "原有的配置文件 (/etc/neko-link/) 已被温柔地保留。现在可以重新运行 'nekolink-ctl' 了喵！"
+echo -e "原有的配置文件 (/etc/neko-link/) 已被温柔地保留。你可以使用 'journalctl -u nekolink -f' 查看实时日志喵！"
