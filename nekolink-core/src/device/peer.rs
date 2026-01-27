@@ -138,6 +138,16 @@ impl Peer {
             udp_conn.set_mark(fwmark)?;
         }
 
+        if addr.is_ipv6() && ip_protocol.is_some() {
+            // 设置 IPv6 DSCP 为最高优先级 (CS7 = 56, TCLASS = 56 << 2 = 224 = 0xE0)
+            use std::os::unix::io::AsRawFd;
+            let fd = udp_conn.as_raw_fd();
+            unsafe {
+                let val: libc::c_int = 224;
+                libc::setsockopt(fd, libc::IPPROTO_IPV6, libc::IPV6_TCLASS, &val as *const _ as *const libc::c_void, std::mem::size_of_val(&val) as libc::socklen_t);
+            }
+        }
+
         tracing::info!(
             message="Connected endpoint",
             port=port,

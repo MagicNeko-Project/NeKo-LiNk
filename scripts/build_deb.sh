@@ -24,7 +24,7 @@ Section: utils
 Priority: optional
 Architecture: $ARCH
 Depends: libc6, systemd
-Maintainer: MagicNeko Project <magicneko@example.com>
+Maintainer: MagicNeko Project <icecat@catio.network>
 Description: NekoLink Intelligent Tunnel Control Plane - High performance & stealthy tunnel based on customized WireGuard protocol.
 EOF
 
@@ -54,7 +54,7 @@ chmod +x "$BUILD_DIR/usr/local/bin/neko-link"
 cp nekolink.service "$BUILD_DIR/etc/systemd/system/"
 
 # 5. 打包
-dpkg-deb --build "$BUILD_DIR" "${PKG_NAME}_${VERSION}_${ARCH}.deb"
+dpkg-deb --build "$BUILD_DIR" "NekoLink_${VERSION}_${ARCH}.deb"
 
-echo "打包成功喵！文件: ${PKG_NAME}_${VERSION}_${ARCH}.deb"
+echo "打包成功喵！文件: NekoLink_${VERSION}_${ARCH}.deb"
 rm -rf "$BUILD_DIR"

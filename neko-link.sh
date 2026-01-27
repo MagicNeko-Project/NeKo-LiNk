@@ -88,6 +88,13 @@ function create_config() {
         [ -z "$mtu_val" ] && mtu_val=1420
         mtu=$mtu_val
     fi
+
+    read -p "是否开启 TCP MSS 自动修复 ( 建议开启以防止握手成功但无法网页浏览 )？( y/n, 默认 y ): " mss_enable
+    [ -z "$mss_enable" ] && mss_enable="y"
+    clamp_mss="false"
+    if [ "$mss_enable" == "y" ]; then
+        clamp_mss="true"
+    fi
     [ -z "$local_addr" ] && local_addr="10.0.0.1/24"
 
     read -p "请输入预共享密钥 (PSK, 用于自动交换公钥，两端必须一致): " psk
@@ -119,6 +126,7 @@ function create_config() {
   "auto_route": $auto_route,
   "persistent_keepalive": $keepalive,
   "mtu": $mtu,
+  "clamp_mss": $clamp_mss,
   "local_address": "$local_addr",
   "psk": "$psk",
   "peers": [
