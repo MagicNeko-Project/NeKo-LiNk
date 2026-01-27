@@ -72,16 +72,20 @@ function edit_config() {
     curr_ep=$(jq -r '.peers[0].endpoint // empty' "$selected_cfg")
 
     # 交互式修改
-    read -p "传输模式 (当前: $curr_mode, [1] ip, [2] udp, 直接回车保持不变): " m_choice
+    read -p "传输模式 (当前: $curr_mode, [1] ip, [2] udp, [3] tcp, 直接回车保持不变): " m_choice
     case "$m_choice" in
         1) mode="ip" ;;
         2) mode="udp" ;;
+        3) mode="tcp" ;;
         *) mode="$curr_mode" ;;
     esac
 
     if [ "$mode" == "ip" ]; then
         read -p "IP 协议号 (当前: $curr_proto, 直接回车保持不变): " proto
         [ -z "$proto" ] && proto=$curr_proto
+        listen_port="null"
+    elif [ "$mode" == "tcp" ]; then
+        proto="null"
         listen_port="null"
     else
         read -p "WireGuard 监听端口 (当前: $curr_lport, 直接回车保持不变): " listen_port
@@ -194,34 +198,55 @@ function create_config() {
     echo -e "\n${CYAN}选择数据传输模式：${NC}"
     echo "1. IP 协议模式 (绕过 UDP 限制，推荐)"
     echo "2. UDP 模式 (标准协议)"
-    read -p "请选择 [1-2]: " mode_choice
-    if [ "$mode_choice" == "1" ]; then
-        mode="ip"
-        read -p "请输入 IP 协议号 [143-252] ( 默认 141 ): " proto
-        [ -z "$proto" ] && proto=141
-        listen_port="null"
-    else
-        mode="udp"
-        proto="null"
-        read -p "请输入 WireGuard 监听端口 ( 默认 51820 ): " listen_port
-        [ -z "$listen_port" ] && listen_port=51820
-    fi
+    echo "3. TCP 伪装模式 (极致模拟，强力穿透)"
+    read -p "请选择 [1-3]: " mode_choice
+    case "$mode_choice" in
+        1)
+            mode="ip"
+            read -p "请输入 IP 协议号 [143-252] ( 默认 141 ): " proto
+            [ -z "$proto" ] && proto=141
+            listen_port="null"
+            ;;
+        3)
+            mode="tcp"
+            proto="null"
+            listen_port="null"
+            ;;
+        *)
+            mode="udp"
+            proto="null"
+            read -p "请输入 WireGuard 监听端口 ( 默认 51820 ): " listen_port
+            [ -z "$listen_port" ] && listen_port=51820
+            ;;
+    esac
 
     read -p "请输入本地隧道接口 IP 地址 ( 示例 10.0.0.1/24 ): " local_addr
-    read -p "是否开启 Keepalive 保持魔法连接？( y/n, 默认 n ): " ka_enable
-    keepalive="null"
-    if [ "$ka_enable" == "y" ]; then
-        read -p "请输入 Keepalive 间隔时间 ( 秒, 默认 25 ): " ka_sec
-        [ -z "$ka_sec" ] && ka_sec=25
-        keepalive=$ka_sec
+    
+    # MTU 自动探测逻辑喵
+    rec_mtu=1420
+    if [ "$role" == "client" ] && [ -n "$endpoint" ]; then
+        echo -e "${PINK}正在为您探测最佳 MTU 推荐值，请稍等喵...${NC}"
+        # 尝试调用 nekolink-ctl mtu-probe
+        probe_res=$(nekolink-ctl mtu-probe "$endpoint" "$mode" 2>/dev/null | grep "RECOMMENDED_MTU=" | cut -d'=' -f2)
+        if [ -n "$probe_res" ]; then
+            rec_mtu=$probe_res
+            echo -e "${PINK}探测成功！根据当前链路，建议 MTU 为: $rec_mtu${NC}"
+        else
+            echo -e "${CYAN}探测魔法失败了喵，可能是网络波动。将使用默认推荐值 1420。${NC}"
+        fi
     fi
 
-    read -p "是否需要自定义 MTU？( y/n, 默认 n, 推荐 1420 ): " mtu_enable
+    read -p "是否需要自定义 MTU？( y/n, 默认 n, 推荐 $rec_mtu ): " mtu_enable
     mtu="null"
     if [ "$mtu_enable" == "y" ]; then
         read -p "请输入 MTU 值 ( 建议 1280-1420 ): " mtu_val
-        [ -z "$mtu_val" ] && mtu_val=1420
+        [ -z "$mtu_val" ] && mtu_val=$rec_mtu
         mtu=$mtu_val
+    elif [ "$mtu_enable" == "n" ] || [ -z "$mtu_enable" ]; then
+        # 如果用户不自定义且已有推荐值，我们可以考虑直接用推荐值，
+        # 但为了保持兼容性，之前代码是 mtu="null" (即不设置，让内核自定或 cli 默认 1420)。
+        # 既然我们有了更好的推荐值，就顺手填进去喵。
+        mtu=$rec_mtu
     fi
 
     read -p "是否开启 TCP MSS 自动修复 ( 建议开启以防止握手成功但无法网页浏览 )？( y/n, 默认 y ): " mss_enable
@@ -246,7 +271,7 @@ function create_config() {
         read -p "请输入信令交换端口 ( 默认 5678 ): " sig_port
         [ -z "$sig_port" ] && sig_port=5678
     else
-        sig_port=0 # IP 模式下不使用 UDP 端口
+        sig_port=0 # IP 或 TCP 模式下不使用 UDP 端口
     fi
 
     # 构建 JSON

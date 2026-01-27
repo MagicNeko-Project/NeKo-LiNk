@@ -8,6 +8,7 @@ pub mod drop_privileges;
 #[cfg(test)]
 mod integration_tests;
 pub mod peer;
+pub mod fake_tcp;
 
 #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
 #[path = "kqueue.rs"]
@@ -39,6 +40,7 @@ use crate::noise::errors::WireGuardError;
 use crate::noise::handshake::parse_handshake_anon;
 use crate::noise::rate_limiter::RateLimiter;
 use crate::noise::{Packet, Tunn, TunnResult};
+use fake_tcp::{TcpHeader, TCP_FLAG_PSH, TCP_FLAG_ACK};
 use crate::x25519;
 use allowed_ips::AllowedIps;
 use parking_lot::Mutex;
@@ -115,6 +117,14 @@ pub struct DeviceConfig {
     #[cfg(target_os = "linux")]
     pub uapi_fd: i32,
     pub ip_protocol: Option<u8>,
+    pub transport_mode: TransportMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TransportMode {
+    Udp,
+    RawIp,
+    FakeTcp,
 }
 
 impl Default for DeviceConfig {
@@ -127,6 +137,7 @@ impl Default for DeviceConfig {
             #[cfg(target_os = "linux")]
             uapi_fd: -1,
             ip_protocol: None,
+            transport_mode: TransportMode::Udp,
         }
     }
 }
@@ -166,6 +177,7 @@ struct ThreadData {
     iface: Arc<TunSocket>,
     src_buf: [u8; MAX_UDP_SIZE],
     dst_buf: [u8; MAX_UDP_SIZE],
+    tcp_buf: [u8; MAX_UDP_SIZE],
 }
 
 impl DeviceHandle {
@@ -209,6 +221,7 @@ impl DeviceHandle {
         let mut thread_local = ThreadData {
             src_buf: [0u8; MAX_UDP_SIZE],
             dst_buf: [0u8; MAX_UDP_SIZE],
+            tcp_buf: [0u8; MAX_UDP_SIZE],
             iface: if _i == 0 || !device.read().config.use_multi_queue {
                 // For the first thread use the original iface
                 Arc::clone(&device.read().iface)
@@ -234,6 +247,7 @@ impl DeviceHandle {
         let mut thread_local = ThreadData {
             src_buf: [0u8; MAX_UDP_SIZE],
             dst_buf: [0u8; MAX_UDP_SIZE],
+            tcp_buf: [0u8; MAX_UDP_SIZE],
             iface: Arc::clone(&device.read().iface),
         };
 
@@ -338,7 +352,7 @@ impl Device {
             None,
         );
 
-        let peer = Peer::new(tunn, next_index, endpoint, allowed_ips, preshared_key);
+        let peer = Peer::new(tunn, next_index, endpoint, allowed_ips, preshared_key, self.config.transport_mode);
 
         let peer = Arc::new(Mutex::new(peer));
         self.peers.insert(pub_key, Arc::clone(&peer));
@@ -563,14 +577,37 @@ impl Device {
                         }
                         TunnResult::Err(e) => tracing::error!(message = "Timer error", error = ?e),
                         TunnResult::WriteToNetwork(packet) => {
-                            match endpoint_addr {
-                                SocketAddr::V4(_) => {
-                                    udp4.send_to(packet, &endpoint_addr.into()).ok()
+                            if p.transport_mode == TransportMode::FakeTcp {
+                                if let Some(local_ip) = *p.local_ip.read() {
+                                    let dst_ip = match endpoint_addr.ip() {
+                                        IpAddr::V4(v4) => v4,
+                                        _ => continue,
+                                    };
+                                    let seq = p.tcp_seq.fetch_add(packet.len() as u32, Ordering::SeqCst);
+                                    let ack = p.tcp_ack.load(Ordering::SeqCst);
+                                    let len = fake_tcp::prepare_tcp_packet(
+                                        local_ip, dst_ip, *p.local_port.read(), endpoint_addr.port(),
+                                        seq, ack, TCP_FLAG_PSH | TCP_FLAG_ACK, packet, &mut t.tcp_buf
+                                    );
+                                    match endpoint_addr {
+                                        SocketAddr::V4(_) => {
+                                            udp4.send_to(&t.tcp_buf[..len], &endpoint_addr.into()).ok();
+                                        }
+                                        SocketAddr::V6(_) => {
+                                            udp6.send_to(&t.tcp_buf[..len], &endpoint_addr.into()).ok();
+                                        }
+                                    };
                                 }
-                                SocketAddr::V6(_) => {
-                                    udp6.send_to(packet, &endpoint_addr.into()).ok()
-                                }
-                            };
+                            } else {
+                                match endpoint_addr {
+                                    SocketAddr::V4(_) => {
+                                        udp4.send_to(packet, &endpoint_addr.into()).ok()
+                                    }
+                                    SocketAddr::V6(_) => {
+                                        udp6.send_to(packet, &endpoint_addr.into()).ok()
+                                    }
+                                };
+                            }
                         }
                         _ => panic!("Unexpected result from update_timers"),
                     };
@@ -607,23 +644,26 @@ impl Device {
 
                 let rate_limiter = d.rate_limiter.as_ref().unwrap();
 
-                // Loop while we have packets on the anonymous connection
-
                 // Safety: the `recv_from` implementation promises not to write uninitialised
                 // bytes to the buffer, so this casting is safe.
                 let src_buf =
                     unsafe { &mut *(&mut t.src_buf[..] as *mut [u8] as *mut [MaybeUninit<u8>]) };
                 while let Ok((packet_len, addr)) = udp.recv_from(src_buf) {
                     let mut offset = 0;
+                    
+                    // NekoLink: 处理 IP 层头部 (Raw IP 模式) 喵
                     if d.config.ip_protocol.is_some() && addr.as_socket().unwrap().is_ipv4() {
-                        if packet_len < 20 {
-                            continue;
-                        }
+                        if packet_len < 20 { continue; }
                         let ihl = (t.src_buf[0] & 0x0f) as usize * 4;
-                        if packet_len < ihl {
-                            continue;
-                        }
+                        if packet_len < ihl { continue; }
                         offset = ihl;
+                    }
+
+                    // NekoLink 2.3.0: 处理 TCP 层头部 (Fake-TCP 模式) 喵
+                    if d.config.transport_mode == TransportMode::FakeTcp && addr.as_socket().unwrap().is_ipv4() {
+                        if packet_len < offset + 20 { continue; }
+                        // 这里我们简单跳过 TCP 头，后续校验可以增强喵
+                        offset += 20;
                     }
 
                     let packet = &t.src_buf[offset..packet_len];
@@ -671,7 +711,23 @@ impl Device {
                         TunnResult::Err(_) => continue,
                         TunnResult::WriteToNetwork(packet) => {
                             flush = true;
-                            let _: Result<_, _> = udp.send_to(packet, &addr);
+                            if d.config.transport_mode == TransportMode::FakeTcp {
+                                if let Some(local_ip) = *p.local_ip.read() {
+                                    let dst_ip = match addr.as_socket().unwrap().ip() {
+                                        IpAddr::V4(v4) => v4,
+                                        _ => continue,
+                                    };
+                                    let seq = p.tcp_seq.fetch_add(packet.len() as u32, Ordering::SeqCst);
+                                    let ack = p.tcp_ack.load(Ordering::SeqCst);
+                                    let len = fake_tcp::prepare_tcp_packet(
+                                        local_ip, dst_ip, *p.local_port.read(), addr.as_socket().unwrap().port(),
+                                        seq, ack, TCP_FLAG_PSH | TCP_FLAG_ACK, packet, &mut t.tcp_buf
+                                    );
+                                    let _: Result<_, _> = udp.send_to(&t.tcp_buf[..len], &addr);
+                                }
+                            } else {
+                                let _: Result<_, _> = udp.send_to(packet, &addr);
+                            }
                         }
                         TunnResult::WriteToTunnelV4(packet, addr) => {
                             if p.is_allowed_ip(addr) {
@@ -741,18 +797,23 @@ impl Device {
                 while let Ok(read_bytes) = udp.recv(src_buf) {
                     let mut offset = 0;
                     if d.config.ip_protocol.is_some() && peer_addr.is_ipv4() {
-                        if read_bytes < 20 {
-                            continue;
-                        }
+                        if read_bytes < 20 { continue; }
                         let ihl = (t.src_buf[0] & 0x0f) as usize * 4;
-                        if read_bytes < ihl {
-                            continue;
-                        }
+                        if read_bytes < ihl { continue; }
                         offset = ihl;
                     }
 
-                    let mut flush = false;
                     let mut p = peer.lock();
+
+                    if d.config.transport_mode == TransportMode::FakeTcp && peer_addr.is_ipv4() {
+                         if read_bytes < offset + 20 { continue; }
+                         if let Some(tcp) = TcpHeader::parse(&t.src_buf[offset..offset+20]) {
+                             p.tcp_ack.store(tcp.seq.wrapping_add(1), Ordering::SeqCst);
+                         }
+                         offset += 20;
+                    }
+
+                    let mut flush = false;
                     let data = &t.src_buf[offset..read_bytes];
                     if !data.is_empty() && data[0] == 0x99 {
                         // Silently ignore signaling packets
@@ -768,7 +829,27 @@ impl Device {
                         TunnResult::Err(e) => eprintln!("Decapsulate error {:?}", e),
                         TunnResult::WriteToNetwork(packet) => {
                             flush = true;
-                            let _: Result<_, _> = udp.send(packet);
+                            if d.config.transport_mode == TransportMode::FakeTcp {
+                                if let Some(local_ip) = *p.local_ip.read() {
+                                    let dst_ip = match peer_addr {
+                                        IpAddr::V4(v4) => v4,
+                                        _ => continue,
+                                    };
+                                    let seq = p.tcp_seq.fetch_add(packet.len() as u32, Ordering::SeqCst);
+                                    let ack = p.tcp_ack.load(Ordering::SeqCst);
+                                    let dst_port = match p.endpoint().addr {
+                                        Some(SocketAddr::V4(v4)) => v4.port(),
+                                        _ => 0,
+                                    };
+                                    let len = fake_tcp::prepare_tcp_packet(
+                                        local_ip, dst_ip, *p.local_port.read(), dst_port,
+                                        seq, ack, TCP_FLAG_PSH | TCP_FLAG_ACK, packet, &mut t.tcp_buf
+                                    );
+                                    let _: Result<_, _> = udp.send(&t.tcp_buf[..len]);
+                                }
+                            } else {
+                                let _: Result<_, _> = udp.send(packet);
+                            }
                         }
                         TunnResult::WriteToTunnelV4(packet, addr) => {
                             if p.is_allowed_ip(addr) {

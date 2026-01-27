@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 use nekolink_core::device::drop_privileges::drop_privileges;
-use nekolink_core::device::{DeviceConfig, DeviceHandle};
+use nekolink_core::device::{DeviceConfig, DeviceHandle, TransportMode};
 use clap::{Arg, Command};
 use daemonize::Daemonize;
 use std::fs::File;
@@ -87,6 +87,9 @@ fn main() {
                 .takes_value(true)
                 .env("WG_IP_PROTOCOL")
                 .help("Use a custom IP protocol instead of UDP"),
+            Arg::new("fake-tcp")
+                .long("fake-tcp")
+                .help("Enable Fake-TCP transport mode"),
         ])
         .get_matches();
 
@@ -157,6 +160,13 @@ fn main() {
         #[cfg(target_os = "linux")]
         use_multi_queue: !matches.is_present("disable-multi-queue"),
         ip_protocol: matches.value_of("ip-protocol").map(|v| v.parse().expect("Invalid IP protocol")),
+        transport_mode: if matches.is_present("fake-tcp") {
+            TransportMode::FakeTcp
+        } else if matches.is_present("ip-protocol") {
+            TransportMode::RawIp
+        } else {
+            TransportMode::Udp
+        },
     };
 
     let mut device_handle: DeviceHandle = match DeviceHandle::new(tun_name, config) {

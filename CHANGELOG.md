@@ -3,6 +3,19 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v2.4.0 (2026-01-28)
+- 喵喵！新增了 **自适应 MTU 探测机制**，自动识别链路 PMTU。
+- 在 `nekolink-ctl` 中添加 `mtu-probe` 命令。
+- 在 `nekolink.sh` 助手创建配置时自动推荐最佳 MTU 值。
+
+## v2.3.0 (2026-01-27)
+
+### 新增功能 (Added)
+- **全内置 Fake-TCP 模式**: 在 `nekolink-core` 中实现了完整的伪造 TCP 协议栈喵！支持完整的 TCP 握手模拟与数据封包，让隧道流量在复杂的网络防火墙下也能如履平地。
+- **命令行 Fake-TCP 支持**: 为 `nekolink-cli` 增加了 `--fake-tcp` 开关，让高手们能手动开启伪装模式喵。
+- **控制平面 TCP 适配**: `nekolink-ctl` 现在能解析 `"mode": "tcp"` 并自动下发所有底层配置，让 TCP 模式像 UDP 一样平滑喵。
+- **交互脚本 3.0**: `nekolink` 交互菜单新增“TCP 伪装模式”选项，极地下配置门槛喵。
+
 ## [2.2.0] - 2026-01-28
 
 ### 新增功能 (Added)

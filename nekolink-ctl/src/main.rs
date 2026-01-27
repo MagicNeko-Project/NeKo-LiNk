@@ -70,6 +70,15 @@ async fn main() -> Result<()> {
                 println!("NekoLink Control Plane v{}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
             }
+            "mtu-probe" => {
+                if args.len() < 3 {
+                    eprintln!("用法: nekolink-ctl mtu-probe <endpoint> [mode]");
+                    std::process::exit(1);
+                }
+                let endpoint = &args[2];
+                let mode = args.get(3).map(|s| s.as_str()).unwrap_or("udp");
+                return probe_mtu_cmd(endpoint, mode).await;
+            }
             _ => {
                 eprintln!("喵？不支持的指令: '{}'。如果您想启动服务，请不要带参数喵。", args[1]);
                 std::process::exit(1);
@@ -180,6 +189,8 @@ async fn run_instance(config: NekoConfig) -> Result<()> {
         if let Some(proto) = config.ip_protocol {
             cmd.arg("--ip-protocol").arg(proto.to_string());
         }
+    } else if config.mode == "tcp" {
+        cmd.arg("--fake-tcp");
     }
     
     // 强制设置 MTU，默认 1420 喵
@@ -253,8 +264,8 @@ async fn run_instance(config: NekoConfig) -> Result<()> {
 }
 
 async fn start_signaling(state: NekoState) -> Result<()> {
-    let mode_is_ip = state.config.mode == "ip";
-    if mode_is_ip {
+    let mode_needs_raw = state.config.mode == "ip" || state.config.mode == "tcp";
+    if mode_needs_raw {
         start_raw_signaling(state).await
     } else {
         start_udp_signaling(state).await
@@ -660,4 +671,79 @@ async fn get_established_peers(interface: &str) -> std::collections::HashSet<Str
         }
     }
     established
+}
+async fn probe_mtu_cmd(endpoint: &str, mode: &str) -> Result<()> {
+    let host = if endpoint.contains(':') {
+        endpoint.split(':').next().unwrap()
+    } else {
+        endpoint
+    };
+
+    println!("正在探测到 {} 的 PMTU 魔法喵...", host);
+
+    let pmtu = match perform_mtu_probe(host).await {
+        Ok(val) => val,
+        Err(_) => {
+            println!("探测失败了喵，可能是对端禁用了 ICMP。使用保守默认值 1500 喵。");
+            1500
+        }
+    };
+
+    let overhead = match mode {
+        "ip" => 52,
+        "tcp" => 72,
+        _ => 60, // udp
+    };
+
+    let recommended = pmtu - overhead;
+    println!("探测完成：PMTU={}，建议 MTU={} (模式: {}) 喵！", pmtu, recommended, mode);
+    println!("RECOMMENDED_MTU={}", recommended);
+
+    Ok(())
+}
+
+async fn perform_mtu_probe(host: &str) -> Result<u16> {
+    // 使用 ping 二分法探测 PMTU
+    // Linux 下使用 -M do 禁止分片，-s 指定包大小 (不含 IP/ICMP 头 28 字节)
+    let mut low = 576;
+    let mut high = 1500;
+    let mut best = 1280;
+
+    // 快速检查 1500
+    if check_ping(host, 1500 - 28) {
+        return Ok(1500);
+    }
+
+    while low <= high {
+        let mid = (low + high) / 2;
+        if check_ping(host, mid - 28) {
+            best = mid;
+            low = mid + 1;
+        } else {
+            high = mid - 1;
+        }
+    }
+
+    Ok(best)
+}
+
+fn check_ping(host: &str, size: u16) -> bool {
+    let status = Command::new("ping")
+        .arg("-c")
+        .arg("1")
+        .arg("-W")
+        .arg("1")
+        .arg("-M")
+        .arg("do")
+        .arg("-s")
+        .arg(size.to_string())
+        .arg(host)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    match status {
+        Ok(s) => s.success(),
+        Err(_) => false,
+    }
 }

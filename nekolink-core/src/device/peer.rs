@@ -6,8 +6,9 @@ use socket2::{Domain, Protocol, Type};
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU32, Ordering};
 
-use crate::device::{AllowedIps, Error};
+use crate::device::{AllowedIps, Error, TransportMode};
 use crate::noise::{Tunn, TunnResult};
 
 #[derive(Default, Debug)]
@@ -24,6 +25,11 @@ pub struct Peer {
     endpoint: RwLock<Endpoint>,
     allowed_ips: AllowedIps<()>,
     preshared_key: Option<[u8; 32]>,
+    pub transport_mode: TransportMode,
+    pub tcp_seq: AtomicU32,
+    pub tcp_ack: AtomicU32,
+    pub local_ip: RwLock<Option<Ipv4Addr>>,
+    pub local_port: RwLock<u16>,
 }
 
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, Debug)]
@@ -57,6 +63,7 @@ impl Peer {
         endpoint: Option<SocketAddr>,
         allowed_ips: &[AllowedIP],
         preshared_key: Option<[u8; 32]>,
+        transport_mode: TransportMode,
     ) -> Peer {
         Peer {
             tunnel,
@@ -67,6 +74,11 @@ impl Peer {
             }),
             allowed_ips: allowed_ips.iter().map(|ip| (ip, ())).collect(),
             preshared_key,
+            transport_mode,
+            tcp_seq: AtomicU32::new(1000), // 起始序列号喵
+            tcp_ack: AtomicU32::new(0),
+            local_ip: RwLock::new(None),
+            local_port: RwLock::new(0),
         }
     }
 
@@ -117,9 +129,10 @@ impl Peer {
             .addr
             .expect("Attempt to connect to undefined endpoint");
 
-        let (sock_type, protocol) = match ip_protocol {
-            Some(p) => (Type::RAW, Protocol::from(i32::from(p))),
-            None => (Type::DGRAM, Protocol::UDP),
+        let (sock_type, protocol) = match self.transport_mode {
+            TransportMode::RawIp => (Type::RAW, Protocol::from(i32::from(ip_protocol.unwrap_or(141)))),
+            TransportMode::FakeTcp => (Type::RAW, Protocol::TCP),
+            TransportMode::Udp => (Type::DGRAM, Protocol::UDP),
         };
 
         let udp_conn = socket2::Socket::new(Domain::for_address(addr), sock_type, Some(protocol))?;
@@ -153,6 +166,13 @@ impl Peer {
             port=port,
             endpoint=?endpoint.addr.unwrap()
         );
+
+        if let Ok(local_addr) = udp_conn.local_addr() {
+            if let Some(addr_v4) = local_addr.as_socket_ipv4() {
+                *self.local_ip.write() = Some(*addr_v4.ip());
+                *self.local_port.write() = addr_v4.port();
+            }
+        }
 
         endpoint.conn = Some(udp_conn.try_clone().unwrap());
 
