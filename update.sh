@@ -17,11 +17,20 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 # 1. 清理旧势力
-echo -e "\n${CYAN}[1/5] 正在驱散旧的魔法能量（停止运行中的进程）...${NC}"
+echo -e "\n${CYAN}[1/6] 正在驱散旧的魔法能量（停止并清理遗留进程/服务）...${NC}"
 sudo pkill nekolink-ctl || true
 sudo pkill nekolink-cli || true
-# 预防性清理原始 boringtun 命名残留（如果有的话）
+# 预防性清理原始 boringtun 命名残留
 sudo pkill boringtun-cli || true
+
+# 清理旧版 neko-link.service (防止与新版 nekolink.service 冲突喵)
+if [ -f /etc/systemd/system/neko-link.service ]; then
+    echo -e "${CYAN}发现旧版 neko-link.service，正在强制驱逐喵...${NC}"
+    sudo systemctl stop neko-link.service || true
+    sudo systemctl disable neko-link.service || true
+    sudo rm -f /etc/systemd/system/neko-link.service
+    sudo systemctl daemon-reload
+fi
 
 # 2. 更新源代码
 echo -e "\n${CYAN}[2/5] 正在从星辰大海采集最新的魔法代码 (Git Pull)...${NC}"
@@ -47,6 +56,7 @@ cp target/release/nekolink-ctl /usr/local/bin/
 cp neko-link.sh /usr/local/bin/neko-link
 cp nekolink.service /etc/systemd/system/
 chmod +x /usr/local/bin/neko-link
+
 
 # 5. 重新赋予特权
 echo -e "\n${CYAN}[5/6] 正在为新核心注入超级权能 (SetCap)...${NC}"

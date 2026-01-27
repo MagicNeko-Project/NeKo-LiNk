@@ -5,6 +5,17 @@ set -e
 
 echo "正在准备安装 NekoLink..."
 
+# 0. 清理遗留配置 (Legacy Cleanup)
+echo "正在检查并清理旧版遗留配置..."
+# 清理可能存在的旧版 neko-link.service (注意：新版统一使用 nekolink.service)
+if [ -f /etc/systemd/system/neko-link.service ]; then
+    echo "发现旧版 neko-link.service，正在移除喵..."
+    sudo systemctl stop neko-link.service || true
+    sudo systemctl disable neko-link.service || true
+    sudo rm -f /etc/systemd/system/neko-link.service
+    sudo systemctl daemon-reload
+fi
+
 # 1. 编译
 cargo build --release
 
