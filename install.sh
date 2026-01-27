@@ -7,7 +7,12 @@ echo "正在准备安装 NekoLink..."
 
 # 0. 清理遗留配置 (Legacy Cleanup)
 echo "正在检查并清理旧版遗留配置..."
-# 清理可能存在的旧版 neko-link.service (注意：新版统一使用 nekolink.service)
+# 停止现有服务，解决覆盖安装时的 Text file busy 喵
+sudo systemctl stop nekolink || true
+sudo pkill -9 nekolink-ctl || true
+sudo pkill -9 nekolink-cli || true
+
+# 清理可能存在的旧版 neko-link.service
 if [ -f /etc/systemd/system/neko-link.service ]; then
     echo "发现旧版 neko-link.service，正在移除喵..."
     sudo systemctl stop neko-link.service || true
@@ -20,6 +25,7 @@ fi
 cargo build --release
 
 # 2. 安装二进制文件与管理脚本
+sudo rm -f /usr/local/bin/nekolink-cli /usr/local/bin/nekolink-ctl
 sudo cp target/release/nekolink-cli /usr/local/bin/
 sudo cp target/release/nekolink-ctl /usr/local/bin/
 sudo cp neko-link.sh /usr/local/bin/neko-link
