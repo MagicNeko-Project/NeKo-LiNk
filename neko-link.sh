@@ -22,9 +22,10 @@ function show_menu() {
     echo -e "${CYAN}请选择操作：${NC}"
     echo "1. 创建新配置文件 (Node Config)"
     echo "2. 启动 NekoLink (nekolink-ctl)"
-    echo "3. 查看当前配置"
-    echo "4. 退出"
-    read -p "请输入数字 [1-4]: " choice
+    echo "3. 查看运行状态 (Status)"
+    echo "4. 查看配置文件列表"
+    echo "5. 退出"
+    read -p "请输入数字 [1-5]: " choice
 }
 
 function create_config() {
@@ -127,8 +128,9 @@ while true; do
     case $choice in
         1) create_config ;;
         2) nekolink-ctl ;;
-        3) ls -l "$CONFIG_DIR"/*.json ;;
-        4) exit 0 ;;
+        3) nekolink-ctl status ;;
+        4) ls -l "$CONFIG_DIR"/*.json ;;
+        5) exit 0 ;;
         *) echo "无效选择喵！" ;;
     esac
 done
