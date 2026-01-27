@@ -8,8 +8,8 @@
 
 ## 🌟 Core Features
 
-- **🚀 Custom IP Protocol (Raw IP Mode)**: Break free from UDP (Protocol 17) throttling and identification! You can communicate directly using any IP protocol number between 1 and 255. Firewalls won't even know what hit them!
-- **🤝 Automated Key Exchange**: No more manually copying and pasting long public keys. As long as the Pre-Shared Keys (PSK) match, NekoLink will automatically exchange WireGuard public keys via an encrypted signaling channel.
+- **🚀 Custom IP Protocol (Raw IP Mode)**: Break free from UDP (Protocol 17) throttling and identification! You can communicate directly using any IP protocol number between 1 and 255. In this mode, **NekoLink is 100% UDP-free**, as even the signaling/key-exchange is performed over Raw IP. Firewalls won't even know what hit them!
+- **🤝 Automated Key Exchange**: No more manually copying and pasting long public keys. As long as the Pre-Shared Keys (PSK) match, NekoLink will automatically exchange WireGuard public keys via an encrypted signaling channel. In IP mode, this channel automatically reuses your `ip_protocol`.
 - **🎮 Interactive Config Helper (`neko-link`)**: A user-friendly wizard that guides you through server/client setup and generates JSON configurations automatically.
 - **🛡️ Routing Safety (Table=off Logic)**: By default, NekoLink does not modify the system routing table. This prevents total connectivity loss caused by aggressive `0.0.0.0/0` configurations.
 - **🦀 Pure Rust Implementation**: From the core driver to the control plane, everything is written in Rust for memory safety and blazing-fast performance.
@@ -80,13 +80,14 @@ Manual configurations are stored in `/etc/neko-link/*.json`.
 | Parameter | Description | Recommended |
 | :--- | :--- | :--- |
 | `interface` | Virtual network interface name | Default: `nekotun0` |
-| `mode` | `ip` (Raw IP) or `udp` | Use `ip` to bypass UDP blocks |
+| `mode` | `ip` (Raw IP) or `udp` (Standard Mode). Used for both **Data and Signaling**. | Use `ip` to bypass UDP blocks |
 | `ip_protocol`| Protocol number for Raw IP mode | Use 143-252 for experimentation |
 | `listen_port` | WireGuard listen port (UDP mode) | Set to `null` in `ip` mode |
 | `auto_route` | Modify system routing table? | Default `false` for safety |
 | `local_address`| Tunnel internal IP (CIDR) | e.g., `10.0.0.1/24` |
-| `psk` | Pre-Shared Key for signaling | Must match on both ends! |
-| `signal_port` | **Signaling Port** (UDP) | Used for the initial key exchange |
+| `psk` | Pre-Shared Key for automated signaling | Must match on both ends! |
+| `peers` | Peer information. In `ip` mode, just use the **Public IP** (e.g., `1.2.3.4`). NekoLink will use Raw IP for everything—**100% UDP-free!** In `udp` mode, use `IP:Port`. | e.g., `{"endpoint": "1.2.3.4"}` |
+| `signal_port` | **Signaling Port** (UDP) | Only used in `udp` mode. Ignored in `ip` mode. |
 
 ---
 

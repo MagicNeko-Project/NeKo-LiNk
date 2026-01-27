@@ -40,11 +40,15 @@ function create_config() {
 
     if [ "$role_choice" == "1" ]; then
         role="server"
-        echo -e "${PINK}提示：作为服务端，请确保你的信令端口 (UDP) 和数据协议号在防火墙已放行喵！${NC}"
+        echo -e "${PINK}提示：作为服务端，请确保你的信令通道和数据协议号在防火墙已放行喵！${NC}"
         endpoint=""
     else
         role="client"
-        read -p "请输入服务端的公网端点 ( IP:协议端口, e.g. 1.2.3.4:5678 ): " endpoint
+        if [ "$mode" == "ip" ]; then
+            read -p "请输入服务端的公网 IP ( e.g. 1.2.3.4 ): " endpoint
+        else
+            read -p "请输入服务端的公网端点 ( IP:信令端口, e.g. 1.2.3.4:5678 ): " endpoint
+        fi
         while [ -z "$endpoint" ]; do
             read -p "客户端必须指定对端地址喵！请重新输入: " endpoint
         done
@@ -72,15 +76,19 @@ function create_config() {
     read -p "请输入预共享密钥 (PSK, 用于自动交换公钥，两端必须一致): " psk
     [ -z "$psk" ] && psk="NekoMagic_Default_PSK"
 
-    read -p "是否自动配置系统路由？(默认 n: 仅设置 AllowedIPs, 不修改系统路由表防止断连) [y/n]: " auto_route_choice
+    read -p "是否自动配置系统路由？(默认 n) [y/n]: " auto_route_choice
     if [ "$auto_route_choice" == "y" ]; then
         auto_route="true"
     else
         auto_route="false"
     fi
 
-    read -p "请输入信令交换端口 ( 默认 5678 ): " sig_port
-    [ -z "$sig_port" ] && sig_port=5678
+    if [ "$mode" == "udp" ]; then
+        read -p "请输入信令交换端口 ( 默认 5678 ): " sig_port
+        [ -z "$sig_port" ] && sig_port=5678
+    else
+        sig_port=0 # IP 模式下不使用 UDP 端口
+    fi
 
     # 构建 JSON
     json_path="$CONFIG_DIR/$iface.json"
