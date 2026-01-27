@@ -66,7 +66,14 @@ async fn main() -> Result<()> {
                 println!("Public Key:  {}", BASE64.encode(pub_key.as_bytes()));
                 return Ok(());
             }
-            _ => {}
+            "version" => {
+                println!("NekoLink Control Plane v{}", env!("CARGO_PKG_VERSION"));
+                return Ok(());
+            }
+            _ => {
+                eprintln!("喵？不支持的指令: '{}'。如果您想启动服务，请不要带参数喵。", args[1]);
+                std::process::exit(1);
+            }
         }
     }
 
