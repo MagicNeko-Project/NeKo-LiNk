@@ -1,5 +1,5 @@
 [workspace]
-members = ["boringtun", "boringtun-cli"]
+members = ["nekolink-core", "nekolink-cli", "nekolink-ctl"]
 
 [profile.release]
 lto = true        # Enable full link-time optimization.

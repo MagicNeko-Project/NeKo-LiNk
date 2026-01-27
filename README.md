@@ -38,9 +38,11 @@ By default the executable is placed in the `./target/release` folder. You can co
 
 As per the specification, to start a tunnel use:
 
-`boringtun-cli [-f/--foreground] INTERFACE-NAME`
+`boringtun-cli [-f/--foreground] [--ip-protocol PROTOCOL_NUMBER] INTERFACE-NAME`
 
 The tunnel can then be configured using [wg](https://git.zx2c4.com/WireGuard/about/src/tools/man/wg.8), as a regular WireGuard tunnel, or any other tool.
+
+Note: Using `--ip-protocol` allows the tunnel to communicate directly using a specified IP protocol number instead of UDP. This requires `CAP_NET_RAW` or root privileges.
 
 It is also possible to use with [wg-quick](https://git.zx2c4.com/WireGuard/about/src/tools/man/wg-quick.8) by setting the environment variable `WG_QUICK_USERSPACE_IMPLEMENTATION` to `boringtun`. For example:
 

@@ -105,6 +105,7 @@ impl Peer {
         &self,
         port: u16,
         fwmark: Option<u32>,
+        ip_protocol: Option<u8>,
     ) -> Result<socket2::Socket, Error> {
         let mut endpoint = self.endpoint.write();
 
@@ -116,8 +117,12 @@ impl Peer {
             .addr
             .expect("Attempt to connect to undefined endpoint");
 
-        let udp_conn =
-            socket2::Socket::new(Domain::for_address(addr), Type::DGRAM, Some(Protocol::UDP))?;
+        let (sock_type, protocol) = match ip_protocol {
+            Some(p) => (Type::RAW, Protocol::from(i32::from(p))),
+            None => (Type::DGRAM, Protocol::UDP),
+        };
+
+        let udp_conn = socket2::Socket::new(Domain::for_address(addr), sock_type, Some(protocol))?;
         udp_conn.set_reuse_address(true)?;
         let bind_addr = if addr.is_ipv4() {
             SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port).into()
