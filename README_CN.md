@@ -64,3 +64,7 @@ nekolink-ctl
 2. **权限**: `install.sh` 已经处理好了权限，通常不需要以 root 运行，但由于涉及网卡操作，建议还是使用 `sudo nekolink-ctl` 喵。
 
 祝你的网络之旅像猫娘一样轻盈喵！( ⸝⸝•ᴗ•⸝⸝ )੭⁾⁾
+
+---
+
+**注**：本项目基于原始项目 [Boringtun](https://github.com/cloudflare/boringtun) 修改喵。
