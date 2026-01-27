@@ -26,12 +26,142 @@ mkdir -p "$CONFIG_DIR"
 function show_menu() {
     echo -e "${CYAN}请选择操作：${NC}"
     echo "1. 创建新配置文件 (Node Config)"
-    echo "2. 重启 NekoLink 服务 (Systemd Restart)"
-    echo "3. 查看运行状态 (Status)"
-    echo "4. 管理密钥与公钥 (Key Management)"
-    echo "5. 查看配置文件列表"
-    echo "6. 退出"
-    read -p "请输入数字 [1-6]: " choice
+    echo "2. 修改现有配置文件 (Edit Config)"
+    echo "3. 重启 NekoLink 服务 (Systemd Restart)"
+    echo "4. 查看运行状态 (Status)"
+    echo "5. 管理密钥与公钥 (Key Management)"
+    echo "6. 查看配置文件列表"
+    echo "7. 退出"
+    read -p "请输入数字 [1-7]: " choice
+}
+
+function edit_config() {
+    echo -e "\n${PINK}--- 正在进入配置修改魔法 ---${NC}"
+    configs=("$CONFIG_DIR"/*.json)
+    if [ ! -e "${configs[0]}" ]; then
+        echo -e "${RED}喵？没有找到任何配置文件。${NC}"
+        return
+    fi
+
+    echo -e "${CYAN}现有的配置文件列表：${NC}"
+    for i in "${!configs[@]}"; do
+        echo "$((i+1)). $(basename "${configs[$i]}")"
+    done
+    read -p "请选择要修改的配置编号: " cfg_idx
+    
+    selected_cfg="${configs[$((cfg_idx-1))]}"
+    if [ -z "$selected_cfg" ] || [ ! -f "$selected_cfg" ]; then
+        echo -e "${RED}无效的选择喵！${NC}"
+        return
+    fi
+
+    iface=$(jq -r '.interface' "$selected_cfg")
+    echo -e "${PINK}正在修改接口: $iface${NC}"
+
+    # 提取现有值
+    curr_mode=$(jq -r '.mode' "$selected_cfg")
+    curr_proto=$(jq -r '.ip_protocol // 141' "$selected_cfg")
+    curr_lport=$(jq -r '.listen_port // 51820' "$selected_cfg")
+    curr_addr=$(jq -r '.local_address' "$selected_cfg")
+    curr_psk=$(jq -r '.psk' "$selected_cfg")
+    curr_aroute=$(jq -r '.auto_route' "$selected_cfg")
+    curr_ka=$(jq -r '.persistent_keepalive // "null"' "$selected_cfg")
+    curr_mtu=$(jq -r '.mtu // "null"' "$selected_cfg")
+    curr_mss=$(jq -r '.clamp_mss' "$selected_cfg")
+    curr_sig=$(jq -r '.signal_port // 0' "$selected_cfg")
+    curr_ep=$(jq -r '.peers[0].endpoint // empty' "$selected_cfg")
+
+    # 交互式修改
+    read -p "传输模式 (当前: $curr_mode, [1] ip, [2] udp, 直接回车保持不变): " m_choice
+    case "$m_choice" in
+        1) mode="ip" ;;
+        2) mode="udp" ;;
+        *) mode="$curr_mode" ;;
+    esac
+
+    if [ "$mode" == "ip" ]; then
+        read -p "IP 协议号 (当前: $curr_proto, 直接回车保持不变): " proto
+        [ -z "$proto" ] && proto=$curr_proto
+        listen_port="null"
+    else
+        read -p "WireGuard 监听端口 (当前: $curr_lport, 直接回车保持不变): " listen_port
+        [ -z "$listen_port" ] && listen_port=$curr_lport
+        proto="null"
+    fi
+
+    read -p "本地隧道 IP (当前: $curr_addr, 直接回车保持不变): " local_addr
+    [ -z "$local_addr" ] && local_addr="$curr_addr"
+
+    read -p "对端 Endpoint (当前: $curr_ep, 直接回车保持不变): " endpoint
+    [ -z "$endpoint" ] && endpoint="$curr_ep"
+
+    read -p "Keepalive 间隔 (当前: $curr_ka, 直接回车保持不变): " keepalive
+    [ -z "$keepalive" ] && keepalive=$curr_ka
+
+    read -p "MTU (当前: $curr_mtu, 直接回车保持不变): " mtu
+    [ -z "$mtu" ] && mtu=$curr_mtu
+
+    read -p "开启 MSS 修复? (当前: $curr_mss, [y/n], 直接回车保持不变): " mss_c
+    case "$mss_c" in
+        y) clamp_mss="true" ;;
+        n) clamp_mss="false" ;;
+        *) clamp_mss="$curr_mss" ;;
+    esac
+
+    read -p "预共享密钥 PSK (当前: $curr_psk, 直接回车保持不变): " psk
+    [ -z "$psk" ] && psk="$curr_psk"
+
+    read -p "自动系统路由? (当前: $curr_aroute, [y/n], 直接回车保持不变): " ar_c
+    case "$ar_c" in
+        y) auto_route="true" ;;
+        n) auto_route="false" ;;
+        *) auto_route="$curr_aroute" ;;
+    esac
+
+    if [ "$mode" == "udp" ]; then
+        read -p "信令端口 (当前: $curr_sig, 直接回车保持不变): " sig_port
+        [ -z "$sig_port" ] && sig_port=$curr_sig
+    else
+        sig_port=0
+    fi
+
+    # 使用 jq 构建新 JSON 并覆盖
+    tmp_cfg=$(mktemp)
+    jq -n \
+        --arg iface "$iface" \
+        --arg mode "$mode" \
+        --argjson proto "$proto" \
+        --argjson listen_port "$listen_port" \
+        --argjson auto_route "$auto_route" \
+        --argjson keepalive "$keepalive" \
+        --argjson mtu "$mtu" \
+        --argjson clamp_mss "$clamp_mss" \
+        --arg addr "$local_addr" \
+        --arg psk "$psk" \
+        --arg ep "$endpoint" \
+        --argjson sig "$sig_port" \
+        '{
+            interface: $iface,
+            mode: $mode,
+            ip_protocol: $proto,
+            listen_port: $listen_port,
+            auto_route: $auto_route,
+            persistent_keepalive: $keepalive,
+            mtu: $mtu,
+            clamp_mss: $clamp_mss,
+            local_address: $addr,
+            psk: $psk,
+            peers: (if $ep != "" then [{endpoint: $ep}] else [] end),
+            signal_port: $sig
+        }' > "$tmp_cfg"
+    
+    mv "$tmp_cfg" "$selected_cfg"
+    echo -e "${PINK}配置更新成功喵！${NC}"
+    read -p "是否立即重启服务以应用新配置？(y/n, 默认 n): " restart_now
+    if [ "$restart_now" == "y" ]; then
+        systemctl restart nekolink
+        echo -e "${PINK}服务已重启喵！${NC}"
+    fi
 }
 
 function create_config() {
@@ -194,15 +324,16 @@ while true; do
     show_menu
     case $choice in
         1) create_config ;;
-        2) 
+        2) edit_config ;;
+        3) 
             echo -e "${PINK}正在通过 Systemd 重启 NekoLink 魔法...${NC}"
             systemctl restart nekolink
-            echo -e "${PINK}重启指令已发送喵！可以使用选项 3 查看最新状态。${NC}"
+            echo -e "${PINK}重启指令已发送喵！可以使用选项 4 查看最新状态。${NC}"
             ;;
-        3) nekolink status ;;
-        4) manage_keys ;;
-        5) ls -l "$CONFIG_DIR"/*.json ;;
-        6) exit 0 ;;
+        4) nekolink status ;;
+        5) manage_keys ;;
+        6) ls -l "$CONFIG_DIR"/*.json ;;
+        7) exit 0 ;;
         *) echo "无效选择喵！" ;;
     esac
 done
