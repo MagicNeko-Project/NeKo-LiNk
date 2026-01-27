@@ -7,12 +7,13 @@ use chacha20poly1305::{
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{IpAddr, SocketAddr};
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time;
 use x25519_dalek::{PublicKey, StaticSecret};
+use socket2::{Domain, Protocol, Socket, Type};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct PeerConfig {
@@ -153,24 +154,20 @@ async fn run_instance(config: NekoConfig) -> Result<()> {
 }
 
 async fn start_signaling(state: NekoState) -> Result<()> {
-    let socket = UdpSocket::bind(format!("0.0.0.0:{}", state.config.signal_port))?;
-    socket.set_nonblocking(true)?;
-    let socket = Arc::new(tokio::net::UdpSocket::from_std(socket)?);
+    let mode_is_ip = state.config.mode == "ip";
+    if mode_is_ip {
+        start_raw_signaling(state).await
+    } else {
+        start_udp_signaling(state).await
+    }
+}
 
-    let mut psk_bytes = [0u8; 32];
-    let salt = b"NekoLink_Magic_Salt";
-    // 简单的派生 key 逻辑
-    let mut hasher = blake2::Blake2s256::new();
-    use blake2::Digest;
-    hasher.update(state.config.psk.as_bytes());
-    hasher.update(salt);
-    let derived_key = hasher.finalize();
-    psk_bytes.copy_from_slice(&derived_key);
+async fn start_udp_signaling(state: NekoState) -> Result<()> {
+    let std_socket = std::net::UdpSocket::bind(format!("0.0.0.0:{}", state.config.signal_port))?;
+    std_socket.set_nonblocking(true)?;
+    let socket = Arc::new(tokio::net::UdpSocket::from_std(std_socket)?);
+    let cipher = derive_cipher(&state.config.psk);
 
-    let cipher = ChaCha20Poly1305::new(&psk_bytes.into());
-
-
-    // 定时向外广播/发送自己的公钥
     let send_task = {
         let config = state.config.clone();
         let socket = Arc::clone(&socket);
@@ -179,14 +176,15 @@ async fn start_signaling(state: NekoState) -> Result<()> {
         async move {
             loop {
                 for peer in &config.peers {
-                    let mut nonce_bytes = [0u8; 12];
-                    OsRng.fill_bytes(&mut nonce_bytes);
-                    let nonce = Nonce::from_slice(&nonce_bytes);
-
-                    if let Ok(ciphertext) = cipher.encrypt(nonce, pub_key_bytes.as_slice()) {
-                        let mut pkt = nonce_bytes.to_vec();
-                        pkt.extend_from_slice(&ciphertext);
-                        let _ = socket.send_to(&pkt, &peer.endpoint).await;
+                    if let Ok(addr) = peer.endpoint.parse::<SocketAddr>() {
+                        let mut nonce_bytes = [0u8; 12];
+                        OsRng.fill_bytes(&mut nonce_bytes);
+                        let nonce = Nonce::from_slice(&nonce_bytes);
+                        if let Ok(ciphertext) = cipher.encrypt(nonce, pub_key_bytes.as_slice()) {
+                            let mut pkt = nonce_bytes.to_vec();
+                            pkt.extend_from_slice(&ciphertext);
+                            let _ = socket.send_to(&pkt, addr).await;
+                        }
                     }
                 }
                 time::sleep(Duration::from_secs(10)).await;
@@ -194,27 +192,24 @@ async fn start_signaling(state: NekoState) -> Result<()> {
         }
     };
 
-    // 接收任务
     let recv_task = {
         let socket = Arc::clone(&socket);
         let interface = state.config.interface.clone();
+        let cipher = cipher.clone();
         async move {
             let mut known_peers = std::collections::HashSet::new();
             loop {
                 let mut buf = [0u8; 1024];
                 if let Ok((len, addr)) = socket.recv_from(&mut buf).await {
-                    if len < 12 + 16 {
-                        continue;
-                    }
+                    if len < 12 + 16 { continue; }
                     let (nonce_part, encrypted_part) = buf[..len].split_at(12);
                     let nonce = Nonce::from_slice(nonce_part);
                     if let Ok(decrypted) = cipher.decrypt(nonce, encrypted_part) {
                         if decrypted.len() == 32 {
                             let peer_pub_key = BASE64.encode(&decrypted);
                             if !known_peers.contains(&peer_pub_key) {
-                                println!("喵！发现新队友: {} 来自 {}", peer_pub_key, addr);
-                                // 配置 WireGuard 队友
-                                if let Ok(_) = configure_peer(&interface, &peer_pub_key, &addr) {
+                                println!("喵！发现新队友 (UDP): {} 来自 {}", peer_pub_key, addr);
+                                if let Ok(_) = configure_peer(&interface, &peer_pub_key, addr.to_string()) {
                                     known_peers.insert(peer_pub_key);
                                 }
                             }
@@ -230,17 +225,110 @@ async fn start_signaling(state: NekoState) -> Result<()> {
         _ = send_task => {},
         _ = recv_task => {},
     }
-
     Ok(())
 }
 
-fn configure_peer(interface: &str, peer_pub_key: &str, addr: &SocketAddr) -> Result<()> {
-    // 假设 WireGuard 端口比信令端口大 1 或者你可以自定义。这里简单起见，如果 mode=ip 则不需要对端端口。
-    // 如果是 UDP 模式，通常加密流量和信令流量在不同端口。
-    // 我们这里假设对端启动的是 WireGuard 标准监听端口。
-    
+async fn start_raw_signaling(state: NekoState) -> Result<()> {
+    let proto = state.config.ip_protocol.unwrap_or(141);
+    let socket = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::from(proto as i32)))?;
+    socket.set_nonblocking(true)?;
+    let socket = Arc::new(tokio::io::unix::AsyncFd::new(socket)?);
+    let cipher = derive_cipher(&state.config.psk);
+    let magic_byte: u8 = 0x99;
+
+    let send_task = {
+        let config = state.config.clone();
+        let socket = Arc::clone(&socket);
+        let cipher = cipher.clone();
+        let pub_key_bytes = state.pub_key.as_bytes().to_vec();
+        async move {
+            loop {
+                for peer in &config.peers {
+                    if let Ok(ip) = peer.endpoint.parse::<IpAddr>() {
+                        let mut nonce_bytes = [0u8; 12];
+                        OsRng.fill_bytes(&mut nonce_bytes);
+                        let nonce = Nonce::from_slice(&nonce_bytes);
+                        if let Ok(ciphertext) = cipher.encrypt(nonce, pub_key_bytes.as_slice()) {
+                            let mut pkt = vec![magic_byte];
+                            pkt.extend_from_slice(&nonce_bytes);
+                            pkt.extend_from_slice(&ciphertext);
+                            
+                            let addr = socket2::SockAddr::from(SocketAddr::new(ip, 0));
+                            if let Ok(mut guard) = socket.writable().await {
+                                let _ = guard.try_io(|s| s.get_ref().send_to(&pkt, &addr));
+                            }
+                        }
+                    }
+                }
+                time::sleep(Duration::from_secs(10)).await;
+            }
+        }
+    };
+
+    let recv_task = {
+        let socket = Arc::clone(&socket);
+        let interface = state.config.interface.clone();
+        let cipher = cipher.clone();
+        async move {
+            let mut known_peers = std::collections::HashSet::new();
+            loop {
+                let mut buf = [0u8; 1024];
+                if let Ok(mut guard) = socket.readable().await {
+                    let res = guard.try_io(|s| {
+                        s.get_ref().recv_from(unsafe { &mut *(buf.as_mut_slice() as *mut [u8] as *mut [std::mem::MaybeUninit<u8>]) })
+                    });
+                    
+                    if let Ok(Ok((len, addr))) = res {
+                        // Linux Raw sockets include IP header (usually 20 bytes)
+                        let offset = if len >= 20 && (buf[0] & 0xf0) == 0x40 { 20 } else { 0 };
+                        if len < offset + 1 + 12 + 16 { continue; }
+                        let data = &buf[offset..len];
+                        if data[0] != magic_byte { continue; }
+                        
+                        let nonce = Nonce::from_slice(&data[1..13]);
+                        let encrypted_part = &data[13..];
+                        if let Ok(decrypted) = cipher.decrypt(nonce, encrypted_part) {
+                            if decrypted.len() == 32 {
+                                let peer_pub_key = BASE64.encode(&decrypted);
+                                if !known_peers.contains(&peer_pub_key) {
+                                    let ip_str = addr.as_socket().map(|s: SocketAddr| s.ip().to_string()).unwrap_or_else(|| "unknown".to_string());
+                                    println!("喵！发现新队友 (Raw IP): {} 来自 {}", peer_pub_key, ip_str);
+                                    let wg_endpoint = format!("{}:1", ip_str);
+                                    if let Ok(_) = configure_peer(&interface, &peer_pub_key, wg_endpoint) {
+                                        known_peers.insert(peer_pub_key);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    };
+
+    tokio::select! {
+        _ = send_task => {},
+        _ = recv_task => {},
+    }
+    Ok(())
+}
+
+fn derive_cipher(psk: &str) -> ChaCha20Poly1305 {
+    let mut psk_bytes = [0u8; 32];
+    let salt = b"NekoLink_Magic_Salt";
+    let mut hasher = blake2::Blake2s256::new();
+    use blake2::Digest;
+    hasher.update(psk.as_bytes());
+    hasher.update(salt);
+    let derived_key = hasher.finalize();
+    psk_bytes.copy_from_slice(&derived_key);
+    ChaCha20Poly1305::new(&psk_bytes.into())
+}
+
+fn configure_peer(interface: &str, peer_pub_key: &str, endpoint: String) -> Result<()> {
     // 这里是一个简化的逻辑：将对端加入状态机
-    run_cmd(&format!("wg set {} peer {} allowed-ips 0.0.0.0/0,::/0 endpoint {}", interface, peer_pub_key, addr))?;
+    run_cmd(&format!("wg set {} peer {} allowed-ips 0.0.0.0/0,::/0 endpoint {}", interface, peer_pub_key, endpoint))?;
     println!("配置队友 {} 成功喵！", peer_pub_key);
     Ok(())
 }
