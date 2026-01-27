@@ -753,9 +753,15 @@ impl Device {
 
                     let mut flush = false;
                     let mut p = peer.lock();
+                    let data = &t.src_buf[offset..read_bytes];
+                    if !data.is_empty() && data[0] == 0x99 {
+                        // Silently ignore signaling packets
+                        continue;
+                    }
+
                     match p.tunnel.decapsulate(
                         Some(peer_addr),
-                        &t.src_buf[offset..read_bytes],
+                        data,
                         &mut t.dst_buf[..],
                     ) {
                         TunnResult::Done => {}

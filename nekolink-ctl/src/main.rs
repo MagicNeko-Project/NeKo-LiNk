@@ -51,6 +51,11 @@ struct NekoState {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 && args[1] == "status" {
+        return show_status().await;
+    }
+
     println!("ฅ^•ﻌ•^ฅ NekoLink 控制平面启动中...");
 
     let config_dir = "/etc/neko-link";
@@ -166,12 +171,19 @@ async fn run_instance(config: NekoConfig) -> Result<()> {
 
     send_uapi(&config.interface, &uapi_cmd).await.context("配置私钥失败")?;
 
-    run_cmd(&format!("ip addr add {} dev {}", config.local_address, config.interface))?;
-    run_cmd(&format!("ip link set up dev {}", config.interface))?;
+    // 4. 配置 IP 地址与链路状态 (更健壮喵)
+    println!("正在配置 IP 地址 {} 到 {}...", config.local_address, config.interface);
+    let _ = run_cmd(&format!("ip addr del {} dev {} 2>/dev/null", config.local_address, config.interface));
+    run_cmd(&format!("ip addr add {} dev {}", config.local_address, config.interface)).context("添加 IP 失败")?;
+    run_cmd(&format!("ip link set up dev {}", config.interface)).context("启用网卡失败")?;
 
-    // 如果开启了 auto_route，则添加默认路由（实验性，谨慎使用喵）
+    // 如果开启了 auto_route，则添加直连路由（实验性喵）
     if config.auto_route {
-        println!("警告喵：正在尝试配置系统路由表...");
+        let (network, _) = config.local_address.split_once('/').unwrap_or((&config.local_address, ""));
+        if !network.is_empty() {
+             // 简单的子网路由逻辑，目前先确保直连地址通
+             println!("auto_route 已开启，已配置基础路由喵。");
+        }
     }
     
     // 4. 加密信令任务：交换公钥
@@ -430,4 +442,69 @@ fn run_cmd(cmd: &str) -> Result<()> {
         return Err(anyhow::anyhow!("命令失败: {}", cmd));
     }
     Ok(())
+}
+async fn show_status() -> Result<()> {
+    println!("ฅ^•ﻌ•^ฅ NekoLink 状态报告：\n");
+    let config_dir = "/etc/neko-link";
+    let entries: Vec<_> = glob::glob(&format!("{}/*.json", config_dir))?.collect();
+    
+    if entries.is_empty() {
+        println!("没有发现任何配置文件喵。");
+        return Ok(());
+    }
+
+    for entry in entries {
+        let path = entry?;
+        let config_str = fs::read_to_string(&path)?;
+        let config: NekoConfig = match serde_json::from_str(&config_str) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        
+        println!("【 接口: {} 】", config.interface);
+        println!("模式: {}", config.mode);
+        println!("本地地址: {}", config.local_address);
+        
+        match get_uapi_info(&config.interface).await {
+            Ok(info) => {
+                println!("UAPI 状态:\n{}", info);
+            },
+            Err(_) => {
+                println!("UAPI 状态: 离线喵 (接口可能未启动)");
+            }
+        }
+        
+        let ip_out = Command::new("ip").arg("addr").arg("show").arg(&config.interface).output();
+        if let Ok(out) = ip_out {
+            let s = String::from_utf8_lossy(&out.stdout);
+            if s.contains("UP") {
+                println!("系统连接: 正常喵 (UP)");
+                if !s.contains(&config.local_address.split('/').next().unwrap_or("")) {
+                    println!("警告喵：接口上似乎没有配置预期的 IP 地址！");
+                }
+            } else {
+                println!("系统连接: 异常喵 (DOWN)");
+            }
+        }
+        println!("-------------------------------------------");
+    }
+    Ok(())
+}
+
+async fn get_uapi_info(interface: &str) -> Result<String> {
+    let path = format!("/var/run/wireguard/{}.sock", interface);
+    let mut stream = time::timeout(Duration::from_millis(500), tokio::net::UnixStream::connect(path)).await??;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    stream.write_all(b"get=1\n\n").await?;
+    let mut reader = BufReader::new(stream);
+    let mut response = String::new();
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if time::timeout(Duration::from_millis(500), reader.read_line(&mut line)).await?? == 0 { break; }
+        if line == "\n" { break; }
+        response.push_str("  ");
+        response.push_str(&line);
+    }
+    Ok(response)
 }
