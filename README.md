@@ -34,8 +34,15 @@ chmod +x install.sh
 sudo ./install.sh
 ```
 
-> [!NOTE]
-> The script installs binaries and helpers to `/usr/local/bin` and sets the necessary Network Capabilities (CAP_NET_ADMIN, CAP_NET_RAW) for non-root usage.
+### ⛵ Smooth Update
+To update an existing installation without losing your configurations, use the dedicated upgrade script:
+```bash
+chmod +x update.sh
+sudo ./update.sh
+```
+
+> [!TIP]
+> The update script automatically handles process termination and preserves everything in `/etc/neko-link/`. It also fetches the latest code from the repository.
 
 ---
 

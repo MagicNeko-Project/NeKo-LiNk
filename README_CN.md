@@ -34,8 +34,15 @@ chmod +x install.sh
 sudo ./install.sh
 ```
 
-> [!NOTE]
-> 安装脚本会自动将二进制文件和管理脚本放入 `/usr/local/bin`，并为它们设置必要的 Network Capabilities 权限喵。
+### ⛵ 平滑升级 (Update)
+如果主人已经安装过 NekoLink，可以使用专门的升级脚本来平滑更新，它会自动帮你处理残留进程并拉取最新代码喵：
+```bash
+chmod +x update.sh
+sudo ./update.sh
+```
+
+> [!TIP]
+> 升级脚本会温柔地保留你在 `/etc/neko-link/` 下的所有配置，请放心使用喵！
 
 ---
 
