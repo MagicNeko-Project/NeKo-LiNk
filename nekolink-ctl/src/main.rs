@@ -129,6 +129,7 @@ async fn run_instance(config: NekoConfig) -> Result<()> {
     // 2. 启动 nekolink-cli
     let mut cmd = Command::new("nekolink-cli");
     cmd.arg("-f").arg(&config.interface);
+    cmd.arg("--disable-drop-privileges");
     if config.mode == "ip" {
         if let Some(proto) = config.ip_protocol {
             cmd.arg("--ip-protocol").arg(proto.to_string());

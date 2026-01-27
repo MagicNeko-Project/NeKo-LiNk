@@ -65,7 +65,7 @@ pub fn drop_privileges() -> Result<(), Error> {
     }
 
     // Validated we can't get sudo back again
-    if unsafe { (setgid(0) != -1) || (setuid(0) != -1) } {
+    if saved_uid != 0 && saved_gid != 0 && unsafe { (setgid(0) != -1) || (setuid(0) != -1) } {
         Err(Error::DropPrivileges(
             "Failed to permanently drop privileges".to_owned(),
         ))
