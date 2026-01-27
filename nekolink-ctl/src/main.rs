@@ -35,6 +35,7 @@ struct NekoConfig {
     #[serde(default)]
     auto_route: bool,
     pub persistent_keepalive: Option<u16>,
+    pub mtu: Option<u16>,
 }
 
 fn default_mode() -> String {
@@ -172,6 +173,9 @@ async fn run_instance(config: NekoConfig) -> Result<()> {
         }
     }
     
+    // 强制设置 MTU，默认 1420 喵
+    let mtu = config.mtu.unwrap_or(1420);
+    
     let mut child = cmd.spawn().context("启动 nekolink-cli 失败")?;
 
     // 等待接口创建
@@ -190,6 +194,7 @@ async fn run_instance(config: NekoConfig) -> Result<()> {
     println!("正在配置 IP 地址 {} 到 {}...", config.local_address, config.interface);
     let _ = run_cmd(&format!("ip addr del {} dev {} 2>/dev/null", config.local_address, config.interface));
     run_cmd(&format!("ip addr add {} dev {}", config.local_address, config.interface)).context("添加 IP 失败")?;
+    run_cmd(&format!("ip link set mtu {} dev {}", mtu, config.interface)).context("设置 MTU 失败")?;
     run_cmd(&format!("ip link set up dev {}", config.interface)).context("启用网卡失败")?;
 
     // 如果开启了 auto_route，则添加直连路由（实验性喵）
@@ -214,11 +219,14 @@ async fn run_instance(config: NekoConfig) -> Result<()> {
 
     // 监控进程
     tokio::select! {
+        res = child.wait() => {
+            println!("nekolink-cli 进程意外退出喵: {:?} (接口: {})", res, config.interface);
+        },
         _ = signaling_handle => {},
-        status = child.wait() => {
-            println!("nekolink-cli 退出: {:?}", status);
-        }
     }
+
+    println!("正在清理接口 {} 喵...", config.interface);
+    let _ = run_cmd(&format!("ip link del {} 2>/dev/null", config.interface));
 
     Ok(())
 }

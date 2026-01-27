@@ -12,6 +12,7 @@
 - **🤝 Automated Key Exchange**: No more manually copying and pasting long public keys. As long as the Pre-Shared Keys (PSK) match, NekoLink will automatically exchange WireGuard public keys via an encrypted signaling channel. In IP mode, this channel automatically reuses your `ip_protocol`.
 - **🎮 Interactive Config Helper (`neko-link`)**: A user-friendly wizard that guides you through server/client setup and generates JSON configurations automatically.
 - **🛡️ Routing Safety (Table=off Logic)**: By default, NekoLink does not modify the system routing table. This prevents total connectivity loss caused by aggressive `0.0.0.0/0` configurations.
+- **💤 Smart Halt & Keepalive**: For maximum stealth, signaling exchange permanently enters deep sleep once connected. Combined with native WireGuard Keepalive, the tunnel remains bulletproof and nearly invisible.
 - **🦀 Pure Rust Implementation**: From the core driver to the control plane, everything is written in Rust for memory safety and blazing-fast performance.
 
 ---
@@ -105,8 +106,10 @@ Manual configurations are stored in `/etc/neko-link/*.json`.
 | `auto_route` | Modify system routing table? | Default `false` for safety |
 | `local_address`| Tunnel internal IP (CIDR) | e.g., `10.0.0.1/24` |
 | `psk` | Pre-Shared Key for automated signaling | Must match on both ends! |
-| `peers` | Peer information. In `ip` mode, just use the **Public IP** (e.g., `1.2.3.4`). NekoLink will use Raw IP for everything—**100% UDP-free!** In `udp` mode, use `IP:Port`. | e.g., `{"endpoint": "1.2.3.4"}` |
-| `signal_port` | **Signaling Port** (UDP) | Only used in `udp` mode. Ignored in `ip` mode. |
+| `peers` | Peer information. In `ip` mode, just use the **Public IP**. | e.g., `{"endpoint": "1.2.3.4"}` |
+| `persistent_keepalive` | **Activity Interval** (seconds). Keeps the NAT mapping alive. | Recommended: `25` |
+| `mtu` | **Tunnel Interface MTU**. Defaults to `1420` for optimal encapsulation. | Recommended: `1420` |
+| `signal_port` | **Signaling Port** (UDP) | Only used in `udp` mode. |
 
 ---
 
@@ -114,6 +117,24 @@ Manual configurations are stored in `/etc/neko-link/*.json`.
 
 1. **Firewalls**: Ensure your selected `ip_protocol` and `signal_port` (UDP) are open in your server's firewall.
 2. **Permissions**: While `install.sh` sets caps, `sudo` is still recommended for network interface operations.
+
+---
+
+## 🔍 How to Verify IP Mode?
+
+You can use `tcpdump` to observe traffic on your physical interface.
+
+Assuming your physical interface is `eth0` and your `ip_protocol` is `141`:
+
+```bash
+# Capture packets with the specific protocol number
+sudo tcpdump -i eth0 proto 141 -n -v
+```
+
+**What to look for:**
+- Packets with protocol `141` on the physical interface.
+- No UDP traffic (unless in `udp` mode).
+- Interface MTU set to `1420` (check with `ip link show nekotun0`).
 
 ---
 
