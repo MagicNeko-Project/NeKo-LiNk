@@ -9,11 +9,13 @@
 ## 🌟 Core Features
 
 - **🚀 Custom IP Protocol (Raw IP Mode)**: Break free from UDP (Protocol 17) throttling and identification! You can communicate directly using any IP protocol number between 1 and 255. In this mode, **NekoLink is 100% UDP-free**, as even the signaling/key-exchange is performed over Raw IP. Firewalls won't even know what hit them!
-- **🤝 Automated Key Exchange**: No more manually copying and pasting long public keys. As long as the Pre-Shared Keys (PSK) match, NekoLink will automatically exchange WireGuard public keys via an encrypted signaling channel. In IP mode, this channel automatically reuses your `ip_protocol`.
+- **🎭 Fake-TCP Stealth Mode (Fake-TCP Mode)**: The ultimate penetration magic! By masquerading all traffic as legitimate TCP packets (including full handshake simulation and state management), your data flows appear like regular web browsing to network monitors.
+- **🤝 Automated Key Exchange**: No more manually copying and pasting long public keys. As long as the Pre-Shared Keys (PSK) match, NekoLink will automatically exchange WireGuard public keys via an encrypted signaling channel. In IP/TCP mode, this channel automatically reuses your transport mechanism.
 - **🎮 Interactive Config Helper (`neko-link`)**: A user-friendly wizard that guides you through server/client setup and generates JSON configurations automatically.
 - **🛡️ Routing Safety (Table=off Logic)**: By default, NekoLink does not modify the system routing table. This prevents total connectivity loss caused by aggressive `0.0.0.0/0` configurations.
 - **💤 Smart Halt & Keepalive**: For maximum stealth, signaling exchange permanently enters deep sleep once connected. Combined with native WireGuard Keepalive, the tunnel remains bulletproof and nearly invisible.
 - **🦀 Pure Rust Implementation**: From the core driver to the control plane, everything is written in Rust for memory safety and blazing-fast performance.
+- **📡 Adaptive MTU Discovery**: Automatically detects the PMTU of your network path and recommends the best MTU for the tunnel.
 
 ---
 
@@ -100,16 +102,16 @@ Manual configurations are stored in `/etc/neko-link/*.json`.
 | Parameter | Description | Recommended |
 | :--- | :--- | :--- |
 | `interface` | Virtual network interface name | Default: `nekotun0` |
-| `mode` | `ip` (Raw IP) or `udp` (Standard Mode). Used for both **Data and Signaling**. | Use `ip` to bypass UDP blocks |
+| `mode` | `ip` (Raw IP), `udp` (Standard Mode) or `tcp` (Fake-TCP). Used for both **Data and Signaling**. | Use `ip` or `tcp` to bypass UDP blocks |
 | `ip_protocol`| Protocol number for Raw IP mode | Use 143-252 for experimentation |
-| `listen_port` | WireGuard listen port (UDP mode) | Set to `null` in `ip` mode |
+| `listen_port` | WireGuard listen port (UDP mode) | Set to `null` in `ip/tcp` mode |
 | `auto_route` | Modify system routing table? | Default `false` for safety |
 | `local_address`| Tunnel internal IP (CIDR) | e.g., `10.0.0.1/24` |
 | `psk` | Pre-Shared Key for automated signaling | Must match on both ends! |
-| `peers` | Peer information. In `ip` mode, just use the **Public IP**. | e.g., `{"endpoint": "1.2.3.4"}` |
+| `peers` | Peer information. In `ip/tcp` mode, just use the **Public IP**. | e.g., `{"endpoint": "1.2.3.4"}` |
 | `persistent_keepalive` | **Activity Interval** (seconds). Keeps the NAT mapping alive. | Recommended: `25` |
 | `mtu` | **Tunnel Interface MTU**. Defaults to `1420` for optimal encapsulation. | Recommended: `1420` |
-| `signal_port` | **Signaling Port** (UDP) | Only used in `udp` mode. |
+| `signal_port` | **Signaling Port** (UDP) | Only used in `udp` mode. Ignored in `ip/tcp` mode. |
 
 ---
 
