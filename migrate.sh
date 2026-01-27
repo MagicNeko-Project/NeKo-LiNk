@@ -2,6 +2,8 @@
 # NekoLink 迁移至 .deb 安装包管理魔法脚本 ฅ^•ﻌ•^ฅ
 set -e
 
+VERSION="2.1.0"
+
 # 提升权限
 if [ "$EUID" -ne 0 ]; then
   echo "请使用 sudo 运行此迁移脚本喵！"
@@ -30,7 +32,7 @@ echo "您的配置目录 /etc/neko-link/ 将被保留喵。"
 mkdir -p /etc/neko-link
 
 # 4. 构建最新的 Debian 包
-echo "正在召唤 NekoLink v2.0.0 Debian 魔法包喵 (这可能需要一点时间编译)..."
+echo "正在召唤 NekoLink v$VERSION Debian 魔法包喵 (这可能需要一点时间编译)..."
 # 确保在项目根目录运行
 if [ ! -f "install.sh" ]; then
     echo "喵？找不到 install.sh，请确保在 NekoLink 项目根目录下运行此脚本喵。"
@@ -41,7 +43,7 @@ chmod +x install.sh
 ./install.sh --package
 
 # 5. 寻找并安装生成的 .deb 包
-DEB_FILE=$(ls NekoLink_2.0.0_*.deb 2>/dev/null | head -n 1)
+DEB_FILE=$(ls NekoLink_${VERSION}_*.deb 2>/dev/null | head -n 1)
 if [ -f "$DEB_FILE" ]; then
     echo "发现安装包: $DEB_FILE，正在执行转生仪式...喵！"
     dpkg -i "$DEB_FILE"
