@@ -147,10 +147,14 @@ async fn run_instance(config: NekoConfig) -> Result<()> {
 
     println!("使用公钥: {} 喵！", pub_b64);
 
-    // 2. 启动 nekolink-cli
-    let mut cmd = Command::new("nekolink-cli");
+    // 2. 预清理：强制删除可能存在的旧接口喵
+    let _ = run_cmd(&format!("ip link del {} 2>/dev/null", config.interface));
+
+    // 3. 启动 nekolink-cli
+    let mut cmd = tokio::process::Command::new("nekolink-cli");
     cmd.arg("-f").arg(&config.interface);
     cmd.arg("--disable-drop-privileges");
+    cmd.kill_on_drop(true); // 重点：ctl 退出时一定要带走 cli 喵！
     if config.mode == "ip" {
         if let Some(proto) = config.ip_protocol {
             cmd.arg("--ip-protocol").arg(proto.to_string());
@@ -200,7 +204,7 @@ async fn run_instance(config: NekoConfig) -> Result<()> {
     // 监控进程
     tokio::select! {
         _ = signaling_handle => {},
-        status = tokio::task::spawn_blocking(move || child.wait()) => {
+        status = child.wait() => {
             println!("nekolink-cli 退出: {:?}", status);
         }
     }
@@ -462,7 +466,12 @@ async fn show_status() -> Result<()> {
         };
         
         println!("【 接口: {} 】", config.interface);
-        println!("模式: {}", config.mode);
+        let mode_desc = if config.mode == "ip" {
+            format!("ip (协议={})", config.ip_protocol.unwrap_or(141))
+        } else {
+            "udp".to_string()
+        };
+        println!("模式: {}", mode_desc);
         println!("本地地址: {}", config.local_address);
         
         match get_uapi_info(&config.interface).await {
