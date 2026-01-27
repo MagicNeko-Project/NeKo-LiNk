@@ -18,7 +18,7 @@ if [ "$#" -gt 0 ]; then
     exit $?
 fi
 
-VERSION="2.4.1"
+VERSION="2.4.2"
 echo -e "${PINK}ฅ^•ﻌ•^ฅ 欢迎使用 NekoLink 交互式配置助手 v$VERSION！${NC}"
 
 CONFIG_DIR="/etc/neko-link"

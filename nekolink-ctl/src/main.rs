@@ -269,11 +269,10 @@ async fn run_instance(config: NekoConfig) -> Result<()> {
 }
 
 async fn start_signaling(state: NekoState) -> Result<()> {
-    let mode_needs_raw = state.config.mode == "ip" || state.config.mode == "tcp";
-    if mode_needs_raw {
-        start_raw_signaling(state).await
-    } else {
-        start_udp_signaling(state).await
+    match state.config.mode.as_str() {
+        "ip" => start_raw_signaling(state).await,
+        "tcp" => start_tcp_signaling(state).await,
+        _ => start_udp_signaling(state).await,
     }
 }
 
@@ -577,6 +576,103 @@ async fn start_raw_signaling(state: NekoState) -> Result<()> {
     Ok(())
 }
 
+async fn start_tcp_signaling(state: NekoState) -> Result<()> {
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", state.config.signal_port)).await?;
+    let cipher = derive_cipher(&state.config.psk);
+    let dynamic_peers = Arc::new(parking_lot::Mutex::new(std::collections::HashSet::new()));
+
+    let send_task = {
+        let config = state.config.clone();
+        let cipher = cipher.clone();
+        let pub_key_bytes = state.pub_key.as_bytes().to_vec();
+        async move {
+            loop {
+                let established = get_established_peers(&config.interface).await;
+                if !established.is_empty() {
+                    time::sleep(Duration::from_secs(300)).await;
+                    continue;
+                }
+
+                for peer in &config.peers {
+                    if let Ok(mut addr) = peer.endpoint.parse::<SocketAddr>() {
+                        // 尝试连接对端的信令端口
+                        addr.set_port(config.signal_port);
+                        let cipher = cipher.clone();
+                        let pub_key_bytes = pub_key_bytes.clone();
+                        let interface = config.interface.clone();
+                        tokio::spawn(async move {
+                            if let Ok(Ok(mut stream)) = time::timeout(Duration::from_secs(5), tokio::net::TcpStream::connect(addr)).await {
+                                let current_mtu = get_interface_mtu(&interface).unwrap_or(1420);
+                                let mut msg = pub_key_bytes.clone();
+                                msg.extend_from_slice(&current_mtu.to_be_bytes());
+
+                                let mut nonce_bytes = [0u8; 12];
+                                OsRng.fill_bytes(&mut nonce_bytes);
+                                let nonce = Nonce::from_slice(&nonce_bytes);
+                                if let Ok(ciphertext) = cipher.encrypt(nonce, msg.as_slice()) {
+                                    let mut pkt = nonce_bytes.to_vec();
+                                    pkt.extend_from_slice(&ciphertext);
+                                    let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, &pkt).await;
+                                }
+                            }
+                        });
+                    }
+                }
+                time::sleep(Duration::from_secs(10)).await;
+            }
+        }
+    };
+
+    let recv_task = {
+        let interface = state.config.interface.clone();
+        let cipher = cipher.clone();
+        let dynamic_peers = Arc::clone(&dynamic_peers);
+        let keepalive = state.config.persistent_keepalive;
+        let config = state.config.clone();
+        async move {
+            loop {
+                if let Ok((mut stream, addr)) = listener.accept().await {
+                    let interface = interface.clone();
+                    let cipher = cipher.clone();
+                    let dynamic_peers = Arc::clone(&dynamic_peers);
+                    let config = config.clone();
+                    tokio::spawn(async move {
+                        let mut buf = [0u8; 128];
+                        if let Ok(Ok(len)) = time::timeout(Duration::from_secs(5), tokio::io::AsyncReadExt::read(&mut stream, &mut buf)).await {
+                            if len >= 12 + 32 {
+                                let (nonce_part, encrypted_part) = buf[..len].split_at(12);
+                                let nonce = Nonce::from_slice(nonce_part);
+                                if let Ok(decrypted) = cipher.decrypt(nonce, encrypted_part) {
+                                    if decrypted.len() >= 32 {
+                                        let peer_pub_key = BASE64.encode(&decrypted[..32]);
+                                        let peer_mtu = if decrypted.len() >= 34 {
+                                            Some(u16::from_be_bytes([decrypted[32], decrypted[33]]))
+                                        } else {
+                                            None
+                                        };
+
+                                        let addr_str = addr.ip().to_string();
+                                        println!("喵！发现/更新队友 (TCP Signaling): {} 来自 {}", peer_pub_key, addr_str);
+                                        if let Ok(_) = configure_peer(&interface, &peer_pub_key, addr_str.clone(), keepalive, &config, peer_mtu).await {
+                                            dynamic_peers.lock().insert(addr.ip());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+            }
+        }
+    };
+
+    tokio::select! {
+        _ = send_task => {},
+        _ = recv_task => {},
+    }
+    Ok(())
+}
+
 fn derive_cipher(psk: &str) -> ChaCha20Poly1305 {
     let mut psk_bytes = [0u8; 32];
     let salt = b"NekoLink_Magic_Salt";
@@ -658,10 +754,10 @@ async fn show_status() -> Result<()> {
         };
         
         println!("【 接口: {} 】", config.interface);
-        let mode_desc = if config.mode == "ip" {
-            format!("ip (协议={})", config.ip_protocol.unwrap_or(141))
-        } else {
-            "udp".to_string()
+        let mode_desc = match config.mode.as_str() {
+            "ip" => format!("ip (协议={})", config.ip_protocol.unwrap_or(141)),
+            "tcp" => "fake-tcp + safe-signaling".to_string(),
+            _ => "udp".to_string(),
         };
         println!("模式: {}", mode_desc);
         println!("本地地址: {}", config.local_address);

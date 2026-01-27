@@ -3,6 +3,13 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v2.4.2 (2026-01-28)
+- 喵呜！信令系统现在会根据传输模式**自动切换协议**：
+    - `tcp` 模式改用真 TCP 信令，完美穿透 NAT 环境喵！
+    - `ip` 模式维持 Raw IP 传输，追求极致隐蔽。
+    - `udp` 模式维持 UDP 传输，兼容性拉满。
+- 修复了 `nekolink-ctl` 在 NAT 环境下无法完成握手的问题。
+
 ## v2.4.1 (2026-01-28)
 - 喵呜！新增了 **MTU 动态同步机制**，服务端可自动跟随客户端的 MTU。
 - 在 `nekolink.sh` 中增加了 `Auto Sync` 模式选项。

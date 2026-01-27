@@ -53,7 +53,7 @@ cargo build --release
 
 # 4. 生成并安装 Debian 魔法包
 echo -e "\n${CYAN}[4/5] 正在塑造并应用全新的 Debian 魔法包...${NC}"
-VERSION="2.4.1"
+VERSION="2.4.2"
 chmod +x scripts/build_deb.sh
 ./scripts/build_deb.sh
 
