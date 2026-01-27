@@ -3,10 +3,18 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v2.4.1 (2026-01-28)
+- 喵呜！新增了 **MTU 动态同步机制**，服务端可自动跟随客户端的 MTU。
+- 在 `nekolink.sh` 中增加了 `Auto Sync` 模式选项。
+
 ## v2.4.0 (2026-01-28)
 - 喵喵！新增了 **自适应 MTU 探测机制**，自动识别链路 PMTU。
 - 在 `nekolink-ctl` 中添加 `mtu-probe` 命令。
 - 在 `nekolink.sh` 助手创建配置时自动推荐最佳 MTU 值。
+- [x] 验证并集成 <!-- id: 27 -->
+    - [x] 联调验证 MTU 同步效果 <!-- id: 28 -->
+    - [x] 更新 `nekolink.sh` 给用户提供 "auto MTU" 选项 <!-- id: 29 -->
+    - [x] 统一并更新版本号为 2.4.1 <!-- id: 30 -->
 
 ## v2.3.0 (2026-01-27)
 
