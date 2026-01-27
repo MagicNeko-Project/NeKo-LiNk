@@ -11,6 +11,7 @@ WorkingDirectory=/etc/neko-link
 ExecStart=/usr/local/bin/nekolink-ctl
 Restart=always
 RestartSec=5
+KillMode=control-group
 StandardOutput=journal
 StandardError=journal
 
