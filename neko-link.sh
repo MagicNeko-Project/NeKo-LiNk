@@ -80,6 +80,14 @@ function create_config() {
         [ -z "$ka_sec" ] && ka_sec=25
         keepalive=$ka_sec
     fi
+
+    read -p "是否需要自定义 MTU？( y/n, 默认 n, 推荐 1420 ): " mtu_enable
+    mtu="null"
+    if [ "$mtu_enable" == "y" ]; then
+        read -p "请输入 MTU 值 ( 建议 1280-1420 ): " mtu_val
+        [ -z "$mtu_val" ] && mtu_val=1420
+        mtu=$mtu_val
+    fi
     [ -z "$local_addr" ] && local_addr="10.0.0.1/24"
 
     read -p "请输入预共享密钥 (PSK, 用于自动交换公钥，两端必须一致): " psk
@@ -110,6 +118,7 @@ function create_config() {
   "listen_port": $listen_port,
   "auto_route": $auto_route,
   "persistent_keepalive": $keepalive,
+  "mtu": $mtu,
   "local_address": "$local_addr",
   "psk": "$psk",
   "peers": [
