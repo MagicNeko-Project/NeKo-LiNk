@@ -1,0 +1,56 @@
+#!/bin/bash
+# NekoLink 智能升级/修复脚本 ฅ^•ﻌ•^ฅ
+
+set -e
+
+PINK='\033[1;35m'
+CYAN='\033[0;36m'
+RED='\033[0;31m'
+NC='\033[0m'
+
+echo -e "${PINK}ฅ^•ﻌ•^ฅ 欢迎使用 NekoLink 魔法升级助理！${NC}"
+
+# 检查权限
+if [ "$EUID" -ne 0 ]; then
+  echo -e "${RED}喵？为了替换系统组件，请使用 sudo 运行我喵！${NC}"
+  exit 1
+fi
+
+# 1. 清理旧势力
+echo -e "\n${CYAN}[1/5] 正在驱散旧的魔法能量（停止运行中的进程）...${NC}"
+sudo pkill nekolink-ctl || true
+sudo pkill nekolink-cli || true
+# 预防性清理原始 boringtun 命名残留（如果有的话）
+sudo pkill boringtun-cli || true
+
+# 2. 更新源代码
+echo -e "\n${CYAN}[2/5] 正在从星辰大海采集最新的魔法代码 (Git Pull)...${NC}"
+if [ -d ".git" ]; then
+    git fetch origin
+    git reset --hard origin/rust-wireguard-rawtunnel
+else
+    echo -e "${RED}警告：当前目录不是一个有效的 Git 仓库，跳过拉取更新喵。${NC}"
+fi
+
+# 3. 编译新核心
+echo -e "\n${CYAN}[3/5] 正在熔炼全新的核心组件 (Cargo Build)...${NC}"
+if ! command -v cargo &> /dev/null; then
+    echo -e "${RED}喵呜！没找到 Cargo，升级失败！请先安装 Rust 环境喵。${NC}"
+    exit 1
+fi
+cargo build --release
+
+# 4. 覆盖安装
+echo -e "\n${CYAN}[4/5] 正在注入全新的魔法二进制文件...${NC}"
+cp target/release/nekolink-cli /usr/local/bin/
+cp target/release/nekolink-ctl /usr/local/bin/
+cp neko-link.sh /usr/local/bin/neko-link
+chmod +x /usr/local/bin/neko-link
+
+# 5. 重新赋予特权
+echo -e "\n${CYAN}[5/5] 正在为新核心注入超级权能 (SetCap)...${NC}"
+setcap cap_net_admin,cap_net_raw+epi /usr/local/bin/nekolink-cli
+setcap cap_net_admin,cap_net_raw+epi /usr/local/bin/nekolink-ctl
+
+echo -e "\n${PINK}✨ 升级成功喵！✨${NC}"
+echo -e "原有的配置文件 (/etc/neko-link/) 已被温柔地保留。现在可以重新运行 'nekolink-ctl' 了喵！"
