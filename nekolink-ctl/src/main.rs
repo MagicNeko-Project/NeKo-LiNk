@@ -217,6 +217,11 @@ async fn run_instance(config: NekoConfig) -> Result<()> {
     run_cmd(&format!("ip link set mtu {} dev {}", mtu, config.interface)).context("设置 MTU 失败")?;
     run_cmd(&format!("ip link set up dev {}", config.interface)).context("启用网卡失败")?;
 
+    // 如果 MTU 为 0，表示开启了自动同步模式喵
+    if config.mtu == Some(0) {
+        println!("接口 {} 已开启 MTU 动态同步模式喵！(〃'▽'〃)", config.interface);
+    }
+
     // 如果开启了 auto_route，则添加直连路由（实验性喵）
     if config.auto_route {
         let (network, _) = config.local_address.split_once('/').unwrap_or((&config.local_address, ""));
@@ -311,10 +316,15 @@ async fn start_udp_signaling(state: NekoState) -> Result<()> {
                          time::sleep(Duration::from_secs(86400)).await; // 睡一天喵
                          continue;
                     }
+                    let mut msg = pub_key_bytes.clone();
+                    // 获取当前网卡 MTU
+                    let current_mtu = get_interface_mtu(&config.interface).unwrap_or(1420);
+                    msg.extend_from_slice(&current_mtu.to_be_bytes());
+
                     let mut nonce_bytes = [0u8; 12];
                     OsRng.fill_bytes(&mut nonce_bytes);
                     let nonce = Nonce::from_slice(&nonce_bytes);
-                    if let Ok(ciphertext) = cipher.encrypt(nonce, pub_key_bytes.as_slice()) {
+                    if let Ok(ciphertext) = cipher.encrypt(nonce, msg.as_slice()) {
                         let mut pkt = nonce_bytes.to_vec();
                         pkt.extend_from_slice(&ciphertext);
                         let _ = socket.send_to(&pkt, addr).await;
@@ -341,8 +351,14 @@ async fn start_udp_signaling(state: NekoState) -> Result<()> {
                     let (nonce_part, encrypted_part) = buf[..len].split_at(12);
                     let nonce = Nonce::from_slice(nonce_part);
                     if let Ok(decrypted) = cipher.decrypt(nonce, encrypted_part) {
-                        if decrypted.len() == 32 {
-                            let peer_pub_key = BASE64.encode(&decrypted);
+                        if decrypted.len() >= 32 {
+                            let peer_pub_key = BASE64.encode(&decrypted[..32]);
+                            let peer_mtu = if decrypted.len() >= 34 {
+                                Some(u16::from_be_bytes([decrypted[32], decrypted[33]]))
+                            } else {
+                                None
+                            };
+
                             let addr_str = addr.to_string();
                             let should_update = match known_peers.get(&peer_pub_key) {
                                 Some(old_addr) => old_addr != &addr_str,
@@ -351,10 +367,13 @@ async fn start_udp_signaling(state: NekoState) -> Result<()> {
 
                             if should_update {
                                 println!("喵！发现/更新队友 (UDP): {} 来自 {}", peer_pub_key, addr_str);
-                                if let Ok(_) = configure_peer(&interface, &peer_pub_key, addr_str.clone(), keepalive).await {
+                                if let Ok(_) = configure_peer(&interface, &peer_pub_key, addr_str.clone(), keepalive, &state.config, peer_mtu).await {
                                     known_peers.insert(peer_pub_key, addr_str);
                                     dynamic_peers.lock().insert(addr);
                                 }
+                            } else if let Some(m) = peer_mtu {
+                                // 即使地址没变，MTU 变了也要更新喵
+                                let _ = sync_mtu_if_needed(&state.config, m).await;
                             }
                         }
                     }
@@ -431,23 +450,27 @@ async fn start_raw_signaling(state: NekoState) -> Result<()> {
                         continue;
                     }
 
-                    let mut nonce_bytes = [0u8; 12];
-                    OsRng.fill_bytes(&mut nonce_bytes);
-                    let nonce = Nonce::from_slice(&nonce_bytes);
-                    if let Ok(ciphertext) = cipher.encrypt(nonce, pub_key_bytes.as_slice()) {
-                        let mut pkt = vec![magic_byte];
-                        pkt.extend_from_slice(&nonce_bytes);
-                        pkt.extend_from_slice(&ciphertext);
-                        
-                        let addr = socket2::SockAddr::from(SocketAddr::new(ip, 0));
-                        let socket_to_use = if ip.is_ipv4() { v4_socket.as_ref() } else { v6_socket.as_ref() };
-                        
-                        if let Some(socket) = socket_to_use {
-                            if let Ok(mut guard) = socket.writable().await {
-                                let _ = guard.try_io(|s| s.get_ref().send_to(&pkt, &addr));
+                        let mut msg = pub_key_bytes.clone();
+                        let current_mtu = get_interface_mtu(&config.interface).unwrap_or(1420);
+                        msg.extend_from_slice(&current_mtu.to_be_bytes());
+
+                        let mut nonce_bytes = [0u8; 12];
+                        OsRng.fill_bytes(&mut nonce_bytes);
+                        let nonce = Nonce::from_slice(&nonce_bytes);
+                        if let Ok(ciphertext) = cipher.encrypt(nonce, msg.as_slice()) {
+                            let mut pkt = vec![magic_byte];
+                            pkt.extend_from_slice(&nonce_bytes);
+                            pkt.extend_from_slice(&ciphertext);
+                            
+                            let addr = socket2::SockAddr::from(SocketAddr::new(ip, 0));
+                            let socket_to_use = if ip.is_ipv4() { v4_socket.as_ref() } else { v6_socket.as_ref() };
+                            
+                            if let Some(socket) = socket_to_use {
+                                if let Ok(mut guard) = socket.writable().await {
+                                    let _ = guard.try_io(|s| s.get_ref().send_to(&pkt, &addr));
+                                }
                             }
                         }
-                    }
                 }
                 let sleep_secs = if established.is_empty() { 10 } else { 300 };
                 time::sleep(Duration::from_secs(sleep_secs)).await;
@@ -478,8 +501,14 @@ async fn start_raw_signaling(state: NekoState) -> Result<()> {
                         let nonce = Nonce::from_slice(&data[1..13]);
                         let encrypted_part = &data[13..];
                         if let Ok(decrypted) = cipher.decrypt(nonce, encrypted_part) {
-                            if decrypted.len() == 32 {
-                                let peer_pub_key = BASE64.encode(&decrypted);
+                            if decrypted.len() >= 32 {
+                                let peer_pub_key = BASE64.encode(&decrypted[..32]);
+                                let peer_mtu = if decrypted.len() >= 34 {
+                                    Some(u16::from_be_bytes([decrypted[32], decrypted[33]]))
+                                } else {
+                                    None
+                                };
+
                                 let ip_addr = addr.as_socket().map(|s: SocketAddr| s.ip());
                                 if let Some(ip) = ip_addr {
                                     let ip_str = ip.to_string();
@@ -490,10 +519,12 @@ async fn start_raw_signaling(state: NekoState) -> Result<()> {
 
                                     if should_update {
                                         println!("喵！发现/更新队友 (Raw IP): {} 来自 {}", peer_pub_key, ip_str);
-                                        if let Ok(_) = configure_peer(&interface, &peer_pub_key, ip_str.clone(), keepalive).await {
+                                        if let Ok(_) = configure_peer(&interface, &peer_pub_key, ip_str.clone(), keepalive, &state_config_recv, peer_mtu).await {
                                             known_peers.insert(peer_pub_key, ip_str);
                                             dynamic_peers.lock().insert(ip);
                                         }
+                                    } else if let Some(m) = peer_mtu {
+                                        let _ = sync_mtu_if_needed(&state_config_recv, m).await;
                                     }
                                 }
                             }
@@ -555,7 +586,7 @@ fn derive_cipher(psk: &str) -> ChaCha20Poly1305 {
     ChaCha20Poly1305::new(&psk_bytes.into())
 }
 
-async fn configure_peer(interface: &str, peer_pub_key: &str, endpoint: String, keepalive: Option<u16>) -> Result<()> {
+async fn configure_peer(interface: &str, peer_pub_key: &str, endpoint: String, keepalive: Option<u16>, local_config: &NekoConfig, peer_mtu: Option<u16>) -> Result<()> {
     let mut uapi_cmd = format!(
         "set=1\npublic_key={}\nallowed_ip=0.0.0.0/0\nallowed_ip=::/0\nendpoint={}\n",
         peer_pub_key, endpoint
@@ -567,7 +598,35 @@ async fn configure_peer(interface: &str, peer_pub_key: &str, endpoint: String, k
     
     send_uapi(interface, &uapi_cmd).await.context("配置 Peer 失败")?;
     println!("配置队友 {} 成功喵！", peer_pub_key);
+
+    if let Some(m) = peer_mtu {
+        let _ = sync_mtu_if_needed(local_config, m).await;
+    }
+
     Ok(())
+}
+
+async fn sync_mtu_if_needed(config: &NekoConfig, peer_mtu: u16) -> Result<()> {
+    if config.mtu == Some(0) {
+        // 自动同步模式喵
+        let current_mtu = get_interface_mtu(&config.interface).unwrap_or(0);
+        if current_mtu != peer_mtu && peer_mtu >= 1280 {
+            println!("检测到对端 MTU 为 {}，正在同步接口 {} 的 MTU 喵...", peer_mtu, config.interface);
+            let _ = run_cmd(&format!("ip link set mtu {} dev {}", peer_mtu, config.interface));
+        }
+    }
+    Ok(())
+}
+
+fn get_interface_mtu(interface: &str) -> Result<u16> {
+    let output = Command::new("cat").arg(format!("/sys/class/net/{}/mtu", interface)).output()?;
+    if output.status.success() {
+        let s = String::from_utf8_lossy(&output.stdout);
+        let val = s.trim().parse::<u16>()?;
+        Ok(val)
+    } else {
+        Err(anyhow::anyhow!("获取 MTU 失败"))
+    }
 }
 
 fn run_cmd(cmd: &str) -> Result<()> {

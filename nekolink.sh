@@ -18,7 +18,7 @@ if [ "$#" -gt 0 ]; then
     exit $?
 fi
 
-VERSION="2.4.0"
+VERSION="2.4.1"
 echo -e "${PINK}ฅ^•ﻌ•^ฅ 欢迎使用 NekoLink 交互式配置助手 v$VERSION！${NC}"
 
 CONFIG_DIR="/etc/neko-link"
@@ -237,18 +237,27 @@ function create_config() {
         fi
     fi
 
-    read -p "是否需要自定义 MTU？( y/n, 默认 n, 推荐 $rec_mtu ): " mtu_enable
+    echo -e "MTU 模式选择喵："
+    echo "1. 使用探测推荐值 (固定: $rec_mtu)"
+    echo "2. 手动输入自定义值 (固定)"
+    echo "3. 开启自动同步 (Auto Sync, 推荐服务端使用)"
+    read -p "请输入选项 [1-3, 默认 1]: " mtu_mode
+
     mtu="null"
-    if [ "$mtu_enable" == "y" ]; then
-        read -p "请输入 MTU 值 ( 建议 1280-1420 ): " mtu_val
-        [ -z "$mtu_val" ] && mtu_val=$rec_mtu
-        mtu=$mtu_val
-    elif [ "$mtu_enable" == "n" ] || [ -z "$mtu_enable" ]; then
-        # 如果用户不自定义且已有推荐值，我们可以考虑直接用推荐值，
-        # 但为了保持兼容性，之前代码是 mtu="null" (即不设置，让内核自定或 cli 默认 1420)。
-        # 既然我们有了更好的推荐值，就顺手填进去喵。
-        mtu=$rec_mtu
-    fi
+    case "$mtu_mode" in
+        2)
+            read -p "请输入 MTU 值 ( 建议 1280-1420 ): " mtu_val
+            [ -z "$mtu_val" ] && mtu_val=$rec_mtu
+            mtu=$mtu_val
+            ;;
+        3)
+            mtu=0
+            echo -e "${PINK}已为您开启动态 MTU 同步魔法喵！将会自动跟随客户端的 MTU。${NC}"
+            ;;
+        *)
+            mtu=$rec_mtu
+            ;;
+    esac
 
     read -p "是否开启 TCP MSS 自动修复 ( 建议开启以防止握手成功但无法网页浏览 )？( y/n, 默认 y ): " mss_enable
     [ -z "$mss_enable" ] && mss_enable="y"
