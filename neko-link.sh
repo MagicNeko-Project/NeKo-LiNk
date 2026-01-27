@@ -72,7 +72,14 @@ function create_config() {
         [ -z "$listen_port" ] && listen_port=51820
     fi
 
-    read -p "请输入本地隧道内网 IP ( e.g. 10.0.0.1/24 ): " local_addr
+    read -p "请输入本地隧道接口 IP 地址 ( 示例 10.0.0.1/24 ): " local_addr
+    read -p "是否开启 Keepalive 保持魔法连接？( y/n, 默认 n ): " ka_enable
+    keepalive="null"
+    if [ "$ka_enable" == "y" ]; then
+        read -p "请输入 Keepalive 间隔时间 ( 秒, 默认 25 ): " ka_sec
+        [ -z "$ka_sec" ] && ka_sec=25
+        keepalive=$ka_sec
+    fi
     [ -z "$local_addr" ] && local_addr="10.0.0.1/24"
 
     read -p "请输入预共享密钥 (PSK, 用于自动交换公钥，两端必须一致): " psk
@@ -102,6 +109,7 @@ function create_config() {
   "ip_protocol": $proto,
   "listen_port": $listen_port,
   "auto_route": $auto_route,
+  "persistent_keepalive": $keepalive,
   "local_address": "$local_addr",
   "psk": "$psk",
   "peers": [
