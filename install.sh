@@ -31,8 +31,8 @@ cargo build --release
 sudo rm -f /usr/local/bin/nekolink-cli /usr/local/bin/nekolink-ctl
 sudo cp target/release/nekolink-cli /usr/local/bin/
 sudo cp target/release/nekolink-ctl /usr/local/bin/
-sudo cp neko-link.sh /usr/local/bin/neko-link
-sudo chmod +x /usr/local/bin/neko-link
+sudo cp nekolink.sh /usr/local/bin/nekolink
+sudo chmod +x /usr/local/bin/nekolink
 
 # 3. 赋予权限
 sudo setcap cap_net_admin,cap_net_raw+epi /usr/local/bin/nekolink-cli

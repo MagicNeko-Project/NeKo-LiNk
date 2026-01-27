@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Debian 打包支持**: 新增 `install.sh --package` 命令，支持一键构建适用于 Debian 12+ 的 `.deb` 安装包喵。
 - **CI/CD 自动化**: 新增 GitHub Actions 工作流，每次推送代码自动构建并发布 Debian 安装包。
 - **状态显示优化**: 在 IP 模式下，UAPI 状态现在会准确显示 `protocol=协议号`，修复了之前错误显示为 `listen_port` 的问题喵。
-- **Systemd 深度集成**: 管理脚本 `neko-link` 的启动逻辑全面转向 `systemctl restart`，管理服务更加规范。
+- **命名规范化**: 统一了命令前缀。主管理脚本为 `nekolink` (支持交互式菜单与命令转发)，守护进程为 `nekolink-cli`，控制器为 `nekolink-ctl`。
 - **平滑迁移脚本**: 新增 `migrate.sh` 魔法脚本，支持从手动安装一键平滑迁移至 .deb 包管理模式，自动清理冲突文件并保留配置喵。
 - **IPv6 优先级增强**: 在使用 Raw IP 传输 IPv6 信令时，自动设置 Traffic Class (DSCP) 为 `0xE0` (CS7)，确保连接质量。
 - **TCP MSS 自动修复**: 集成 `nftables` 实现 MSS Clamping，解决 MTU 导致的网页加载问题。

@@ -23,6 +23,7 @@ pkill -9 nekolink-cli 2>/dev/null || true
 echo "正在移除旧版手动二进制文件喵..."
 rm -f /usr/local/bin/nekolink-cli
 rm -f /usr/local/bin/nekolink-ctl
+rm -f /usr/local/bin/nekolink
 rm -f /usr/local/bin/neko-link
 rm -f /etc/systemd/system/nekolink.service
 systemctl daemon-reload
