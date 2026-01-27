@@ -49,8 +49,8 @@ fi
 
 cp target/release/nekolink-cli "$BUILD_DIR/usr/local/bin/"
 cp target/release/nekolink-ctl "$BUILD_DIR/usr/local/bin/"
-cp neko-link.sh "$BUILD_DIR/usr/local/bin/neko-link"
-chmod +x "$BUILD_DIR/usr/local/bin/neko-link"
+cp nekolink.sh "$BUILD_DIR/usr/local/bin/nekolink"
+chmod +x "$BUILD_DIR/usr/local/bin/nekolink"
 cp nekolink.service "$BUILD_DIR/etc/systemd/system/"
 
 # 5. 打包

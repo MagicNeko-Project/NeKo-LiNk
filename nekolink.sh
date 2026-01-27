@@ -15,6 +15,11 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
+if [ "$#" -gt 0 ]; then
+    nekolink-ctl "$@"
+    exit $?
+fi
+
 CONFIG_DIR="/etc/neko-link"
 mkdir -p "$CONFIG_DIR"
 
@@ -194,7 +199,7 @@ while true; do
             systemctl restart nekolink
             echo -e "${PINK}重启指令已发送喵！可以使用选项 3 查看最新状态。${NC}"
             ;;
-        3) nekolink-ctl status ;;
+        3) nekolink ctl status ;;
         4) manage_keys ;;
         5) ls -l "$CONFIG_DIR"/*.json ;;
         6) exit 0 ;;

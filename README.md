@@ -52,7 +52,7 @@ sudo ./update.sh
 ### 1. Interactive Setup (Recommended)
 Simply run the following command and follow the prompts:
 ```bash
-neko-link
+nekolink
 ```
 Choose your role (Server/Client), transmission mode (IP or UDP), protocol number, and internal IP address.
 
