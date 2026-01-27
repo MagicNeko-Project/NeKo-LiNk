@@ -17,7 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### 优化改进 (Improved)
 - **命名规范化**: 二进制文件统一更名为 `nekolink`, `nekolink-cli`, `nekolink-ctl`。
 - **生命周期管理**: 强化了控制平面与隧道的“共命”关系，服务停止时自动回收所有虚拟网卡与进程喵。
-- **交互式配置**: 完善了 `neko-link` 脚本，支持更多高级网络选项。
+- **交互式配置**: 完善了 `nekolink` 脚本 (原 `neko-link`)，支持更多高级网络选项。
+
+### 修复 (Fixed)
+- **修复 TUN 接口坏态错误**: 解决了交互式脚本中的参数转发 typo 导致的 `File descriptor in bad state (EBADFD)` 错误喵。
+- **强化 CLI 健壮性**: 加强了 `nekolink-ctl` 的参数校验逻辑，防止因误输入指令导致启动冗余冲突实例喵。
 
 ## [2.0.0] - 2026-01-27
 
