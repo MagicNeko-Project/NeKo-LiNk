@@ -8,8 +8,6 @@ PINK='\033[1;35m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-echo -e "${PINK}ฅ^•ﻌ•^ฅ 欢迎使用 NekoLink 交互式配置助手！${NC}"
-
 if [ "$EUID" -ne 0 ]; then
   echo "请使用 sudo 运行此脚本喵！"
   exit 1
@@ -19,6 +17,8 @@ if [ "$#" -gt 0 ]; then
     nekolink-ctl "$@"
     exit $?
 fi
+
+echo -e "${PINK}ฅ^•ﻌ•^ฅ 欢迎使用 NekoLink 交互式配置助手！${NC}"
 
 CONFIG_DIR="/etc/neko-link"
 mkdir -p "$CONFIG_DIR"
