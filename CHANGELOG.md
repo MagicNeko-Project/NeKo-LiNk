@@ -3,7 +3,7 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.2] - 2026-01-27
+## [2.0.0] - 2026-01-27
 
 ### 新增功能 (Added)
 - **Debian 打包支持**: 新增 `install.sh --package` 命令，支持一键构建适用于 Debian 12+ 的 `.deb` 安装包。

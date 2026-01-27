@@ -2,7 +2,7 @@
 # NekoLink Debian 打包魔法脚本 ฅ^•ﻌ•^ฅ
 set -e
 
-VERSION="0.1.2"
+VERSION="2.0.0"
 ARCH=$(dpkg --print-architecture)
 PKG_NAME="nekolink"
 BUILD_DIR="build_deb_tmp"
