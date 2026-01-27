@@ -21,7 +21,7 @@ mkdir -p "$CONFIG_DIR"
 function show_menu() {
     echo -e "${CYAN}请选择操作：${NC}"
     echo "1. 创建新配置文件 (Node Config)"
-    echo "2. 启动 NekoLink (nekolink-ctl)"
+    echo "2. 重启 NekoLink 服务 (Systemd Restart)"
     echo "3. 查看运行状态 (Status)"
     echo "4. 管理密钥与公钥 (Key Management)"
     echo "5. 查看配置文件列表"
@@ -189,7 +189,11 @@ while true; do
     show_menu
     case $choice in
         1) create_config ;;
-        2) nekolink-ctl ;;
+        2) 
+            echo -e "${PINK}正在通过 Systemd 重启 NekoLink 魔法...${NC}"
+            systemctl restart nekolink
+            echo -e "${PINK}重启指令已发送喵！可以使用选项 3 查看最新状态。${NC}"
+            ;;
         3) nekolink-ctl status ;;
         4) manage_keys ;;
         5) ls -l "$CONFIG_DIR"/*.json ;;
