@@ -118,13 +118,29 @@ async fn send_uapi(interface: &str, commands: &str) -> Result<()> {
 async fn run_instance(config: NekoConfig) -> Result<()> {
     println!("正在启动接口 {} 喵...", config.interface);
 
-    // 1. 生成密钥对
-    let priv_key = StaticSecret::random_from_rng(OsRng);
+    // 1. 获取或生成固定密钥
+    let key_path = format!("/etc/neko-link/{}.key", config.interface);
+    let pub_path = format!("/etc/neko-link/{}.pub", config.interface);
+    
+    let priv_key = if let Ok(existing_key_b64) = fs::read_to_string(&key_path) {
+        let trimmed = existing_key_b64.trim();
+        let bytes = BASE64.decode(trimmed).context("无法解码现有私钥喵")?;
+        StaticSecret::from(<[u8; 32]>::try_from(bytes).map_err(|_| anyhow::anyhow!("私钥长度不对喵"))?)
+    } else {
+        let new_priv = StaticSecret::random_from_rng(OsRng);
+        let new_b64 = BASE64.encode(new_priv.to_bytes());
+        fs::write(&key_path, new_b64).context("无法保存私钥文件喵")?;
+        new_priv
+    };
+
     let pub_key = PublicKey::from(&priv_key);
     let priv_b64 = BASE64.encode(priv_key.to_bytes());
     let pub_b64 = BASE64.encode(pub_key.as_bytes());
+    
+    // 同时也写一下公钥文件方便用户查看喵
+    let _ = fs::write(&pub_path, &pub_b64);
 
-    println!("生成的公钥: {} 喵！", pub_b64);
+    println!("使用公钥: {} 喵！", pub_b64);
 
     // 2. 启动 nekolink-cli
     let mut cmd = Command::new("nekolink-cli");
