@@ -1,9 +1,12 @@
-#!/bin/bash
-# NekoLink 全自动安装脚本 ฅ^•ﻌ•^ฅ
+echo "正在准备安装/打包 NekoLink..."
 
-set -e
-
-echo "正在准备安装 NekoLink..."
+if [ "$1" == "--package" ]; then
+    echo "进入打包模式喵！"
+    cargo build --release
+    chmod +x scripts/build_deb.sh
+    ./scripts/build_deb.sh
+    exit 0
+fi
 
 # 0. 清理遗留配置 (Legacy Cleanup)
 echo "正在检查并清理旧版遗留配置..."
