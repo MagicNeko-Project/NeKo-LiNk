@@ -34,6 +34,7 @@ struct NekoConfig {
     listen_port: Option<u16>,
     #[serde(default)]
     auto_route: bool,
+    pub persistent_keepalive: Option<u16>,
 }
 
 fn default_mode() -> String {
@@ -265,6 +266,9 @@ async fn start_udp_signaling(state: NekoState) -> Result<()> {
 
                 for addr in targets {
                     if !established.is_empty() {
+                         // 只要连接成功过，信令就永久进入“贤者模式”喵
+                         println!("检测到隧道已连接成功喵，信令魔法永久休眠喵！(～﹃～)zzZ");
+                         time::sleep(Duration::from_secs(86400)).await; // 睡一天喵
                          continue;
                     }
                     let mut nonce_bytes = [0u8; 12];
@@ -287,6 +291,7 @@ async fn start_udp_signaling(state: NekoState) -> Result<()> {
         let interface = state.config.interface.clone();
         let cipher = cipher.clone();
         let dynamic_peers = Arc::clone(&dynamic_peers);
+        let keepalive = state.config.persistent_keepalive;
         async move {
             let mut known_peers: std::collections::HashMap<String, String> = std::collections::HashMap::new();
             loop {
@@ -306,7 +311,7 @@ async fn start_udp_signaling(state: NekoState) -> Result<()> {
 
                             if should_update {
                                 println!("喵！发现/更新队友 (UDP): {} 来自 {}", peer_pub_key, addr_str);
-                                if let Ok(_) = configure_peer(&interface, &peer_pub_key, addr_str.clone()).await {
+                                if let Ok(_) = configure_peer(&interface, &peer_pub_key, addr_str.clone(), keepalive).await {
                                     known_peers.insert(peer_pub_key, addr_str);
                                     dynamic_peers.lock().insert(addr);
                                 }
@@ -361,6 +366,8 @@ async fn start_raw_signaling(state: NekoState) -> Result<()> {
 
                 for ip in targets {
                     if !established.is_empty() {
+                        println!("检测到隧道已连接成功喵，信令魔法永久休眠喵！(～﹃～)zzZ");
+                        time::sleep(Duration::from_secs(86400)).await;
                         continue;
                     }
 
@@ -389,6 +396,7 @@ async fn start_raw_signaling(state: NekoState) -> Result<()> {
         let interface = state.config.interface.clone();
         let cipher = cipher.clone();
         let dynamic_peers = Arc::clone(&dynamic_peers);
+        let keepalive = state.config.persistent_keepalive;
         async move {
             let mut known_peers: std::collections::HashMap<String, String> = std::collections::HashMap::new();
             loop {
@@ -420,7 +428,7 @@ async fn start_raw_signaling(state: NekoState) -> Result<()> {
 
                                     if should_update {
                                         println!("喵！发现/更新队友 (Raw IP): {} 来自 {}", peer_pub_key, ip_str);
-                                        if let Ok(_) = configure_peer(&interface, &peer_pub_key, ip_str.clone()).await {
+                                        if let Ok(_) = configure_peer(&interface, &peer_pub_key, ip_str.clone(), keepalive).await {
                                             known_peers.insert(peer_pub_key, ip_str);
                                             dynamic_peers.lock().insert(ip);
                                         }
@@ -454,11 +462,16 @@ fn derive_cipher(psk: &str) -> ChaCha20Poly1305 {
     ChaCha20Poly1305::new(&psk_bytes.into())
 }
 
-async fn configure_peer(interface: &str, peer_pub_key: &str, endpoint: String) -> Result<()> {
-    let uapi_cmd = format!(
-        "set=1\npublic_key={}\nallowed_ip=0.0.0.0/0\nallowed_ip=::/0\nendpoint={}\n\n",
+async fn configure_peer(interface: &str, peer_pub_key: &str, endpoint: String, keepalive: Option<u16>) -> Result<()> {
+    let mut uapi_cmd = format!(
+        "set=1\npublic_key={}\nallowed_ip=0.0.0.0/0\nallowed_ip=::/0\nendpoint={}\n",
         peer_pub_key, endpoint
     );
+    if let Some(ka) = keepalive {
+        uapi_cmd.push_str(&format!("persistent_keepalive_interval={}\n", ka));
+    }
+    uapi_cmd.push_str("\n");
+    
     send_uapi(interface, &uapi_cmd).await.context("配置 Peer 失败")?;
     println!("配置队友 {} 成功喵！", peer_pub_key);
     Ok(())
