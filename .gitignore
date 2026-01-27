@@ -1,3 +1,5 @@
 /target
 **/*.rs.bk
 .vscode/
+*.deb
+build_deb_tmp/
