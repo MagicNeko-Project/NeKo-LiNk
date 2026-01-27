@@ -36,6 +36,8 @@ struct NekoConfig {
     auto_route: bool,
     pub persistent_keepalive: Option<u16>,
     pub mtu: Option<u16>,
+    #[serde(default)]
+    pub clamp_mss: bool,
 }
 
 fn default_mode() -> String {
@@ -217,6 +219,14 @@ async fn run_instance(config: NekoConfig) -> Result<()> {
         let _ = start_signaling(state).await;
     });
 
+    if config.clamp_mss {
+        println!("正在开启 MSS 自动修复 (nftables MSS Clamping) 喵...");
+        let table_name = format!("nekolink_mss_{}", config.interface);
+        let _ = run_cmd(&format!("nft add table inet {}", table_name));
+        let _ = run_cmd(&format!("nft add chain inet {} postrouting {{ type filter hook postrouting priority 300; }}", table_name));
+        let _ = run_cmd(&format!("nft add rule inet {} postrouting oifname \"{}\" tcp flags syn tcp option maxseg size set rt mtu", table_name, config.interface));
+    }
+
     // 监控进程
     tokio::select! {
         res = child.wait() => {
@@ -226,6 +236,10 @@ async fn run_instance(config: NekoConfig) -> Result<()> {
     }
 
     println!("正在清理接口 {} 喵...", config.interface);
+    if config.clamp_mss {
+        let table_name = format!("nekolink_mss_{}", config.interface);
+        let _ = run_cmd(&format!("nft delete table inet {} 2>/dev/null", table_name));
+    }
     let _ = run_cmd(&format!("ip link del {} 2>/dev/null", config.interface));
 
     Ok(())
@@ -341,9 +355,28 @@ async fn start_udp_signaling(state: NekoState) -> Result<()> {
 
 async fn start_raw_signaling(state: NekoState) -> Result<()> {
     let proto = state.config.ip_protocol.unwrap_or(141);
-    let socket = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::from(proto as i32)))?;
-    socket.set_nonblocking(true)?;
-    let socket = Arc::new(tokio::io::unix::AsyncFd::new(socket)?);
+    
+    // 我们需要两个 Socket 来同时支持 IPv4 和 IPv6 喵
+    let v4_socket = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::from(proto as i32))).ok();
+    let v6_socket = Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::from(proto as i32))).ok();
+    
+    if v4_socket.is_none() && v6_socket.is_none() {
+        return Err(anyhow::anyhow!("无法创建任何 RAW Socket 喵"));
+    }
+
+    if let Some(ref s) = v6_socket {
+        // 设置 IPv6 TCLASS 为最高优先级 (CS7)
+        use std::os::unix::io::AsRawFd;
+        let fd = s.as_raw_fd();
+        unsafe {
+            let val: libc::c_int = 224;
+            libc::setsockopt(fd, libc::IPPROTO_IPV6, libc::IPV6_TCLASS, &val as *const _ as *const libc::c_void, std::mem::size_of_val(&val) as libc::socklen_t);
+        }
+    }
+
+    let v4_socket = v4_socket.map(|s| { s.set_nonblocking(true).unwrap(); Arc::new(tokio::io::unix::AsyncFd::new(s).unwrap()) });
+    let v6_socket = v6_socket.map(|s| { s.set_nonblocking(true).unwrap(); Arc::new(tokio::io::unix::AsyncFd::new(s).unwrap()) });
+
     let cipher = derive_cipher(&state.config.psk);
     let magic_byte: u8 = 0x99;
 
@@ -351,7 +384,8 @@ async fn start_raw_signaling(state: NekoState) -> Result<()> {
 
     let send_task = {
         let config = state.config.clone();
-        let socket = Arc::clone(&socket);
+        let v4_socket = v4_socket.clone();
+        let v6_socket = v6_socket.clone();
         let cipher = cipher.clone();
         let pub_key_bytes = state.pub_key.as_bytes().to_vec();
         let dynamic_peers = Arc::clone(&dynamic_peers);
@@ -388,8 +422,12 @@ async fn start_raw_signaling(state: NekoState) -> Result<()> {
                         pkt.extend_from_slice(&ciphertext);
                         
                         let addr = socket2::SockAddr::from(SocketAddr::new(ip, 0));
-                        if let Ok(mut guard) = socket.writable().await {
-                            let _ = guard.try_io(|s| s.get_ref().send_to(&pkt, &addr));
+                        let socket_to_use = if ip.is_ipv4() { v4_socket.as_ref() } else { v6_socket.as_ref() };
+                        
+                        if let Some(socket) = socket_to_use {
+                            if let Ok(mut guard) = socket.writable().await {
+                                let _ = guard.try_io(|s| s.get_ref().send_to(&pkt, &addr));
+                            }
                         }
                     }
                 }
@@ -399,12 +437,7 @@ async fn start_raw_signaling(state: NekoState) -> Result<()> {
         }
     };
 
-    let recv_task = {
-        let socket = Arc::clone(&socket);
-        let interface = state.config.interface.clone();
-        let cipher = cipher.clone();
-        let dynamic_peers = Arc::clone(&dynamic_peers);
-        let keepalive = state.config.persistent_keepalive;
+    let recv_logic = |socket: Arc<tokio::io::unix::AsyncFd<Socket>>, interface: String, cipher: ChaCha20Poly1305, dynamic_peers: Arc<parking_lot::Mutex<std::collections::HashSet<IpAddr>>>, keepalive: Option<u16>| {
         async move {
             let mut known_peers: std::collections::HashMap<String, String> = std::collections::HashMap::new();
             loop {
@@ -415,8 +448,11 @@ async fn start_raw_signaling(state: NekoState) -> Result<()> {
                     });
                     
                     if let Ok(Ok((len, addr))) = res {
-                        // Linux Raw sockets include IP header (usually 20 bytes)
-                        let offset = if len >= 20 && (buf[0] & 0xf0) == 0x40 { 20 } else { 0 };
+                        // Linux Raw sockets include IP header for IPv4 (usually 20 bytes)
+                        // For IPv6, it usually doesn't include the header in RAW sockets unless IPV6_HDRINCL is set (which we don't)
+                        let is_ipv4 = addr.as_socket().map(|s| s.is_ipv4()).unwrap_or(true);
+                        let offset = if is_ipv4 && len >= 20 && (buf[0] & 0xf0) == 0x40 { 20 } else { 0 };
+                        
                         if len < offset + 1 + 12 + 16 { continue; }
                         let data = &buf[offset..len];
                         if data[0] != magic_byte { continue; }
@@ -451,9 +487,40 @@ async fn start_raw_signaling(state: NekoState) -> Result<()> {
         }
     };
 
+    let v4_recv = {
+        let interface = state.config.interface.clone();
+        let cipher = cipher.clone();
+        let dynamic_peers = Arc::clone(&dynamic_peers);
+        let keepalive = state.config.persistent_keepalive;
+        let socket = v4_socket.clone();
+        async move {
+            if let Some(s) = socket {
+                recv_logic(s, interface, cipher, dynamic_peers, keepalive).await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+
+    let v6_recv = {
+        let interface = state.config.interface.clone();
+        let cipher = cipher.clone();
+        let dynamic_peers = Arc::clone(&dynamic_peers);
+        let keepalive = state.config.persistent_keepalive;
+        let socket = v6_socket.clone();
+        async move {
+            if let Some(s) = socket {
+                recv_logic(s, interface, cipher, dynamic_peers, keepalive).await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+
     tokio::select! {
         _ = send_task => {},
-        _ = recv_task => {},
+        _ = v4_recv => {},
+        _ = v6_recv => {},
     }
     Ok(())
 }
