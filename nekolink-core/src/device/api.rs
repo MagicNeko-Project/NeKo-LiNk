@@ -160,8 +160,10 @@ fn api_get(writer: &mut BufWriter<&UnixStream>, d: &Device) -> i32 {
         writeln!(writer, "own_public_key={}", encode_hex(k.1.as_bytes()));
     }
 
-    if d.listen_port != 0 {
-        writeln!(writer, "listen_port={}", d.listen_port);
+    if d.config.ip_protocol.is_some() {
+        writeln!(writer, "protocol={}", d.listen_port).ok();
+    } else if d.listen_port != 0 {
+        writeln!(writer, "listen_port={}", d.listen_port).ok();
     }
 
     if let Some(fwmark) = d.fwmark {

@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **CI/CD 自动化**: 新增 GitHub Actions 工作流，每次推送代码自动构建并发布 Debian 安装包。
 - **Raw IP 纯净模式**: 实现了完全基于 Raw IP 的信令传输，移除所有对 UDP 的依赖 (UDP-free)，增强隐蔽性。
 - **IPv6 优先级增强**: 在 IPv6 Raw IP 模式下，自动设置 Traffic Class 为 `0xE0` (CS7)，确保信令享有最高网络优先级。
+- **状态显示优化**: 在 IP 模式下，UAPI 状态现在会准确显示 `protocol=协议号`，修复了之前错误显示为 `listen_port` 的问题喵。
+- **Systemd 深度集成**: 管理脚本 `neko-link` 的启动逻辑全面转向 `systemctl restart`，管理服务更加规范。
 - **TCP MSS 自动修复**: 集成 `nftables` 实现 MSS Clamping，解决 MTU 导致的网页加载问题 (可在 `neko-link` 中开启)。
 - **智能信令与 Keepalive**: 
     - 隧道建立后信令进程自动进入“永久休眠”模式，不再产生背景噪音。
