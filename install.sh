@@ -20,7 +20,7 @@ chmod +x scripts/build_deb.sh
 ./scripts/build_deb.sh
 
 # 3. 寻找生成的包
-VERSION="2.4.1"
+VERSION="2.4.2"
 DEB_FILE=$(ls NekoLink_${VERSION}_*.deb 2>/dev/null | head -n 1)
 
 if [ -z "$DEB_FILE" ]; then
