@@ -334,7 +334,8 @@ impl Device {
         // Update an existing peer
         if self.peers.get(&pub_key).is_some() {
             // We already have a peer, we need to merge the existing config into the newly created one
-            panic!("Modifying existing peers is not yet supported. Remove and add again instead.");
+            tracing::error!("Modifying existing peers is not yet supported. Remove and add again instead.");
+            return;
         }
 
         let next_index = self.next_index();
