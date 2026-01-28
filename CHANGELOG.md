@@ -3,7 +3,13 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## v2.4.2 (2026-01-28)
+## v2.4.3 (2026-01-28)
+- 喵呜！重构了全局信令架构，锁定端口为 **12580** (一按我帮您) ฅ^•ﻌ•^ฅ：
+    - **单端口多隧道共享**: 现在一个 12580 端口就能识别并分发所有隧道的握手包，不再需要每个隧道占用不同端口。
+    - **数据端口自动协商**: 12580 仅作为控制平面，实际的数据隧道端口会自动通过信令交换并协商，支持监听端口设置为 `0`（自动分配）。
+- 更新了 `nekolink.sh` 交互配置助手，全面对齐 12580 默认值与自动协商逻辑。
+- 增加了 `get_actual_listen_port` 机制，实时感知底层网卡分配的真实端口。
+
 - 喵呜！信令系统现在会根据传输模式**自动切换协议**：
     - `tcp` 模式改用真 TCP 信令，完美穿透 NAT 环境喵！
     - `ip` 模式维持 Raw IP 传输，追求极致隐蔽。
