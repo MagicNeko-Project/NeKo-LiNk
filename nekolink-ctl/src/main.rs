@@ -47,9 +47,10 @@ fn default_signal_port() -> u16 {
     12580
 }
 
+#[derive(Clone)]
 struct NekoState {
     config: NekoConfig,
-    _priv_key: StaticSecret,
+    priv_b64: String,
     pub_key: PublicKey,
 }
 
@@ -112,18 +113,33 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // 预处理所有状态 (加载/生成密钥)
+    let mut states = vec![];
+    for config in configs {
+        let (priv_b64, _, pub_key) = load_or_generate_keys(&config.interface)?;
+        states.push(NekoState { config, priv_b64, pub_key });
+    }
+    let states = Arc::new(states);
+
     // 启动全局信令管理器
-    let global_configs = configs.clone();
+    let signaling_states = Arc::clone(&states);
     tokio::spawn(async move {
-        if let Err(e) = run_global_signaling(global_configs).await {
-            eprintln!("全局信令管理器发生错误喵: {:?}", e);
+        let udp_task = run_global_udp_signaling(Arc::clone(&signaling_states));
+        let tcp_task = run_global_tcp_signaling(Arc::clone(&signaling_states));
+        let raw_task = run_global_raw_signaling(Arc::clone(&signaling_states));
+        
+        tokio::select! {
+            _ = udp_task => {},
+            _ = tcp_task => {},
+            _ = raw_task => {},
         }
     });
 
     let mut handles = vec![];
-    for config in configs {
+    for state in states.iter() {
+        let state_clone = state.clone();
         let handle = tokio::spawn(async move {
-            if let Err(e) = run_instance(config).await {
+            if let Err(e) = run_instance(state_clone).await {
                 eprintln!("实例运行时出错: {:?}", e);
             }
         });
@@ -162,32 +178,11 @@ async fn send_uapi(interface: &str, commands: &str) -> Result<()> {
     Ok(())
 }
 
-async fn run_instance(config: NekoConfig) -> Result<()> {
+async fn run_instance(state: NekoState) -> Result<()> {
+    let config = &state.config;
     println!("正在启动接口 {} 喵...", config.interface);
 
-    // 1. 获取或生成固定密钥
-    let key_path = format!("/etc/neko-link/{}.key", config.interface);
-    let pub_path = format!("/etc/neko-link/{}.pub", config.interface);
-    
-    let priv_key = if let Ok(existing_key_b64) = fs::read_to_string(&key_path) {
-        let trimmed = existing_key_b64.trim();
-        let bytes = BASE64.decode(trimmed).context("无法解码现有私钥喵")?;
-        StaticSecret::from(<[u8; 32]>::try_from(bytes).map_err(|_| anyhow::anyhow!("私钥长度不对喵"))?)
-    } else {
-        let new_priv = StaticSecret::random_from_rng(OsRng);
-        let new_b64 = BASE64.encode(new_priv.to_bytes());
-        fs::write(&key_path, new_b64).context("无法保存私钥文件喵")?;
-        new_priv
-    };
-
-    let pub_key = PublicKey::from(&priv_key);
-    let priv_b64 = BASE64.encode(priv_key.to_bytes());
-    let pub_b64 = BASE64.encode(pub_key.as_bytes());
-    
-    // 同时也写一下公钥文件方便用户查看喵
-    let _ = fs::write(&pub_path, &pub_b64);
-
-    println!("使用公钥: {} 喵！", pub_b64);
+    println!("使用公钥: {} 喵！", state.pub_key_b64());
 
     // 2. 预清理：强制删除可能存在的旧接口喵
     let _ = run_cmd(&format!("ip link del {} 2>/dev/null", config.interface));
@@ -206,7 +201,12 @@ async fn run_instance(config: NekoConfig) -> Result<()> {
     }
     
     // 强制设置 MTU，默认 1420 喵
-    let mtu = config.mtu.unwrap_or(1420);
+    // 特殊：如果 config.mtu 为 0 (自动同步)，启动时先用 1420 喵
+    let mtu = match config.mtu {
+        Some(0) => 1420,
+        Some(val) => val,
+        None => 1420,
+    };
     
     let mut child = cmd.spawn().context("启动 nekolink-cli 失败")?;
 
@@ -214,7 +214,7 @@ async fn run_instance(config: NekoConfig) -> Result<()> {
     time::sleep(Duration::from_secs(2)).await;
 
     // 3. 配置接口与私钥 (UAPI 方式)
-    let mut uapi_cmd = format!("set=1\nprivate_key={}\n", priv_b64);
+    let mut uapi_cmd = format!("set=1\nprivate_key={}\n", state.priv_b64);
     if let Some(port) = config.listen_port {
         uapi_cmd.push_str(&format!("listen_port={}\n", port));
     }
@@ -379,6 +379,22 @@ async fn run_global_udp_signaling(states: Arc<Vec<NekoState>>) -> Result<()> {
 
                                 println!("喵！全局 12580 (UDP) 处理成功：{} -> {}", endpoint, state.config.interface);
                                 let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, &state.config, peer_mtu).await;
+                                
+                                // 立即回一发握手响应喵！让对端也能知道我的动态端口
+                                let msg_base = state.pub_key.as_bytes().to_vec();
+                                let current_mtu = get_interface_mtu(&state.config.interface).unwrap_or(1420);
+                                let actual_tunnel_port = get_actual_listen_port(&state.config.interface).unwrap_or(0);
+                                let mut resp_msg = msg_base;
+                                resp_msg.extend_from_slice(&current_mtu.to_be_bytes());
+                                resp_msg.extend_from_slice(&actual_tunnel_port.to_be_bytes());
+                                
+                                let mut nonce_bytes = [0u8; 12];
+                                OsRng.fill_bytes(&mut nonce_bytes);
+                                if let Ok(ciphertext) = cipher.encrypt(Nonce::from_slice(&nonce_bytes), resp_msg.as_slice()) {
+                                    let mut pkt = nonce_bytes.to_vec();
+                                    pkt.extend_from_slice(&ciphertext);
+                                    let _ = socket.send_to(&pkt, addr).await;
+                                }
                                 break;
                             }
                         }
@@ -474,6 +490,23 @@ async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>) -> Result<()> {
 
                                             println!("喵！全局 12580 (TCP) 处理成功：{} -> {}", endpoint, state.config.interface);
                                             let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, &state.config, peer_mtu).await;
+                                            
+                                            // TCP 握手响应喵！直接在当前流回发
+                                            let msg_base = state.pub_key.as_bytes().to_vec();
+                                            let current_mtu = get_interface_mtu(&state.config.interface).unwrap_or(1420);
+                                            let actual_tunnel_port = get_actual_listen_port(&state.config.interface).unwrap_or(0);
+                                            let mut resp_msg = msg_base;
+                                            resp_msg.extend_from_slice(&current_mtu.to_be_bytes());
+                                            resp_msg.extend_from_slice(&actual_tunnel_port.to_be_bytes());
+                                            
+                                            let mut nonce_bytes = [0u8; 12];
+                                            OsRng.fill_bytes(&mut nonce_bytes);
+                                            if let Ok(ciphertext) = cipher.encrypt(Nonce::from_slice(&nonce_bytes), resp_msg.as_slice()) {
+                                                let mut pkt = nonce_bytes.to_vec();
+                                                pkt.extend_from_slice(&ciphertext);
+                                                use tokio::io::AsyncWriteExt;
+                                                let _ = stream.write_all(&pkt).await;
+                                            }
                                             break;
                                         }
                                     }
@@ -568,8 +601,27 @@ async fn run_global_raw_signaling(states: Arc<Vec<NekoState>>) -> Result<()> {
                                      let cipher = derive_cipher(&state.config.psk);
                                      if let Ok(decrypted) = cipher.decrypt(nonce, encrypted) {
                                          let ip_addr = addr.as_socket().map(|s| s.ip()).unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+                                         let peer_mtu = if decrypted.len() >= 34 { Some(u16::from_be_bytes([decrypted[32], decrypted[33]])) } else { None };
                                          println!("喵！全局 12580 (Raw IP) 处理成功：{} -> {}", ip_addr, state.config.interface);
-                                         let _ = configure_peer(&state.config.interface, &BASE64.encode(&decrypted[..32]), ip_addr.to_string(), state.config.persistent_keepalive, &state.config, None).await;
+                                         let _ = configure_peer(&state.config.interface, &BASE64.encode(&decrypted[..32]), ip_addr.to_string(), state.config.persistent_keepalive, &state.config, peer_mtu).await;
+
+                                         // Raw IP 响应喵！
+                                         let msg_base = state.pub_key.as_bytes().to_vec();
+                                         let current_mtu = get_interface_mtu(&state.config.interface).unwrap_or(1420);
+                                         let mut resp_msg = msg_base;
+                                         resp_msg.extend_from_slice(&current_mtu.to_be_bytes());
+                                         
+                                         let mut nonce_bytes = [0u8; 12];
+                                         OsRng.fill_bytes(&mut nonce_bytes);
+                                         if let Ok(ciphertext) = cipher.encrypt(Nonce::from_slice(&nonce_bytes), resp_msg.as_slice()) {
+                                              let mut pkt = vec![magic_byte];
+                                              pkt.extend_from_slice(&nonce_bytes);
+                                              pkt.extend_from_slice(&ciphertext);
+                                              let dest_addr = socket2::SockAddr::from(SocketAddr::new(ip_addr, 0));
+                                              if let Ok(mut guard) = v4_socket.as_ref().unwrap().writable().await {
+                                                  let _ = guard.try_io(|s| s.get_ref().send_to(&pkt, &dest_addr));
+                                              }
+                                         }
                                      }
                                  }
                              }

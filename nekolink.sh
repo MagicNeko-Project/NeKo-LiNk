@@ -271,6 +271,9 @@ function create_config() {
     fi
     [ -z "$local_addr" ] && local_addr="10.0.0.1/24"
 
+    read -p "请输入 Keepalive 持续活动间隔 (秒, 0 为禁用, 默认 25): " keepalive
+    [ -z "$keepalive" ] && keepalive=25
+
     read -p "请输入预共享密钥 (PSK, 用于自动交换公钥，两端必须一致): " psk
     [ -z "$psk" ] && psk="NekoMagic_Default_PSK"
 
