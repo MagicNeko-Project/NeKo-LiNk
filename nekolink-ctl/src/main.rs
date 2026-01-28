@@ -127,18 +127,20 @@ async fn main() -> Result<()> {
     }
     let states = Arc::new(states);
 
-    // 启动全局信令管理器
+    // 启动全局信令管理器 (独立模块运行，互不干扰喵)
     let signaling_states = Arc::clone(&states);
     tokio::spawn(async move {
-        let udp_task = run_global_udp_signaling(Arc::clone(&signaling_states));
-        let tcp_task = run_global_tcp_signaling(Arc::clone(&signaling_states));
-        let raw_task = run_global_raw_signaling(Arc::clone(&signaling_states));
-        
-        tokio::select! {
-            _ = udp_task => {},
-            _ = tcp_task => {},
-            _ = raw_task => {},
-        }
+        println!("ฅ^•ﻌ•^ฅ 全局信令中枢：UDP 管线启动...");
+        let s1 = Arc::clone(&signaling_states);
+        tokio::spawn(async move { if let Err(e) = run_global_udp_signaling(s1).await { eprintln!("UDP 信令管线异常退出喵: {:?}", e); } });
+
+        println!("ฅ^•ﻌ•^ฅ 全局信令中枢：TCP 管线启动...");
+        let s2 = Arc::clone(&signaling_states);
+        tokio::spawn(async move { if let Err(e) = run_global_tcp_signaling(s2).await { eprintln!("TCP 信令管线异常退出喵: {:?}", e); } });
+
+        println!("ฅ^•ﻌ•^ฅ 全局信令中枢：Raw IP 管线启动...");
+        let s3 = Arc::clone(&signaling_states);
+        tokio::spawn(async move { if let Err(e) = run_global_raw_signaling(s3).await { eprintln!("Raw IP 信令管线异常退出喵: {:?}", e); } });
     });
 
     let mut handles = vec![];
@@ -297,7 +299,11 @@ async fn run_global_udp_signaling(states: Arc<Vec<NekoState>>) -> Result<()> {
                             if let Ok(ciphertext) = cipher.encrypt(Nonce::from_slice(&nonce_bytes), msg.as_slice()) {
                                 let mut pkt = nonce_bytes.to_vec();
                                 pkt.extend_from_slice(&ciphertext);
-                                let _ = socket.send_to(&pkt, addr).await;
+                                if let Err(e) = socket.send_to(&pkt, addr).await {
+                                    eprintln!("UDP 信令推送失败喵 ({}): {:?}", state.config.interface, e);
+                                } else {
+                                    println!("喵！已向对端 {} 主动推送 12580 (UDP) 信令盒。", addr);
+                                }
                             }
                         }
                     }
@@ -334,10 +340,10 @@ async fn run_global_udp_signaling(states: Arc<Vec<NekoState>>) -> Result<()> {
                                     endpoint = format!("{}:{}", endpoint, addr.port());
                                 }
 
-                                println!("喵！全局 12580 (UDP) 处理成功：{} -> {}", endpoint, state.config.interface);
-                                let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, &state.config, peer_mtu).await;
+                                println!("喵！12580 (UDP) 握手处理成功：{} -> {}", endpoint, state.config.interface);
+                                let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0)).await;
                                 
-                                // 立即回一发握手响应喵！让对端也能知道我的动态端口
+                                // 回发响应喵
                                 let msg_base = state.pub_key.as_bytes().to_vec();
                                 let current_mtu = get_interface_mtu(&state.config.interface).unwrap_or(1420);
                                 let actual_tunnel_port = get_actual_listen_port(&state.config.interface).unwrap_or(0);
@@ -372,15 +378,21 @@ async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>) -> Result<()> {
     let port = states.get(0).map(|s| s.config.signal_port).unwrap_or(12580);
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
 
+    println!("ฅ^•ﻌ•^ฅ TCP 信令管线就绪，正在监听 {} 端口，监控 {} 个接口喵。", port, states.len());
+
     let send_task = {
         let states = Arc::clone(&states);
         async move {
             loop {
                 for state in states.iter() {
-                    if state.config.mode != "tcp" || state.pub_key.as_bytes() == &[0u8; 32] { continue; }
-                    
                     let established = get_established_peers(&state.config.interface).await;
-                    if !established.is_empty() { continue; }
+                    if state.config.mode != "tcp" || state.pub_key.as_bytes() == &[0u8; 32] {
+                        continue;
+                    }
+                    
+                    if !established.is_empty() {
+                        continue;
+                    }
 
                     let cipher = derive_cipher(&state.config.psk);
                     let pub_key_bytes = state.pub_key.as_bytes().to_vec();
@@ -391,22 +403,56 @@ async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>) -> Result<()> {
                             addr.set_port(state.config.signal_port);
                             let cipher = cipher.clone();
                             let pub_key_bytes = pub_key_bytes.clone();
-                            let interface = interface.clone();
+                            let interface_inner = interface.clone();
                             tokio::spawn(async move {
-                                if let Ok(Ok(mut stream)) = time::timeout(Duration::from_secs(5), tokio::net::TcpStream::connect(addr)).await {
-                                    let current_mtu = get_interface_mtu(&interface).unwrap_or(1420);
-                                    let actual_tunnel_port = get_actual_listen_port(&interface).unwrap_or(0);
+                                println!("喵！正在发起 TCP 信令连接: {}...", addr);
+                                match time::timeout(Duration::from_secs(10), tokio::net::TcpStream::connect(addr)).await {
+                                    Ok(Ok(mut stream)) => {
+                                        println!("喵！TCP 信令连接已建立: {}", addr);
+                                        let current_mtu = get_interface_mtu(&interface_inner).unwrap_or(1420);
+                                        let actual_tunnel_port = get_actual_listen_port(&interface_inner).unwrap_or(0);
 
-                                    let mut msg = pub_key_bytes.clone();
-                                    msg.extend_from_slice(&current_mtu.to_be_bytes());
-                                    msg.extend_from_slice(&actual_tunnel_port.to_be_bytes());
+                                        let mut msg = pub_key_bytes.clone();
+                                        msg.extend_from_slice(&current_mtu.to_be_bytes());
+                                        msg.extend_from_slice(&actual_tunnel_port.to_be_bytes());
 
-                                    let mut nonce_bytes = [0u8; 12];
-                                    OsRng.fill_bytes(&mut nonce_bytes);
-                                    if let Ok(ciphertext) = cipher.encrypt(Nonce::from_slice(&nonce_bytes), msg.as_slice()) {
-                                        let mut pkt = nonce_bytes.to_vec();
-                                        pkt.extend_from_slice(&ciphertext);
-                                        let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, &pkt).await;
+                                        let mut nonce_bytes = [0u8; 12];
+                                        OsRng.fill_bytes(&mut nonce_bytes);
+                                        if let Ok(ciphertext) = cipher.encrypt(Nonce::from_slice(&nonce_bytes), msg.as_slice()) {
+                                            let mut pkt = nonce_bytes.to_vec();
+                                            pkt.extend_from_slice(&ciphertext);
+                                            if tokio::io::AsyncWriteExt::write_all(&mut stream, &pkt).await.is_ok() {
+                                                println!("喵！已向对端推送 12580 信令，等待服务端 Ack...");
+                                                let mut ack_buf = [0u8; 128];
+                                                if let Ok(Ok(n)) = time::timeout(Duration::from_secs(10), tokio::io::AsyncReadExt::read(&mut stream, &mut ack_buf)).await {
+                                                    if n >= 12 + 32 {
+                                                        let (nonce_part, encrypted_part) = ack_buf[..n].split_at(12);
+                                                        let nonce = Nonce::from_slice(nonce_part);
+                                                        if let Ok(decrypted) = cipher.decrypt(nonce, encrypted_part) {
+                                                            if decrypted.len() >= 36 {
+                                                                let peer_pub_key = BASE64.encode(&decrypted[..32]);
+                                                                let peer_mtu = Some(u16::from_be_bytes([decrypted[32], decrypted[33]]));
+                                                                let peer_tunnel_port = u16::from_be_bytes([decrypted[34], decrypted[35]]);
+                                                                let mut endpoint = addr.ip().to_string();
+                                                                if peer_tunnel_port > 0 {
+                                                                    endpoint = format!("{}:{}", endpoint, peer_tunnel_port);
+                                                                }
+                                                                println!("喵！成功接收 TCP 信令响应 (ACK)：来自 {} (隧道端口: {})", endpoint, peer_tunnel_port);
+                                                                let _ = configure_peer(&interface_inner, &peer_pub_key, endpoint, None, peer_mtu, true).await;
+                                                            }
+                                                        }
+                                                    }
+                                                } else {
+                                                    println!("喵呜... 没收到 {} 的 TCP 信令响应，下次再试喵。", addr);
+                                                }
+                                            }
+                                        }
+                                    },
+                                    Ok(Err(e)) => {
+                                        println!("喵呜... TCP 连接对端 {} 失败: {:?} (请检查服务端 12580 是否开启喵)", addr, e);
+                                    },
+                                    Err(_) => {
+                                        println!("喵呜... TCP 连接对端 {} 超时喵。", addr);
                                     }
                                 }
                             });
@@ -445,8 +491,8 @@ async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>) -> Result<()> {
                                                 endpoint = format!("{}:{}", endpoint, peer_tunnel_port);
                                             }
 
-                                            println!("喵！全局 12580 (TCP) 处理成功：{} -> {}", endpoint, state.config.interface);
-                                            let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, &state.config, peer_mtu).await;
+                                            println!("喵！12580 (TCP) 识别成功：{} -> {}", endpoint, state.config.interface);
+                                            let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0)).await;
                                             
                                             // TCP 握手响应喵！直接在当前流回发
                                             let msg_base = state.pub_key.as_bytes().to_vec();
@@ -487,19 +533,16 @@ async fn run_global_raw_signaling(states: Arc<Vec<NekoState>>) -> Result<()> {
     // 这里简单处理：监听默认的协议号 141
     let proto = 141; 
     let v4_socket = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::from(proto as i32))).ok();
-    let v6_socket = Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::from(proto as i32))).ok();
     
-    if v4_socket.is_none() && v6_socket.is_none() { return Ok(()); }
-    
+    println!("ฅ^•ﻌ•^ฅ Raw IP 信令管线就绪，正在监控 {} 个接口喵。", states.len());
+
     let v4_socket = v4_socket.map(|s| { s.set_nonblocking(true).unwrap(); Arc::new(tokio::io::unix::AsyncFd::new(s).unwrap()) });
-    let v6_socket = v6_socket.map(|s| { s.set_nonblocking(true).unwrap(); Arc::new(tokio::io::unix::AsyncFd::new(s).unwrap()) });
 
     let magic_byte: u8 = 0x99;
 
     let send_task = {
         let states = Arc::clone(&states);
         let v4_socket = v4_socket.clone();
-        let v6_socket = v6_socket.clone();
         async move {
             loop {
                 for state in states.iter() {
@@ -522,10 +565,10 @@ async fn run_global_raw_signaling(states: Arc<Vec<NekoState>>) -> Result<()> {
                                 pkt.extend_from_slice(&nonce_bytes);
                                 pkt.extend_from_slice(&ciphertext);
                                 let addr = socket2::SockAddr::from(SocketAddr::new(ip, 0));
-                                let socket_to_use = if ip.is_ipv4() { v4_socket.as_ref() } else { v6_socket.as_ref() };
+                                let socket_to_use = v4_socket.as_ref(); 
                                 if let Some(socket) = socket_to_use {
                                     if let Ok(mut guard) = socket.writable().await {
-                                        let _ = guard.try_io(|s| s.get_ref().send_to(&pkt, &addr));
+                                        let _ = guard.try_io(|s: &tokio::io::unix::AsyncFd<Socket>| s.get_ref().send_to(&pkt, &addr));
                                     }
                                 }
                             }
@@ -540,15 +583,12 @@ async fn run_global_raw_signaling(states: Arc<Vec<NekoState>>) -> Result<()> {
     let recv_task = {
         let states = Arc::clone(&states);
         let v4_socket = v4_socket.clone();
-        let _v6_socket = v6_socket.clone();
         async move {
             let mut buf = [0u8; 1024];
             loop {
-                // 这个 recv 逻辑需要更细的代码，这里简化：
-                // 暂时只处理 v4，逻辑与 UDP 类似，只是先检查 magic_byte 喵
                 if let Some(ref s) = v4_socket {
                     if let Ok(mut guard) = s.readable().await {
-                        if let Ok(Ok((len, addr))) = guard.try_io(|sock| sock.get_ref().recv_from(unsafe { &mut *(buf.as_mut_slice() as *mut [u8] as *mut [std::mem::MaybeUninit<u8>]) })) {
+                        if let Ok(Ok((len, addr))) = guard.try_io(|sock: &tokio::io::unix::AsyncFd<Socket>| sock.get_ref().recv_from(unsafe { &mut *(buf.as_mut_slice() as *mut [u8] as *mut [std::mem::MaybeUninit<u8>]) })) {
                              let offset = if len >= 20 && (buf[0] & 0xf0) == 0x40 { 20 } else { 0 };
                              if len >= offset + 1 + 12 + 32 && buf[offset] == magic_byte {
                                  let nonce = Nonce::from_slice(&buf[offset+1..offset+13]);
@@ -559,8 +599,8 @@ async fn run_global_raw_signaling(states: Arc<Vec<NekoState>>) -> Result<()> {
                                      if let Ok(decrypted) = cipher.decrypt(nonce, encrypted) {
                                          let ip_addr = addr.as_socket().map(|s| s.ip()).unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
                                          let peer_mtu = if decrypted.len() >= 34 { Some(u16::from_be_bytes([decrypted[32], decrypted[33]])) } else { None };
-                                         println!("喵！全局 12580 (Raw IP) 处理成功：{} -> {}", ip_addr, state.config.interface);
-                                         let _ = configure_peer(&state.config.interface, &BASE64.encode(&decrypted[..32]), ip_addr.to_string(), state.config.persistent_keepalive, &state.config, peer_mtu).await;
+                                         println!("喵！12580 (Raw IP) 识别成功：{} -> {}", ip_addr, state.config.interface);
+                                         let _ = configure_peer(&state.config.interface, &BASE64.encode(&decrypted[..32]), ip_addr.to_string(), state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0)).await;
 
                                          // Raw IP 响应喵！
                                          let msg_base = state.pub_key.as_bytes().to_vec();
@@ -576,7 +616,7 @@ async fn run_global_raw_signaling(states: Arc<Vec<NekoState>>) -> Result<()> {
                                               pkt.extend_from_slice(&ciphertext);
                                               let dest_addr = socket2::SockAddr::from(SocketAddr::new(ip_addr, 0));
                                               if let Ok(mut guard) = v4_socket.as_ref().unwrap().writable().await {
-                                                  let _ = guard.try_io(|s| s.get_ref().send_to(&pkt, &dest_addr));
+                                                  let _ = guard.try_io(|s: &tokio::io::unix::AsyncFd<Socket>| s.get_ref().send_to(&pkt, &dest_addr));
                                               }
                                          }
                                      }
@@ -609,7 +649,7 @@ fn derive_cipher(psk: &str) -> ChaCha20Poly1305 {
     ChaCha20Poly1305::new(&psk_bytes.into())
 }
 
-async fn configure_peer(interface: &str, peer_pub_key: &str, endpoint: String, keepalive: Option<u16>, local_config: &NekoConfig, peer_mtu: Option<u16>) -> Result<()> {
+async fn configure_peer(interface: &str, peer_pub_key: &str, endpoint: String, keepalive: Option<u16>, peer_mtu: Option<u16>, auto_sync_mtu: bool) -> Result<()> {
     let mut uapi_cmd = format!(
         "set=1\npublic_key={}\nallowed_ip=0.0.0.0/0\nallowed_ip=::/0\nendpoint={}\n",
         peer_pub_key, endpoint
@@ -620,23 +660,21 @@ async fn configure_peer(interface: &str, peer_pub_key: &str, endpoint: String, k
     uapi_cmd.push_str("\n");
     
     send_uapi(interface, &uapi_cmd).await.context("配置 Peer 失败")?;
-    println!("配置队友 {} 成功喵！", peer_pub_key);
+    println!("配置队友 {} (Endpoint: {}) 成功喵！", peer_pub_key, endpoint);
 
     if let Some(m) = peer_mtu {
-        let _ = sync_mtu_if_needed(local_config, m).await;
+        if auto_sync_mtu {
+            let _ = sync_mtu_if_needed(interface, m).await;
+        }
     }
-
     Ok(())
 }
 
-async fn sync_mtu_if_needed(config: &NekoConfig, peer_mtu: u16) -> Result<()> {
-    if config.mtu == Some(0) {
-        // 自动同步模式喵
-        let current_mtu = get_interface_mtu(&config.interface).unwrap_or(0);
-        if current_mtu != peer_mtu && peer_mtu >= 1280 {
-            println!("检测到对端 MTU 为 {}，正在同步接口 {} 的 MTU 喵...", peer_mtu, config.interface);
-            let _ = run_cmd(&format!("ip link set mtu {} dev {}", peer_mtu, config.interface));
-        }
+async fn sync_mtu_if_needed(interface: &str, peer_mtu: u16) -> Result<()> {
+    let current_mtu = get_interface_mtu(interface).unwrap_or(0);
+    if current_mtu != peer_mtu && peer_mtu >= 1280 {
+        println!("检测到对端 MTU 为 {}，正在同步接口 {} 的 MTU 喵...", peer_mtu, interface);
+        let _ = run_cmd(&format!("ip link set mtu {} dev {}", peer_mtu, interface));
     }
     Ok(())
 }
@@ -871,3 +909,5 @@ fn load_or_generate_keys(interface: &str) -> Result<(String, String, PublicKey)>
     
     Ok((priv_b64, pub_b64, pub_key))
 }
+
+
