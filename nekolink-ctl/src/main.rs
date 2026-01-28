@@ -714,6 +714,10 @@ async fn configure_peer(interface: &str, peer_pub_key: &str, endpoint: String, k
             if old_ep == &endpoint {
                 return Ok(());
             }
+            // Endpoint 变了，我们需要先删除旧的喵
+            println!("检测到接口 {} 的队友 {} Endpoint 变更: {} -> {}，正在重置 Peer 喵...", interface, peer_pub_key, old_ep, endpoint);
+            let remove_cmd = format!("set=1\npublic_key={}\nremove=true\n\n", peer_pub_key);
+            let _ = send_uapi(interface, &remove_cmd).await; 
         }
         cache.insert((interface.to_string(), peer_pub_key.to_string()), endpoint.clone());
     }
