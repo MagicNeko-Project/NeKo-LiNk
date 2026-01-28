@@ -375,7 +375,7 @@ async fn run_global_udp_signaling(states: Arc<Vec<NekoState>>) -> Result<()> {
 }
 
 async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>) -> Result<()> {
-    let port = states.get(0).map(|s| s.config.signal_port).unwrap_or(12580);
+    let port = states.iter().map(|s| s.config.signal_port).find(|&p| p > 0).unwrap_or(12580);
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
 
     println!("ฅ^•ﻌ•^ฅ TCP 信令管线就绪，正在监听 {} 端口，监控 {} 个接口喵。", port, states.len());
