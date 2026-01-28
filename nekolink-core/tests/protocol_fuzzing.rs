@@ -3,7 +3,7 @@
 
 use nekolink_core::noise::{Tunn, TunnResult};
 use nekolink_core::noise::rate_limiter::RateLimiter;
-use nekolink_core::device::peer::{AllowedIP, Peer};
+use nekolink_core::device::{peer::{AllowedIP, Peer}, TransportMode};
 use nekolink_core::x25519;
 use proptest::prelude::*;
 use std::net::IpAddr;
@@ -159,7 +159,7 @@ proptest! {
             AllowedIP::from_str("::/0").unwrap(),          // Allow all IPv6  
         ];
         
-        let peer = Peer::new(tunnel, 1, None, &allowed_ips, None);
+        let peer = Peer::new(tunnel, 1, None, &allowed_ips, None, TransportMode::Udp);
         
         // Test with various IP addresses
         let test_ipv4 = IpAddr::V4(std::net::Ipv4Addr::from(test_ip_bytes));
