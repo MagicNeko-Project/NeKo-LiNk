@@ -263,12 +263,15 @@ async fn run_instance(state: NekoState) -> Result<()> {
 
     send_uapi(&config.interface, &uapi_cmd).await.context("配置私钥失败")?;
 
-    // 4. 配置 IP 地址与链路状态 (更健壮喵)
+    println!("正在启用网卡 {} 喵...", config.interface);
+    run_cmd(&format!("ip link set up dev {}", config.interface)).context("启用网卡失败")?;
+    
     println!("正在配置 IP 地址 {} 到 {}...", config.local_address, config.interface);
     let _ = run_cmd(&format!("ip addr del {} dev {} 2>/dev/null", config.local_address, config.interface));
     run_cmd(&format!("ip addr add {} dev {}", config.local_address, config.interface)).context("添加 IP 失败")?;
+
+    println!("正在设置 MTU {} 到 {}...", mtu, config.interface);
     run_cmd(&format!("ip link set mtu {} dev {}", mtu, config.interface)).context("设置 MTU 失败")?;
-    run_cmd(&format!("ip link set up dev {}", config.interface)).context("启用网卡失败")?;
 
     // 如果 MTU 为 0，表示开启了自动同步模式喵
     if config.mtu == Some(0) {
@@ -689,7 +692,7 @@ async fn run_global_raw_signaling(states: Arc<Vec<NekoState>>) -> Result<()> {
                         }
                     }
                 }
-                time::sleep(Duration::from_millis(100)).await;
+                time::sleep(Duration::from_secs(10)).await;
             }
         }
     };
@@ -823,8 +826,8 @@ async fn show_status() -> Result<()> {
             Ok(info) => {
                 println!("UAPI 状态:\n{}", info);
             },
-            Err(_) => {
-                println!("UAPI 状态: 离线喵 (接口可能未启动)");
+            Err(e) => {
+                println!("UAPI 状态: 离线喵 (错误: {:?})", e);
             }
         }
         
@@ -847,7 +850,9 @@ async fn show_status() -> Result<()> {
 
 async fn get_uapi_info(interface: &str) -> Result<String> {
     let path = format!("/var/run/wireguard/{}.sock", interface);
-    let mut stream = time::timeout(Duration::from_millis(500), tokio::net::UnixStream::connect(path)).await??;
+    let mut stream = time::timeout(Duration::from_secs(2), tokio::net::UnixStream::connect(path)).await
+        .map_err(|_| anyhow::anyhow!("连接 UAPI Socket 超时喵 (2s)"))?
+        .context("无法连接到 UAPI Socket")?;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     stream.write_all(b"get=1\n\n").await?;
     let mut reader = BufReader::new(stream);
