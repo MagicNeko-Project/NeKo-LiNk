@@ -368,11 +368,13 @@ async fn run_global_udp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                                 let peer_mtu = Some(u16::from_be_bytes([decrypted[32], decrypted[33]]));
                                 let peer_tunnel_port = u16::from_be_bytes([decrypted[34], decrypted[35]]);
                                 
+                                if peer_tunnel_port == 0 && state.config.mode != "ip" {
+                                    continue;
+                                }
+
                                 let mut endpoint = addr.ip().to_string();
                                 if peer_tunnel_port > 0 {
                                     endpoint = format!("{}:{}", endpoint, peer_tunnel_port);
-                                } else {
-                                    endpoint = format!("{}:{}", endpoint, addr.port());
                                 }
 
                                 println!("喵！12580 (UDP) 握手处理成功：{} -> {}", endpoint, state.config.interface);
@@ -475,6 +477,10 @@ async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                                                                 let peer_pub_key = BASE64.encode(&decrypted[..32]);
                                                                 let peer_mtu = Some(u16::from_be_bytes([decrypted[32], decrypted[33]]));
                                                                 let peer_tunnel_port = u16::from_be_bytes([decrypted[34], decrypted[35]]);
+                                                                if peer_tunnel_port == 0 && state.config.mode != "ip" {
+                                                                    continue;
+                                                                }
+
                                                                 let mut endpoint = addr.ip().to_string();
                                                                 if peer_tunnel_port > 0 {
                                                                     endpoint = format!("{}:{}", endpoint, peer_tunnel_port);
@@ -528,6 +534,9 @@ async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                                             let peer_mtu = Some(u16::from_be_bytes([decrypted[32], decrypted[33]]));
                                             let peer_tunnel_port = u16::from_be_bytes([decrypted[34], decrypted[35]]);
                                             
+                                            if peer_tunnel_port == 0 && state.config.mode != "ip" {
+                                                continue;
+                                            }
                                             let mut endpoint = addr.ip().to_string();
                                             if peer_tunnel_port > 0 {
                                                 endpoint = format!("{}:{}", endpoint, peer_tunnel_port);
