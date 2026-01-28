@@ -44,7 +44,7 @@ fn default_mode() -> String {
     "udp".to_string()
 }
 fn default_signal_port() -> u16 {
-    5678
+    12580
 }
 
 struct NekoState {
@@ -93,8 +93,7 @@ async fn main() -> Result<()> {
         fs::create_dir_all(config_dir).context("无法创建配置目录")?;
     }
 
-    let mut handles = vec![];
-
+    let mut configs = vec![];
     for entry in glob::glob(&format!("{}/*.json", config_dir))? {
         let path = entry?;
         let config_str = fs::read_to_string(&path)?;
@@ -105,17 +104,30 @@ async fn main() -> Result<()> {
                 continue;
             }
         };
+        configs.push(config);
+    }
 
+    if configs.is_empty() {
+        println!("喵？没有发现任何配置文件在 {}/。请添加 *.json 文件喵！", config_dir);
+        return Ok(());
+    }
+
+    // 启动全局信令管理器
+    let global_configs = configs.clone();
+    tokio::spawn(async move {
+        if let Err(e) = run_global_signaling(global_configs).await {
+            eprintln!("全局信令管理器发生错误喵: {:?}", e);
+        }
+    });
+
+    let mut handles = vec![];
+    for config in configs {
         let handle = tokio::spawn(async move {
             if let Err(e) = run_instance(config).await {
-                eprintln!("实例 {:?} 运行时出错: {:?}", path, e);
+                eprintln!("实例运行时出错: {:?}", e);
             }
         });
         handles.push(handle);
-    }
-
-    if handles.is_empty() {
-        println!("喵？没有发现任何配置文件在 {}/。请添加 *.json 文件喵！", config_dir);
     }
 
     for h in handles {
@@ -231,32 +243,8 @@ async fn run_instance(config: NekoConfig) -> Result<()> {
         }
     }
     
-    // 4. 加密信令任务：交换公钥
-    let state = NekoState {
-        config: config.clone(),
-        _priv_key: priv_key,
-        pub_key,
-    };
-
-    let signaling_handle = tokio::spawn(async move {
-        let _ = start_signaling(state).await;
-    });
-
-    if config.clamp_mss {
-        println!("正在开启 MSS 自动修复 (nftables MSS Clamping) 喵...");
-        let table_name = format!("nekolink_mss_{}", config.interface);
-        let _ = run_cmd(&format!("nft add table inet {}", table_name));
-        let _ = run_cmd(&format!("nft add chain inet {} postrouting {{ type filter hook postrouting priority 300; }}", table_name));
-        let _ = run_cmd(&format!("nft add rule inet {} postrouting oifname \"{}\" tcp flags syn tcp option maxseg size set rt mtu", table_name, config.interface));
-    }
-
     // 监控进程
-    tokio::select! {
-        res = child.wait() => {
-            println!("nekolink-cli 进程意外退出喵: {:?} (接口: {})", res, config.interface);
-        },
-        _ = signaling_handle => {},
-    }
+    let _ = child.wait().await;
 
     println!("正在清理接口 {} 喵...", config.interface);
     if config.clamp_mss {
@@ -268,117 +256,134 @@ async fn run_instance(config: NekoConfig) -> Result<()> {
     Ok(())
 }
 
-async fn start_signaling(state: NekoState) -> Result<()> {
-    match state.config.mode.as_str() {
-        "ip" => start_raw_signaling(state).await,
-        "tcp" => start_tcp_signaling(state).await,
-        _ => start_udp_signaling(state).await,
+async fn run_global_signaling(configs: Vec<NekoConfig>) -> Result<()> {
+    // 预处理所有状态 (加载密钥)
+    let mut states = vec![];
+    for config in configs {
+        let key_path = format!("/etc/neko-link/{}.key", config.interface);
+        if let Ok(existing_key_b64) = fs::read_to_string(&key_path) {
+            if let Ok(bytes) = BASE64.decode(existing_key_b64.trim()) {
+                if let Ok(priv_bytes) = <[u8; 32]>::try_from(bytes) {
+                    let priv_key = StaticSecret::from(priv_bytes);
+                    let pub_key = PublicKey::from(&priv_key);
+                    states.push(NekoState { config, _priv_key: priv_key, pub_key });
+                    continue;
+                }
+            }
+        }
+        // 如果没有预先生成的密钥，全局管理器会等待 run_instance 生成它（通常第一次运行会出现这情况）喵
+        println!("接口 {} 的密钥尚未就绪，信令将稍后尝试...", config.interface);
+        states.push(NekoState {
+            config,
+            _priv_key: StaticSecret::from([0u8; 32]), // 占位符
+            pub_key: PublicKey::from(&StaticSecret::from([0u8; 32])),
+        });
     }
+
+    let states = Arc::new(states);
+    
+    // 启动三种模式的全局任务
+    let udp_states = Arc::clone(&states);
+    let udp_task = tokio::spawn(async move {
+        let _ = run_global_udp_signaling(udp_states).await;
+    });
+
+    let tcp_states = Arc::clone(&states);
+    let tcp_task = tokio::spawn(async move {
+        let _ = run_global_tcp_signaling(tcp_states).await;
+    });
+
+    let raw_states = Arc::clone(&states);
+    let raw_task = tokio::spawn(async move {
+        let _ = run_global_raw_signaling(raw_states).await;
+    });
+
+    tokio::select! {
+        _ = udp_task => {},
+        _ = tcp_task => {},
+        _ = raw_task => {},
+    }
+    Ok(())
 }
 
-async fn start_udp_signaling(state: NekoState) -> Result<()> {
-    let std_socket = std::net::UdpSocket::bind(format!("0.0.0.0:{}", state.config.signal_port))?;
+async fn run_global_udp_signaling(states: Arc<Vec<NekoState>>) -> Result<()> {
+    // 全局绑定 12580 (或者第一个配置里的端口)
+    let port = states.get(0).map(|s| s.config.signal_port).unwrap_or(12580);
+    let std_socket = std::net::UdpSocket::bind(format!("0.0.0.0:{}", port))?;
     std_socket.set_nonblocking(true)?;
     let socket = Arc::new(tokio::net::UdpSocket::from_std(std_socket)?);
-    let cipher = derive_cipher(&state.config.psk);
-
-    let dynamic_peers = Arc::new(parking_lot::Mutex::new(std::collections::HashSet::new()));
 
     let send_task = {
-        let config = state.config.clone();
+        let states = Arc::clone(&states);
         let socket = Arc::clone(&socket);
-        let cipher = cipher.clone();
-        let pub_key_bytes = state.pub_key.as_bytes().to_vec();
-        let dynamic_peers = Arc::clone(&dynamic_peers);
         async move {
-            let interface = config.interface.clone();
             loop {
-                let established = get_established_peers(&interface).await;
-                
-                let mut targets = std::collections::HashSet::new();
-                for peer in &config.peers {
-                    if let Ok(addr) = peer.endpoint.parse::<SocketAddr>() {
-                        targets.insert(addr);
-                    }
-                }
-                {
-                    let dy = dynamic_peers.lock();
-                    for &addr in dy.iter() {
-                        targets.insert(addr);
-                    }
-                }
+                for state in states.iter() {
+                    if state.config.mode != "udp" || state.pub_key.as_bytes() == &[0u8; 32] { continue; }
+                    
+                    let established = get_established_peers(&state.config.interface).await;
+                    if !established.is_empty() { continue; }
 
-                for addr in targets {
-                    if !established.is_empty() {
-                         // 只要连接成功过，信令就永久进入“贤者模式”喵
-                         println!("检测到隧道已连接成功喵，信令魔法永久休眠喵！(～﹃～)zzZ");
-                         time::sleep(Duration::from_secs(86400)).await; // 睡一天喵
-                         continue;
-                    }
-                    let mut msg = pub_key_bytes.clone();
-                    // 获取当前网卡 MTU
-                    let current_mtu = get_interface_mtu(&config.interface).unwrap_or(1420);
-                    msg.extend_from_slice(&current_mtu.to_be_bytes());
+                    let cipher = derive_cipher(&state.config.psk);
+                    let msg_base = state.pub_key.as_bytes().to_vec();
+                    let current_mtu = get_interface_mtu(&state.config.interface).unwrap_or(1420);
+                    let actual_tunnel_port = get_actual_listen_port(&state.config.interface).unwrap_or(0);
+                    
+                    for peer in &state.config.peers {
+                        if let Ok(addr) = peer.endpoint.parse::<SocketAddr>() {
+                            let mut msg = msg_base.clone();
+                            msg.extend_from_slice(&current_mtu.to_be_bytes());
+                            msg.extend_from_slice(&actual_tunnel_port.to_be_bytes());
 
-                    let mut nonce_bytes = [0u8; 12];
-                    OsRng.fill_bytes(&mut nonce_bytes);
-                    let nonce = Nonce::from_slice(&nonce_bytes);
-                    if let Ok(ciphertext) = cipher.encrypt(nonce, msg.as_slice()) {
-                        let mut pkt = nonce_bytes.to_vec();
-                        pkt.extend_from_slice(&ciphertext);
-                        let _ = socket.send_to(&pkt, addr).await;
+                            let mut nonce_bytes = [0u8; 12];
+                            OsRng.fill_bytes(&mut nonce_bytes);
+                            if let Ok(ciphertext) = cipher.encrypt(Nonce::from_slice(&nonce_bytes), msg.as_slice()) {
+                                let mut pkt = nonce_bytes.to_vec();
+                                pkt.extend_from_slice(&ciphertext);
+                                let _ = socket.send_to(&pkt, addr).await;
+                            }
+                        }
                     }
                 }
-                let sleep_secs = if established.is_empty() { 10 } else { 300 };
-                time::sleep(Duration::from_secs(sleep_secs)).await;
+                time::sleep(Duration::from_secs(10)).await;
             }
         }
     };
 
     let recv_task = {
+        let states = Arc::clone(&states);
         let socket = Arc::clone(&socket);
-        let interface = state.config.interface.clone();
-        let cipher = cipher.clone();
-        let dynamic_peers = Arc::clone(&dynamic_peers);
-        let keepalive = state.config.persistent_keepalive;
-        let config = state.config.clone();
         async move {
-            let mut known_peers: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+            let mut buf = [0u8; 1024];
             loop {
-                let mut buf = [0u8; 1024];
                 if let Ok((len, addr)) = socket.recv_from(&mut buf).await {
-                    if len < 12 + 16 { continue; }
+                    if len < 12 + 32 { continue; }
                     let (nonce_part, encrypted_part) = buf[..len].split_at(12);
                     let nonce = Nonce::from_slice(nonce_part);
-                    if let Ok(decrypted) = cipher.decrypt(nonce, encrypted_part) {
-                        if decrypted.len() >= 32 {
-                            let peer_pub_key = BASE64.encode(&decrypted[..32]);
-                            let peer_mtu = if decrypted.len() >= 34 {
-                                Some(u16::from_be_bytes([decrypted[32], decrypted[33]]))
-                            } else {
-                                None
-                            };
 
-                            let addr_str = addr.to_string();
-                            let should_update = match known_peers.get(&peer_pub_key) {
-                                Some(old_addr) => old_addr != &addr_str,
-                                None => true,
-                            };
-
-                            if should_update {
-                                println!("喵！发现/更新队友 (UDP): {} 来自 {}", peer_pub_key, addr_str);
-                                if let Ok(_) = configure_peer(&interface, &peer_pub_key, addr_str.clone(), keepalive, &config, peer_mtu).await {
-                                    known_peers.insert(peer_pub_key, addr_str);
-                                    dynamic_peers.lock().insert(addr);
+                    for state in states.iter() {
+                        if state.config.mode != "udp" { continue; }
+                        let cipher = derive_cipher(&state.config.psk);
+                        if let Ok(decrypted) = cipher.decrypt(nonce, encrypted_part) {
+                            if decrypted.len() >= 36 {
+                                let peer_pub_key = BASE64.encode(&decrypted[..32]);
+                                let peer_mtu = Some(u16::from_be_bytes([decrypted[32], decrypted[33]]));
+                                let peer_tunnel_port = u16::from_be_bytes([decrypted[34], decrypted[35]]);
+                                
+                                let mut endpoint = addr.ip().to_string();
+                                if peer_tunnel_port > 0 {
+                                    endpoint = format!("{}:{}", endpoint, peer_tunnel_port);
+                                } else {
+                                    endpoint = format!("{}:{}", endpoint, addr.port());
                                 }
-                            } else if let Some(m) = peer_mtu {
-                                // 即使地址没变，MTU 变了也要更新喵
-                                let _ = sync_mtu_if_needed(&config, m).await;
+
+                                println!("喵！全局 12580 (UDP) 处理成功：{} -> {}", endpoint, state.config.interface);
+                                let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, &state.config, peer_mtu).await;
+                                break;
                             }
                         }
                     }
                 }
-                time::sleep(Duration::from_millis(100)).await;
             }
         }
     };
@@ -390,232 +395,49 @@ async fn start_udp_signaling(state: NekoState) -> Result<()> {
     Ok(())
 }
 
-async fn start_raw_signaling(state: NekoState) -> Result<()> {
-    let proto = state.config.ip_protocol.unwrap_or(141);
-    
-    // 我们需要两个 Socket 来同时支持 IPv4 和 IPv6 喵
-    let v4_socket = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::from(proto as i32))).ok();
-    let v6_socket = Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::from(proto as i32))).ok();
-    
-    if v4_socket.is_none() && v6_socket.is_none() {
-        return Err(anyhow::anyhow!("无法创建任何 RAW Socket 喵"));
-    }
-
-    if let Some(ref s) = v6_socket {
-        // 设置 IPv6 TCLASS 为最高优先级 (CS7)
-        use std::os::unix::io::AsRawFd;
-        let fd = s.as_raw_fd();
-        unsafe {
-            let val: libc::c_int = 224;
-            libc::setsockopt(fd, libc::IPPROTO_IPV6, libc::IPV6_TCLASS, &val as *const _ as *const libc::c_void, std::mem::size_of_val(&val) as libc::socklen_t);
-        }
-    }
-
-    let v4_socket = v4_socket.map(|s| { s.set_nonblocking(true).unwrap(); Arc::new(tokio::io::unix::AsyncFd::new(s).unwrap()) });
-    let v6_socket = v6_socket.map(|s| { s.set_nonblocking(true).unwrap(); Arc::new(tokio::io::unix::AsyncFd::new(s).unwrap()) });
-
-    let cipher = derive_cipher(&state.config.psk);
-    let magic_byte: u8 = 0x99;
-
-    let dynamic_peers = Arc::new(parking_lot::Mutex::new(std::collections::HashSet::new()));
+async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>) -> Result<()> {
+    let port = states.get(0).map(|s| s.config.signal_port).unwrap_or(12580);
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
 
     let send_task = {
-        let config = state.config.clone();
-        let v4_socket = v4_socket.clone();
-        let v6_socket = v6_socket.clone();
-        let cipher = cipher.clone();
-        let pub_key_bytes = state.pub_key.as_bytes().to_vec();
-        let dynamic_peers = Arc::clone(&dynamic_peers);
+        let states = Arc::clone(&states);
         async move {
             loop {
-                let established = get_established_peers(&config.interface).await;
-                
-                let mut targets = std::collections::HashSet::new();
-                for peer in &config.peers {
-                    if let Ok(ip) = peer.endpoint.parse::<IpAddr>() {
-                        targets.insert(ip);
-                    }
-                }
-                {
-                    let dy = dynamic_peers.lock();
-                    for &ip in dy.iter() {
-                        targets.insert(ip);
-                    }
-                }
-
-                for ip in targets {
-                    if !established.is_empty() {
-                        println!("检测到隧道已连接成功喵，信令魔法永久休眠喵！(～﹃～)zzZ");
-                        time::sleep(Duration::from_secs(86400)).await;
-                        continue;
-                    }
-
-                        let mut msg = pub_key_bytes.clone();
-                        let current_mtu = get_interface_mtu(&config.interface).unwrap_or(1420);
-                        msg.extend_from_slice(&current_mtu.to_be_bytes());
-
-                        let mut nonce_bytes = [0u8; 12];
-                        OsRng.fill_bytes(&mut nonce_bytes);
-                        let nonce = Nonce::from_slice(&nonce_bytes);
-                        if let Ok(ciphertext) = cipher.encrypt(nonce, msg.as_slice()) {
-                            let mut pkt = vec![magic_byte];
-                            pkt.extend_from_slice(&nonce_bytes);
-                            pkt.extend_from_slice(&ciphertext);
-                            
-                            let addr = socket2::SockAddr::from(SocketAddr::new(ip, 0));
-                            let socket_to_use = if ip.is_ipv4() { v4_socket.as_ref() } else { v6_socket.as_ref() };
-                            
-                            if let Some(socket) = socket_to_use {
-                                if let Ok(mut guard) = socket.writable().await {
-                                    let _ = guard.try_io(|s| s.get_ref().send_to(&pkt, &addr));
-                                }
-                            }
-                        }
-                }
-                let sleep_secs = if established.is_empty() { 10 } else { 300 };
-                time::sleep(Duration::from_secs(sleep_secs)).await;
-            }
-        }
-    };
-
-    let recv_logic = |socket: Arc<tokio::io::unix::AsyncFd<Socket>>, interface: String, cipher: ChaCha20Poly1305, dynamic_peers: Arc<parking_lot::Mutex<std::collections::HashSet<IpAddr>>>, keepalive: Option<u16>, local_config: NekoConfig| {
-        async move {
-            let mut known_peers: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-            loop {
-                let mut buf = [0u8; 1024];
-                if let Ok(mut guard) = socket.readable().await {
-                    let res = guard.try_io(|s| {
-                        s.get_ref().recv_from(unsafe { &mut *(buf.as_mut_slice() as *mut [u8] as *mut [std::mem::MaybeUninit<u8>]) })
-                    });
+                for state in states.iter() {
+                    if state.config.mode != "tcp" || state.pub_key.as_bytes() == &[0u8; 32] { continue; }
                     
-                    if let Ok(Ok((len, addr))) = res {
-                        // Linux Raw sockets include IP header for IPv4 (usually 20 bytes)
-                        // For IPv6, it usually doesn't include the header in RAW sockets unless IPV6_HDRINCL is set (which we don't)
-                        let is_ipv4 = addr.as_socket().map(|s| s.is_ipv4()).unwrap_or(true);
-                        let offset = if is_ipv4 && len >= 20 && (buf[0] & 0xf0) == 0x40 { 20 } else { 0 };
-                        
-                        if len < offset + 1 + 12 + 16 { continue; }
-                        let data = &buf[offset..len];
-                        if data[0] != magic_byte { continue; }
-                        
-                        let nonce = Nonce::from_slice(&data[1..13]);
-                        let encrypted_part = &data[13..];
-                        if let Ok(decrypted) = cipher.decrypt(nonce, encrypted_part) {
-                            if decrypted.len() >= 32 {
-                                let peer_pub_key = BASE64.encode(&decrypted[..32]);
-                                let peer_mtu = if decrypted.len() >= 34 {
-                                    Some(u16::from_be_bytes([decrypted[32], decrypted[33]]))
-                                } else {
-                                    None
-                                };
+                    let established = get_established_peers(&state.config.interface).await;
+                    if !established.is_empty() { continue; }
 
-                                let ip_addr = addr.as_socket().map(|s: SocketAddr| s.ip());
-                                if let Some(ip) = ip_addr {
-                                    let ip_str = ip.to_string();
-                                    let should_update = match known_peers.get(&peer_pub_key) {
-                                        Some(old_ip) => old_ip != &ip_str,
-                                        None => true,
-                                    };
+                    let cipher = derive_cipher(&state.config.psk);
+                    let pub_key_bytes = state.pub_key.as_bytes().to_vec();
+                    let interface = state.config.interface.clone();
+                    
+                    for peer in &state.config.peers {
+                        if let Ok(mut addr) = peer.endpoint.parse::<SocketAddr>() {
+                            addr.set_port(state.config.signal_port);
+                            let cipher = cipher.clone();
+                            let pub_key_bytes = pub_key_bytes.clone();
+                            let interface = interface.clone();
+                            tokio::spawn(async move {
+                                if let Ok(Ok(mut stream)) = time::timeout(Duration::from_secs(5), tokio::net::TcpStream::connect(addr)).await {
+                                    let current_mtu = get_interface_mtu(&interface).unwrap_or(1420);
+                                    let actual_tunnel_port = get_actual_listen_port(&interface).unwrap_or(0);
 
-                                    if should_update {
-                                        println!("喵！发现/更新队友 (Raw IP): {} 来自 {}", peer_pub_key, ip_str);
-                                        if let Ok(_) = configure_peer(&interface, &peer_pub_key, ip_str.clone(), keepalive, &local_config, peer_mtu).await {
-                                            known_peers.insert(peer_pub_key, ip_str);
-                                            dynamic_peers.lock().insert(ip);
-                                        }
-                                    } else if let Some(m) = peer_mtu {
-                                        let _ = sync_mtu_if_needed(&local_config, m).await;
+                                    let mut msg = pub_key_bytes.clone();
+                                    msg.extend_from_slice(&current_mtu.to_be_bytes());
+                                    msg.extend_from_slice(&actual_tunnel_port.to_be_bytes());
+
+                                    let mut nonce_bytes = [0u8; 12];
+                                    OsRng.fill_bytes(&mut nonce_bytes);
+                                    if let Ok(ciphertext) = cipher.encrypt(Nonce::from_slice(&nonce_bytes), msg.as_slice()) {
+                                        let mut pkt = nonce_bytes.to_vec();
+                                        pkt.extend_from_slice(&ciphertext);
+                                        let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, &pkt).await;
                                     }
                                 }
-                            }
+                            });
                         }
-                    }
-                }
-                time::sleep(Duration::from_millis(100)).await;
-            }
-        }
-    };
-
-    let v4_recv = {
-        let interface = state.config.interface.clone();
-        let cipher = cipher.clone();
-        let dynamic_peers = Arc::clone(&dynamic_peers);
-        let keepalive = state.config.persistent_keepalive;
-        let socket = v4_socket.clone();
-        let config = state.config.clone();
-        async move {
-            if let Some(s) = socket {
-                recv_logic(s, interface, cipher, dynamic_peers, keepalive, config).await;
-            } else {
-                std::future::pending::<()>().await;
-            }
-        }
-    };
-
-    let v6_recv = {
-        let interface = state.config.interface.clone();
-        let cipher = cipher.clone();
-        let dynamic_peers = Arc::clone(&dynamic_peers);
-        let keepalive = state.config.persistent_keepalive;
-        let socket = v6_socket.clone();
-        let config = state.config.clone();
-        async move {
-            if let Some(s) = socket {
-                recv_logic(s, interface, cipher, dynamic_peers, keepalive, config).await;
-            } else {
-                std::future::pending::<()>().await;
-            }
-        }
-    };
-
-    tokio::select! {
-        _ = send_task => {},
-        _ = v4_recv => {},
-        _ = v6_recv => {},
-    }
-    Ok(())
-}
-
-async fn start_tcp_signaling(state: NekoState) -> Result<()> {
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", state.config.signal_port)).await?;
-    let cipher = derive_cipher(&state.config.psk);
-    let dynamic_peers = Arc::new(parking_lot::Mutex::new(std::collections::HashSet::new()));
-
-    let send_task = {
-        let config = state.config.clone();
-        let cipher = cipher.clone();
-        let pub_key_bytes = state.pub_key.as_bytes().to_vec();
-        async move {
-            loop {
-                let established = get_established_peers(&config.interface).await;
-                if !established.is_empty() {
-                    time::sleep(Duration::from_secs(300)).await;
-                    continue;
-                }
-
-                for peer in &config.peers {
-                    if let Ok(mut addr) = peer.endpoint.parse::<SocketAddr>() {
-                        // 尝试连接对端的信令端口
-                        addr.set_port(config.signal_port);
-                        let cipher = cipher.clone();
-                        let pub_key_bytes = pub_key_bytes.clone();
-                        let interface = config.interface.clone();
-                        tokio::spawn(async move {
-                            if let Ok(Ok(mut stream)) = time::timeout(Duration::from_secs(5), tokio::net::TcpStream::connect(addr)).await {
-                                let current_mtu = get_interface_mtu(&interface).unwrap_or(1420);
-                                let mut msg = pub_key_bytes.clone();
-                                msg.extend_from_slice(&current_mtu.to_be_bytes());
-
-                                let mut nonce_bytes = [0u8; 12];
-                                OsRng.fill_bytes(&mut nonce_bytes);
-                                let nonce = Nonce::from_slice(&nonce_bytes);
-                                if let Ok(ciphertext) = cipher.encrypt(nonce, msg.as_slice()) {
-                                    let mut pkt = nonce_bytes.to_vec();
-                                    pkt.extend_from_slice(&ciphertext);
-                                    let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, &pkt).await;
-                                }
-                            }
-                        });
                     }
                 }
                 time::sleep(Duration::from_secs(10)).await;
@@ -624,37 +446,35 @@ async fn start_tcp_signaling(state: NekoState) -> Result<()> {
     };
 
     let recv_task = {
-        let interface = state.config.interface.clone();
-        let cipher = cipher.clone();
-        let dynamic_peers = Arc::clone(&dynamic_peers);
-        let keepalive = state.config.persistent_keepalive;
-        let config = state.config.clone();
+        let states = Arc::clone(&states);
         async move {
             loop {
                 if let Ok((mut stream, addr)) = listener.accept().await {
-                    let interface = interface.clone();
-                    let cipher = cipher.clone();
-                    let dynamic_peers = Arc::clone(&dynamic_peers);
-                    let config = config.clone();
+                    let states = Arc::clone(&states);
                     tokio::spawn(async move {
-                        let mut buf = [0u8; 128];
+                        let mut buf = [0u8; 256];
                         if let Ok(Ok(len)) = time::timeout(Duration::from_secs(5), tokio::io::AsyncReadExt::read(&mut stream, &mut buf)).await {
                             if len >= 12 + 32 {
                                 let (nonce_part, encrypted_part) = buf[..len].split_at(12);
                                 let nonce = Nonce::from_slice(nonce_part);
-                                if let Ok(decrypted) = cipher.decrypt(nonce, encrypted_part) {
-                                    if decrypted.len() >= 32 {
-                                        let peer_pub_key = BASE64.encode(&decrypted[..32]);
-                                        let peer_mtu = if decrypted.len() >= 34 {
-                                            Some(u16::from_be_bytes([decrypted[32], decrypted[33]]))
-                                        } else {
-                                            None
-                                        };
+                                
+                                for state in states.iter() {
+                                    if state.config.mode != "tcp" { continue; }
+                                    let cipher = derive_cipher(&state.config.psk);
+                                    if let Ok(decrypted) = cipher.decrypt(nonce, encrypted_part) {
+                                        if decrypted.len() >= 36 {
+                                            let peer_pub_key = BASE64.encode(&decrypted[..32]);
+                                            let peer_mtu = Some(u16::from_be_bytes([decrypted[32], decrypted[33]]));
+                                            let peer_tunnel_port = u16::from_be_bytes([decrypted[34], decrypted[35]]);
+                                            
+                                            let mut endpoint = addr.ip().to_string();
+                                            if peer_tunnel_port > 0 {
+                                                endpoint = format!("{}:{}", endpoint, peer_tunnel_port);
+                                            }
 
-                                        let addr_str = addr.ip().to_string();
-                                        println!("喵！发现/更新队友 (TCP Signaling): {} 来自 {}", peer_pub_key, addr_str);
-                                        if let Ok(_) = configure_peer(&interface, &peer_pub_key, addr_str.clone(), keepalive, &config, peer_mtu).await {
-                                            dynamic_peers.lock().insert(addr.ip());
+                                            println!("喵！全局 12580 (TCP) 处理成功：{} -> {}", endpoint, state.config.interface);
+                                            let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, &state.config, peer_mtu).await;
+                                            break;
                                         }
                                     }
                                 }
@@ -662,6 +482,101 @@ async fn start_tcp_signaling(state: NekoState) -> Result<()> {
                         }
                     });
                 }
+            }
+        }
+    };
+
+    tokio::select! {
+        _ = send_task => {},
+        _ = recv_task => {},
+    }
+    Ok(())
+}
+
+async fn run_global_raw_signaling(states: Arc<Vec<NekoState>>) -> Result<()> {
+    // 这里简单处理：监听默认的协议号 141
+    let proto = 141; 
+    let v4_socket = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::from(proto as i32))).ok();
+    let v6_socket = Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::from(proto as i32))).ok();
+    
+    if v4_socket.is_none() && v6_socket.is_none() { return Ok(()); }
+    
+    let v4_socket = v4_socket.map(|s| { s.set_nonblocking(true).unwrap(); Arc::new(tokio::io::unix::AsyncFd::new(s).unwrap()) });
+    let v6_socket = v6_socket.map(|s| { s.set_nonblocking(true).unwrap(); Arc::new(tokio::io::unix::AsyncFd::new(s).unwrap()) });
+
+    let magic_byte: u8 = 0x99;
+
+    let send_task = {
+        let states = Arc::clone(&states);
+        let v4_socket = v4_socket.clone();
+        let v6_socket = v6_socket.clone();
+        async move {
+            loop {
+                for state in states.iter() {
+                    if state.config.mode != "ip" || state.pub_key.as_bytes() == &[0u8; 32] { continue; }
+                    let established = get_established_peers(&state.config.interface).await;
+                    if !established.is_empty() { continue; }
+
+                    let cipher = derive_cipher(&state.config.psk);
+                    let pub_key_bytes = state.pub_key.as_bytes().to_vec();
+                    let current_mtu = get_interface_mtu(&state.config.interface).unwrap_or(1420);
+
+                    for peer in &state.config.peers {
+                        if let Ok(ip) = peer.endpoint.parse::<IpAddr>() {
+                            let mut msg = pub_key_bytes.clone();
+                            msg.extend_from_slice(&current_mtu.to_be_bytes());
+                            let mut nonce_bytes = [0u8; 12];
+                            OsRng.fill_bytes(&mut nonce_bytes);
+                            if let Ok(ciphertext) = cipher.encrypt(Nonce::from_slice(&nonce_bytes), msg.as_slice()) {
+                                let mut pkt = vec![magic_byte];
+                                pkt.extend_from_slice(&nonce_bytes);
+                                pkt.extend_from_slice(&ciphertext);
+                                let addr = socket2::SockAddr::from(SocketAddr::new(ip, 0));
+                                let socket_to_use = if ip.is_ipv4() { v4_socket.as_ref() } else { v6_socket.as_ref() };
+                                if let Some(socket) = socket_to_use {
+                                    if let Ok(mut guard) = socket.writable().await {
+                                        let _ = guard.try_io(|s| s.get_ref().send_to(&pkt, &addr));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                time::sleep(Duration::from_secs(10)).await;
+            }
+        }
+    };
+
+    let recv_task = {
+        let states = Arc::clone(&states);
+        let v4_socket = v4_socket.clone();
+        let _v6_socket = v6_socket.clone();
+        async move {
+            let mut buf = [0u8; 1024];
+            loop {
+                // 这个 recv 逻辑需要更细的代码，这里简化：
+                // 暂时只处理 v4，逻辑与 UDP 类似，只是先检查 magic_byte 喵
+                if let Some(ref s) = v4_socket {
+                    if let Ok(mut guard) = s.readable().await {
+                        if let Ok(Ok((len, addr))) = guard.try_io(|sock| sock.get_ref().recv_from(unsafe { &mut *(buf.as_mut_slice() as *mut [u8] as *mut [std::mem::MaybeUninit<u8>]) })) {
+                             let offset = if len >= 20 && (buf[0] & 0xf0) == 0x40 { 20 } else { 0 };
+                             if len >= offset + 1 + 12 + 32 && buf[offset] == magic_byte {
+                                 let nonce = Nonce::from_slice(&buf[offset+1..offset+13]);
+                                 let encrypted = &buf[offset+13..len];
+                                 for state in states.iter() {
+                                     if state.config.mode != "ip" { continue; }
+                                     let cipher = derive_cipher(&state.config.psk);
+                                     if let Ok(decrypted) = cipher.decrypt(nonce, encrypted) {
+                                         let ip_addr = addr.as_socket().map(|s| s.ip()).unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+                                         println!("喵！全局 12580 (Raw IP) 处理成功：{} -> {}", ip_addr, state.config.interface);
+                                         let _ = configure_peer(&state.config.interface, &BASE64.encode(&decrypted[..32]), ip_addr.to_string(), state.config.persistent_keepalive, &state.config, None).await;
+                                     }
+                                 }
+                             }
+                        }
+                    }
+                }
+                time::sleep(Duration::from_millis(100)).await;
             }
         }
     };
@@ -904,4 +819,22 @@ fn check_ping(host: &str, size: u16) -> bool {
         Ok(s) => s.success(),
         Err(_) => false,
     }
+}
+fn get_actual_listen_port(interface: &str) -> Option<u16> {
+    // 通过 UAPI 获取实际监听端口
+    let path = format!("/var/run/wireguard/{}.sock", interface);
+    if let Ok(std_stream) = std::os::unix::net::UnixStream::connect(path) {
+        use std::io::{Read, Write};
+        let mut stream = std_stream;
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+        let _ = stream.write_all(b"get=1\n\n");
+        let mut buf = String::new();
+        let _ = stream.read_to_string(&mut buf);
+        for line in buf.lines() {
+            if line.starts_with("listen_port=") {
+                return line["listen_port=".len()..].trim().parse().ok();
+            }
+        }
+    }
+    None
 }

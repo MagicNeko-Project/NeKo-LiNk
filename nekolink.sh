@@ -18,8 +18,9 @@ if [ "$#" -gt 0 ]; then
     exit $?
 fi
 
-VERSION="2.4.2"
+VERSION="2.4.3"
 echo -e "${PINK}ฅ^•ﻌ•^ฅ 欢迎使用 NekoLink 交互式配置助手 v$VERSION！${NC}"
+echo -e "${CYAN}--- 全局信令通道 [12580] (一按我帮您) 已就绪 ---${NC}"
 
 CONFIG_DIR="/etc/neko-link"
 mkdir -p "$CONFIG_DIR"
@@ -123,12 +124,8 @@ function edit_config() {
         *) auto_route="$curr_aroute" ;;
     esac
 
-    if [ "$mode" == "udp" ]; then
-        read -p "信令端口 (当前: $curr_sig, 直接回车保持不变): " sig_port
-        [ -z "$sig_port" ] && sig_port=$curr_sig
-    else
-        sig_port=0
-    fi
+    read -p "信令端口 (全局默认: 12580, 直接回车保持不变): " sig_port
+    [ -z "$sig_port" ] && sig_port=${curr_sig:-12580}
 
     # 使用 jq 构建新 JSON 并覆盖
     tmp_cfg=$(mktemp)
@@ -189,7 +186,8 @@ function create_config() {
         if [ "$mode" == "ip" ]; then
             read -p "请输入服务端的公网 IP ( e.g. 1.2.3.4 ): " endpoint
         else
-            read -p "请输入服务端的公网端点 ( IP:信令端口, e.g. 1.2.3.4:5678 ): " endpoint
+            echo -e "${PINK}提示：现在信令与数据分离。对端地址通常格式为 IP:12580${NC}"
+            read -p "请输入服务端的公网端点 ( IP:信令端口, 默认 1.2.3.4:12580 ): " endpoint
         fi
         while [ -z "$endpoint" ]; do
             read -p "客户端必须指定对端地址喵！请重新输入: " endpoint
@@ -216,8 +214,8 @@ function create_config() {
         *)
             mode="udp"
             proto="null"
-            read -p "请输入 WireGuard 监听端口 ( 默认 51820 ): " listen_port
-            [ -z "$listen_port" ] && listen_port=51820
+            read -p "请输入数据隧道监听端口 ( 0 为自动协商, 默认 0 ): " listen_port
+            [ -z "$listen_port" ] && listen_port=0
             ;;
     esac
 
@@ -277,12 +275,9 @@ function create_config() {
         auto_route="false"
     fi
 
-    if [ "$mode" == "udp" ]; then
-        read -p "请输入信令交换端口 ( 默认 5678 ): " sig_port
-        [ -z "$sig_port" ] && sig_port=5678
-    else
-        sig_port=0 # IP 或 TCP 模式下不使用 UDP 端口
-    fi
+    echo -e "${PINK}正在使用 12580 (一按我帮您) 作为默认信令交换端口喵！${NC}"
+    read -p "请输入信令交换端口 ( 默认 12580 ): " sig_port
+    [ -z "$sig_port" ] && sig_port=12580
 
     # 构建 JSON
     json_path="$CONFIG_DIR/$iface.json"
