@@ -21,6 +21,18 @@ struct PeerConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+struct GlobalConfig {
+    #[serde(default = "default_signal_port")]
+    pub signal_port: u16,
+}
+
+impl Default for GlobalConfig {
+    fn default() -> Self {
+        Self { signal_port: 12580 }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct NekoConfig {
     interface: String,
     #[serde(default = "default_mode")]
@@ -29,8 +41,6 @@ struct NekoConfig {
     local_address: String,
     psk: String,
     peers: Vec<PeerConfig>,
-    #[serde(default = "default_signal_port")]
-    signal_port: u16,
     listen_port: Option<u16>,
     #[serde(default)]
     auto_route: bool,
@@ -100,9 +110,22 @@ async fn main() -> Result<()> {
         fs::create_dir_all(config_dir).context("无法创建配置目录")?;
     }
 
+    let mut global_config = GlobalConfig::default();
+    let global_path = format!("{}/global.json", config_dir);
+    if fs::metadata(&global_path).is_ok() {
+        if let Ok(content) = fs::read_to_string(&global_path) {
+            if let Ok(conf) = serde_json::from_str::<GlobalConfig>(&content) {
+                global_config = conf;
+                println!("喵！成功加载全局配置：信令端口 = {}", global_config.signal_port);
+            }
+        }
+    }
+
     let mut configs = vec![];
     for entry in glob::glob(&format!("{}/*.json", config_dir))? {
         let path = entry?;
+        if path.file_name().map_or(false, |n| n == "global.json") { continue; }
+        
         let config_str = fs::read_to_string(&path)?;
         let config: NekoConfig = match serde_json::from_str(&config_str) {
             Ok(c) => c,
@@ -129,14 +152,17 @@ async fn main() -> Result<()> {
 
     // 启动全局信令管理器 (独立模块运行，互不干扰喵)
     let signaling_states = Arc::clone(&states);
+    let signal_port = global_config.signal_port;
     tokio::spawn(async move {
+        println!("ฅ^•ﻌ•^ฅ 全局信令中枢计划启用端口：{}", signal_port);
+        
         println!("ฅ^•ﻌ•^ฅ 全局信令中枢：UDP 管线启动...");
         let s1 = Arc::clone(&signaling_states);
-        tokio::spawn(async move { if let Err(e) = run_global_udp_signaling(s1).await { eprintln!("UDP 信令管线异常退出喵: {:?}", e); } });
+        tokio::spawn(async move { if let Err(e) = run_global_udp_signaling(s1, signal_port).await { eprintln!("UDP 信令管线异常退出喵: {:?}", e); } });
 
         println!("ฅ^•ﻌ•^ฅ 全局信令中枢：TCP 管线启动...");
         let s2 = Arc::clone(&signaling_states);
-        tokio::spawn(async move { if let Err(e) = run_global_tcp_signaling(s2).await { eprintln!("TCP 信令管线异常退出喵: {:?}", e); } });
+        tokio::spawn(async move { if let Err(e) = run_global_tcp_signaling(s2, signal_port).await { eprintln!("TCP 信令管线异常退出喵: {:?}", e); } });
 
         println!("ฅ^•ﻌ•^ฅ 全局信令中枢：Raw IP 管线启动...");
         let s3 = Arc::clone(&signaling_states);
@@ -265,10 +291,9 @@ async fn run_instance(state: NekoState) -> Result<()> {
 }
 
 
-async fn run_global_udp_signaling(states: Arc<Vec<NekoState>>) -> Result<()> {
-    // 全局绑定 12580 (或者第一个配置里的端口)
-    let port = states.get(0).map(|s| s.config.signal_port).unwrap_or(12580);
-    let std_socket = std::net::UdpSocket::bind(format!("0.0.0.0:{}", port))?;
+async fn run_global_udp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16) -> Result<()> {
+    // 全局绑定
+    let std_socket = std::net::UdpSocket::bind(format!("0.0.0.0:{}", signal_port))?;
     std_socket.set_nonblocking(true)?;
     let socket = Arc::new(tokio::net::UdpSocket::from_std(std_socket)?);
 
@@ -289,7 +314,16 @@ async fn run_global_udp_signaling(states: Arc<Vec<NekoState>>) -> Result<()> {
                     let actual_tunnel_port = get_actual_listen_port(&state.config.interface).unwrap_or(0);
                     
                     for peer in &state.config.peers {
-                        if let Ok(addr) = peer.endpoint.parse::<SocketAddr>() {
+                        let addr_opt = if let Ok(mut sa) = peer.endpoint.parse::<SocketAddr>() {
+                            sa.set_port(signal_port);
+                            Some(sa)
+                        } else if let Ok(ip) = peer.endpoint.parse::<IpAddr>() {
+                            Some(SocketAddr::new(ip, signal_port))
+                        } else {
+                            None
+                        };
+
+                        if let Some(addr) = addr_opt {
                             let mut msg = msg_base.clone();
                             msg.extend_from_slice(&current_mtu.to_be_bytes());
                             msg.extend_from_slice(&actual_tunnel_port.to_be_bytes());
@@ -302,7 +336,7 @@ async fn run_global_udp_signaling(states: Arc<Vec<NekoState>>) -> Result<()> {
                                 if let Err(e) = socket.send_to(&pkt, addr).await {
                                     eprintln!("UDP 信令推送失败喵 ({}): {:?}", state.config.interface, e);
                                 } else {
-                                    println!("喵！已向对端 {} 主动推送 12580 (UDP) 信令盒。", addr);
+                                    println!("喵！已向对端 {} 主动推送 {} (UDP) 信令盒。", addr, signal_port);
                                 }
                             }
                         }
@@ -374,12 +408,10 @@ async fn run_global_udp_signaling(states: Arc<Vec<NekoState>>) -> Result<()> {
     Ok(())
 }
 
-async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>) -> Result<()> {
-    let port = states.iter().map(|s| s.config.signal_port).find(|&p| p > 0).unwrap_or(12580);
-    println!("喵！信令端口审计: {:?} -> 最终选择: {}", states.iter().map(|s| s.config.signal_port).collect::<Vec<_>>(), port);
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
+async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16) -> Result<()> {
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", signal_port)).await?;
 
-    println!("ฅ^•ﻌ•^ฅ TCP 信令管线就绪，正在监听 {} 端口，监控 {} 个接口喵。", port, states.len());
+    println!("ฅ^•ﻌ•^ฅ TCP 信令管线就绪，正在监听 {} 端口，监控 {} 个接口喵。", signal_port, states.len());
 
     let send_task = {
         let states = Arc::clone(&states);
@@ -400,8 +432,16 @@ async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>) -> Result<()> {
                     let interface = state.config.interface.clone();
                     
                     for peer in &state.config.peers {
-                        if let Ok(mut addr) = peer.endpoint.parse::<SocketAddr>() {
-                            addr.set_port(state.config.signal_port);
+                        let addr_opt = if let Ok(mut sa) = peer.endpoint.parse::<SocketAddr>() {
+                            sa.set_port(signal_port);
+                            Some(sa)
+                        } else if let Ok(ip) = peer.endpoint.parse::<IpAddr>() {
+                            Some(SocketAddr::new(ip, signal_port))
+                        } else {
+                            None
+                        };
+
+                        if let Some(addr) = addr_opt {
                             let cipher = cipher.clone();
                             let pub_key_bytes = pub_key_bytes.clone();
                             let interface_inner = interface.clone();
