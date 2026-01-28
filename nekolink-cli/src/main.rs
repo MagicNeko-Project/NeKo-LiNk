@@ -6,9 +6,32 @@ use nekolink_core::device::{DeviceConfig, DeviceHandle, TransportMode};
 use clap::{Arg, Command};
 use daemonize::Daemonize;
 use std::fs::File;
+use std::io::Read;
 use std::os::unix::net::UnixDatagram;
 use std::process::exit;
 use tracing::Level;
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+struct GlobalConfig {
+    signaling_port: u16,
+}
+
+fn load_global_config() -> u16 {
+    let path = "/etc/neko-link/global.json";
+    if let Ok(mut file) = File::open(path) {
+        let mut data = String::new();
+        if file.read_to_string(&mut data).is_ok() {
+            if let Ok(config) = serde_json::from_str::<GlobalConfig>(&data) {
+                return config.signaling_port;
+            }
+        }
+    }
+
+    // Fallback if file missing or error
+    tracing::warn!("Failed to load global config from {}, using default 19230", path);
+    19230
+}
 
 fn check_tun_name(_v: String) -> Result<(), String> {
     #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
@@ -167,6 +190,7 @@ fn main() {
         } else {
             TransportMode::Udp
         },
+        signaling_port: load_global_config(),
     };
 
     let mut device_handle: DeviceHandle = match DeviceHandle::new(tun_name, config) {

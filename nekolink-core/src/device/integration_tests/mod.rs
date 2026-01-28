@@ -266,6 +266,9 @@ mod tests {
                     use_multi_queue: true,
                     #[cfg(target_os = "linux")]
                     uapi_fd: -1,
+                    ip_protocol: None,
+                    transport_mode: crate::device::TransportMode::Udp,
+                    signaling_port: 0,
                 },
             )
         }
@@ -558,6 +561,9 @@ mod tests {
                 use_multi_queue: true,
                 #[cfg(target_os = "linux")]
                 uapi_fd: -1,
+                ip_protocol: None,
+                transport_mode: crate::device::TransportMode::Udp,
+                signaling_port: 0,
             },
         );
 
@@ -716,6 +722,9 @@ mod tests {
                 use_multi_queue: true,
                 #[cfg(target_os = "linux")]
                 uapi_fd: -1,
+                ip_protocol: None,
+                transport_mode: crate::device::TransportMode::Udp,
+                signaling_port: 0,
             },
         );
 

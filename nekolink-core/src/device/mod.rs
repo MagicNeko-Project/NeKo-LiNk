@@ -118,6 +118,7 @@ pub struct DeviceConfig {
     pub uapi_fd: i32,
     pub ip_protocol: Option<u8>,
     pub transport_mode: TransportMode,
+    pub signaling_port: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -138,6 +139,7 @@ impl Default for DeviceConfig {
             uapi_fd: -1,
             ip_protocol: None,
             transport_mode: TransportMode::Udp,
+            signaling_port: 0,
         }
     }
 }
@@ -184,7 +186,7 @@ impl DeviceHandle {
     pub fn new(name: &str, config: DeviceConfig) -> Result<DeviceHandle, Error> {
         let n_threads = config.n_threads;
         let mut wg_interface = Device::new(name, config)?;
-        wg_interface.open_listen_socket(0)?; // Start listening on a random port
+        wg_interface.open_listen_socket(config.signaling_port)?; // Start listening on a random port
 
         let interface_lock = Arc::new(Lock::new(wg_interface));
 
@@ -442,10 +444,17 @@ impl Device {
             peer.lock().shutdown_endpoint();
         }
 
+        // Determine port based on transport mode
+        // RawIp mode does not use signaling port (port = 0)
+        if self.config.transport_mode == TransportMode::RawIp {
+            port = 0;
+        }
+
         // Then open new sockets and bind to the port
-        let (sock_type, protocol) = match self.config.ip_protocol {
-            Some(p) => (Type::RAW, Protocol::from(i32::from(p))),
-            None => (Type::DGRAM, Protocol::UDP),
+        let (sock_type, protocol) = match self.config.transport_mode {
+            TransportMode::RawIp => (Type::RAW, Protocol::from(i32::from(self.config.ip_protocol.unwrap_or(141)))),
+            TransportMode::FakeTcp => (Type::RAW, Protocol::TCP),
+            TransportMode::Udp => (Type::DGRAM, Protocol::UDP),
         };
 
         let udp_sock4 = socket2::Socket::new(Domain::IPV4, sock_type, Some(protocol))?;
@@ -454,8 +463,11 @@ impl Device {
         udp_sock4.set_nonblocking(true)?;
 
         if port == 0 {
-            // Random port was assigned
-            port = udp_sock4.local_addr()?.as_socket().unwrap().port();
+            // Random port was assigned or we are in RawIp mode (where port doesn't matter much for bind)
+            // But if we bound to port 0 on UDP/FakeTCP, we want to know what it is.
+            if self.config.transport_mode != TransportMode::RawIp {
+                 port = udp_sock4.local_addr()?.as_socket().unwrap().port();
+            }
         }
 
         let udp_sock6 = socket2::Socket::new(Domain::IPV6, sock_type, Some(protocol))?;
@@ -653,7 +665,7 @@ impl Device {
                     let mut offset = 0;
                     
                     // NekoLink: 处理 IP 层头部 (Raw IP 模式) 喵
-                    if d.config.ip_protocol.is_some() && addr.as_socket().unwrap().is_ipv4() {
+                    if (d.config.transport_mode == TransportMode::RawIp || d.config.transport_mode == TransportMode::FakeTcp) && addr.as_socket().unwrap().is_ipv4() {
                         if packet_len < 20 { continue; }
                         let ihl = (t.src_buf[0] & 0x0f) as usize * 4;
                         if packet_len < ihl { continue; }
@@ -797,7 +809,7 @@ impl Device {
 
                 while let Ok(read_bytes) = udp.recv(src_buf) {
                     let mut offset = 0;
-                    if d.config.ip_protocol.is_some() && peer_addr.is_ipv4() {
+                    if (d.config.transport_mode == TransportMode::RawIp || d.config.transport_mode == TransportMode::FakeTcp) && peer_addr.is_ipv4() {
                         if read_bytes < 20 { continue; }
                         let ihl = (t.src_buf[0] & 0x0f) as usize * 4;
                         if read_bytes < ihl { continue; }
