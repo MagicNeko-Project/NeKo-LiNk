@@ -2,7 +2,7 @@
 # NekoLink Debian 打包魔法脚本 ฅ^•ﻌ•^ฅ
 set -e
 
-VERSION="2.4.3"
+VERSION=$(cat VERSION)
 ARCH=$(dpkg --print-architecture)
 PKG_NAME="nekolink"
 BUILD_DIR="build_deb_tmp"
@@ -15,6 +15,7 @@ mkdir -p "$BUILD_DIR/DEBIAN"
 mkdir -p "$BUILD_DIR/usr/local/bin"
 mkdir -p "$BUILD_DIR/etc/systemd/system"
 mkdir -p "$BUILD_DIR/etc/neko-link"
+mkdir -p "$BUILD_DIR/usr/local/share/nekolink"
 
 # 2. 准备 control 文件
 cat > "$BUILD_DIR/DEBIAN/control" <<EOF
@@ -52,6 +53,7 @@ cp target/release/nekolink-ctl "$BUILD_DIR/usr/local/bin/"
 cp nekolink.sh "$BUILD_DIR/usr/local/bin/nekolink"
 chmod +x "$BUILD_DIR/usr/local/bin/nekolink"
 cp nekolink.service "$BUILD_DIR/etc/systemd/system/"
+cp VERSION "$BUILD_DIR/usr/local/share/nekolink/"
 
 # 5. 打包 (显式输出到项目根目录喵)
 OUTPUT_FILE="NekoLink_${VERSION}_${ARCH}.deb"
