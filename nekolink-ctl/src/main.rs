@@ -707,26 +707,23 @@ fn derive_cipher(psk: &str) -> ChaCha20Poly1305 {
 }
 
 async fn configure_peer(interface: &str, peer_pub_key: &str, endpoint: String, keepalive: Option<u16>, peer_mtu: Option<u16>, auto_sync_mtu: bool) -> Result<()> {
-    let mut needs_remove = false;
-    let mut old_ep_log = String::new();
+    let key = (interface.to_string(), peer_pub_key.to_string());
     {
         let cache_mutex = PEER_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-        let mut cache = cache_mutex.lock().unwrap();
-        if let Some(old_ep) = cache.get(&(interface.to_string(), peer_pub_key.to_string())) {
+        let cache = cache_mutex.lock().unwrap();
+        if let Some(old_ep) = cache.get(&key) {
             if old_ep == &endpoint {
                 return Ok(());
             }
-            needs_remove = true;
-            old_ep_log = old_ep.clone();
+            println!("检测到接口 {} 的队友 {} Endpoint 变更: {} -> {}喵！", interface, peer_pub_key, old_ep, endpoint);
+        } else {
+            println!("首次识别接口 {} 的队友 {}: {}喵！", interface, peer_pub_key, endpoint);
         }
-        cache.insert((interface.to_string(), peer_pub_key.to_string()), endpoint.clone());
     }
 
-    if needs_remove {
-        println!("检测到接口 {} 的队友 {} Endpoint 变更: {} -> {}，正在重置 Peer 喵...", interface, peer_pub_key, old_ep_log, endpoint);
-        let remove_cmd = format!("set=1\npublic_key={}\nremove=true\n\n", peer_pub_key);
-        let _ = send_uapi(interface, &remove_cmd).await; 
-    }
+    // 幂等保护：先删除旧 Peer 再添加喵
+    let remove_cmd = format!("set=1\npublic_key={}\nremove=true\n\n", peer_pub_key);
+    let _ = send_uapi(interface, &remove_cmd).await; 
 
     let mut uapi_cmd = format!(
         "set=1\npublic_key={}\nallowed_ip=0.0.0.0/0\nallowed_ip=::/0\nendpoint={}\n",
@@ -738,6 +735,14 @@ async fn configure_peer(interface: &str, peer_pub_key: &str, endpoint: String, k
     uapi_cmd.push_str("\n");
     
     send_uapi(interface, &uapi_cmd).await.context("配置 Peer 失败")?;
+    
+    // 更新缓存
+    {
+        let cache_mutex = PEER_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut cache = cache_mutex.lock().unwrap();
+        cache.insert(key, endpoint.clone());
+    }
+
     println!("配置队友 {} (Endpoint: {}) 成功喵！", peer_pub_key, endpoint);
 
     if let Some(m) = peer_mtu {
