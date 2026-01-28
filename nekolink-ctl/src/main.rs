@@ -1,17 +1,16 @@
-use anyhow::{Context, Result};
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-use chacha20poly1305::{
-    aead::{Aead, KeyInit},
-    ChaCha20Poly1305, Nonce,
-};
-use rand_core::{OsRng, RngCore};
-use serde::{Deserialize, Serialize};
-use std::fs;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::net::{IpAddr, SocketAddr};
+use std::fs;
 use std::process::Command;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::time;
+use anyhow::{Context, Result, anyhow};
+use rand_core::{OsRng, RngCore};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use chacha20poly1305::{aead::{Aead, KeyInit}, ChaCha20Poly1305, Nonce};
+use serde::{Deserialize, Serialize};
+use blake2::{Blake2b512, Digest, Digest as _};
 use x25519_dalek::{PublicKey, StaticSecret};
 use socket2::{Domain, Protocol, Socket, Type};
 
@@ -31,6 +30,8 @@ impl Default for GlobalConfig {
         Self { signal_port: 12580 }
     }
 }
+
+static PEER_CACHE: OnceLock<Mutex<HashMap<(String, String), String>>> = OnceLock::new();
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct NekoConfig {
@@ -691,6 +692,17 @@ fn derive_cipher(psk: &str) -> ChaCha20Poly1305 {
 }
 
 async fn configure_peer(interface: &str, peer_pub_key: &str, endpoint: String, keepalive: Option<u16>, peer_mtu: Option<u16>, auto_sync_mtu: bool) -> Result<()> {
+    {
+        let cache_mutex = PEER_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut cache = cache_mutex.lock().unwrap();
+        if let Some(old_ep) = cache.get(&(interface.to_string(), peer_pub_key.to_string())) {
+            if old_ep == &endpoint {
+                return Ok(());
+            }
+        }
+        cache.insert((interface.to_string(), peer_pub_key.to_string()), endpoint.clone());
+    }
+
     let mut uapi_cmd = format!(
         "set=1\npublic_key={}\nallowed_ip=0.0.0.0/0\nallowed_ip=::/0\nendpoint={}\n",
         peer_pub_key, endpoint
