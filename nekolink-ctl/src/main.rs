@@ -468,31 +468,35 @@ async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                                             if tokio::io::AsyncWriteExt::write_all(&mut stream, &pkt).await.is_ok() {
                                                 println!("喵！已向对端推送 12580 信令，等待服务端 Ack...");
                                                 let mut ack_buf = [0u8; 128];
-                                                if let Ok(Ok(n)) = time::timeout(Duration::from_secs(10), tokio::io::AsyncReadExt::read(&mut stream, &mut ack_buf)).await {
-                                                    if n >= 12 + 32 {
-                                                        let (nonce_part, encrypted_part) = ack_buf[..n].split_at(12);
-                                                        let nonce = Nonce::from_slice(nonce_part);
-                                                        if let Ok(decrypted) = cipher.decrypt(nonce, encrypted_part) {
-                                                            if decrypted.len() >= 36 {
-                                                                let peer_pub_key = BASE64.encode(&decrypted[..32]);
-                                                                let peer_mtu = Some(u16::from_be_bytes([decrypted[32], decrypted[33]]));
-                                                                let peer_tunnel_port = u16::from_be_bytes([decrypted[34], decrypted[35]]);
-                                                                if peer_tunnel_port == 0 && !is_ip_mode {
-                                                                    return;
-                                                                }
+                                                                match time::timeout(Duration::from_secs(10), tokio::io::AsyncReadExt::read(&mut stream, &mut ack_buf)).await {
+                                                                    Ok(Ok(n)) if n >= 12 + 32 => {
+                                                                        let (nonce_part, encrypted_part) = ack_buf[..n].split_at(12);
+                                                                        let nonce = Nonce::from_slice(nonce_part);
+                                                                        if let Ok(decrypted) = cipher.decrypt(nonce, encrypted_part) {
+                                                                            if decrypted.len() >= 36 {
+                                                                                let peer_pub_key = BASE64.encode(&decrypted[..32]);
+                                                                                let peer_mtu = Some(u16::from_be_bytes([decrypted[32], decrypted[33]]));
+                                                                                let peer_tunnel_port = u16::from_be_bytes([decrypted[34], decrypted[35]]);
+                                                                                if peer_tunnel_port == 0 && !is_ip_mode {
+                                                                                    println!("喵呜... 收到来自 {} 的 ACK，但隧道端口为 0，忽略喵。", addr);
+                                                                                    return;
+                                                                                }
 
-                                                                let mut endpoint = addr.ip().to_string();
-                                                                if peer_tunnel_port > 0 {
-                                                                    endpoint = format!("{}:{}", endpoint, peer_tunnel_port);
+                                                                                let mut endpoint = addr.ip().to_string();
+                                                                                if peer_tunnel_port > 0 {
+                                                                                    endpoint = format!("{}:{}", endpoint, peer_tunnel_port);
+                                                                                }
+                                                                                println!("喵！成功接收 TCP 信令响应 (ACK)：来自 {} (隧道端口: {})", endpoint, peer_tunnel_port);
+                                                                                let _ = configure_peer(&interface_inner, &peer_pub_key, endpoint, None, peer_mtu, true).await;
+                                                                            }
+                                                                        } else {
+                                                                            println!("喵呜... 无法解密来自 {} 的 TCP ACK，PSK 匹配吗喵？", addr);
+                                                                        }
+                                                                    },
+                                                                    Ok(Ok(n)) => println!("喵呜... 来自 {} 的 TCP ACK 长度不足: {} 字节喵。", addr, n),
+                                                                    Ok(Err(e)) => println!("喵呜... 读取来自 {} 的 TCP ACK 出错: {:?} 喵。", addr, e),
+                                                                    Err(_) => println!("喵呜... 等待来自 {} 的 TCP ACK 超时 10 秒喵。", addr),
                                                                 }
-                                                                println!("喵！成功接收 TCP 信令响应 (ACK)：来自 {} (隧道端口: {})", endpoint, peer_tunnel_port);
-                                                                let _ = configure_peer(&interface_inner, &peer_pub_key, endpoint, None, peer_mtu, true).await;
-                                                            }
-                                                        }
-                                                    }
-                                                } else {
-                                                    println!("喵呜... 没收到 {} 的 TCP 信令响应，下次再试喵。", addr);
-                                                }
                                             }
                                         }
                                     },
@@ -560,6 +564,8 @@ async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                                                 pkt.extend_from_slice(&ciphertext);
                                                 use tokio::io::AsyncWriteExt;
                                                 let _ = stream.write_all(&pkt).await;
+                                                let _ = stream.flush().await;
+                                                println!("喵！已向对端 {} 回发 ACK 完成喵。", addr);
                                             }
                                             break;
                                         }
