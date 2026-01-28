@@ -19,8 +19,8 @@ echo "正在塑造 .deb 安装包喵..."
 chmod +x scripts/build_deb.sh
 ./scripts/build_deb.sh
 
-# 3. 寻找生成的包
-VERSION="2.4.3"
+# 3. 寻找生成的包 (从全局 VERSION 文件读取)
+VERSION=$(cat VERSION)
 DEB_FILE=$(ls NekoLink_${VERSION}_*.deb 2>/dev/null | head -n 1)
 
 if [ -z "$DEB_FILE" ]; then

@@ -18,7 +18,13 @@ if [ "$#" -gt 0 ]; then
     exit $?
 fi
 
-VERSION="2.4.3"
+if [ -f "/usr/local/share/nekolink/VERSION" ]; then
+    VERSION=$(cat /usr/local/share/nekolink/VERSION)
+elif [ -f "VERSION" ]; then
+    VERSION=$(cat VERSION)
+else
+    VERSION="2.4.3-unknown"
+fi
 echo -e "${PINK}ฅ^•ﻌ•^ฅ 欢迎使用 NekoLink 交互式配置助手 v$VERSION！${NC}"
 echo -e "${CYAN}--- 全局信令通道 [12580] (一按我帮您) 已就绪 ---${NC}"
 
