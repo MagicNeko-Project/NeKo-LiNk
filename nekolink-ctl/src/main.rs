@@ -31,6 +31,7 @@ impl Default for GlobalConfig {
 }
 
 static PEER_CACHE: OnceLock<Mutex<HashMap<(String, String), String>>> = OnceLock::new();
+static CONFIG_MUTEX: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct NekoConfig {
@@ -124,7 +125,7 @@ async fn main() -> Result<()> {
     let mut configs = vec![];
     for entry in glob::glob(&format!("{}/*.json", config_dir))? {
         let path = entry?;
-        if path.file_name().map_or(false, |n| n == "global.json") { continue; }
+        if path.file_name().and_then(|n| n.to_str()) == Some("global.json") { continue; }
         
         let config_str = fs::read_to_string(&path)?;
         let config: NekoConfig = match serde_json::from_str(&config_str) {
@@ -173,8 +174,14 @@ async fn main() -> Result<()> {
     for state in states.iter() {
         let state_clone = state.clone();
         let handle = tokio::spawn(async move {
-            if let Err(e) = run_instance(state_clone).await {
-                eprintln!("实例运行时出错: {:?}", e);
+            loop {
+                let state_inner = state_clone.clone();
+                if let Err(e) = run_instance(state_inner).await {
+                    eprintln!("实例 {} 运行出错喵: {:?}。正在尝试重启...", state_clone.config.interface, e);
+                } else {
+                    println!("实例 {} 已退出喵。正在尝试重启...", state_clone.config.interface);
+                }
+                time::sleep(Duration::from_secs(5)).await;
             }
         });
         handles.push(handle);
@@ -707,6 +714,9 @@ fn derive_cipher(psk: &str) -> ChaCha20Poly1305 {
 }
 
 async fn configure_peer(interface: &str, peer_pub_key: &str, endpoint: String, keepalive: Option<u16>, peer_mtu: Option<u16>, auto_sync_mtu: bool) -> Result<()> {
+    let locker = CONFIG_MUTEX.get_or_init(|| tokio::sync::Mutex::new(()));
+    let _guard = locker.lock().await;
+
     let key = (interface.to_string(), peer_pub_key.to_string());
     {
         let cache_mutex = PEER_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
@@ -792,6 +802,8 @@ async fn show_status() -> Result<()> {
 
     for entry in entries {
         let path = entry?;
+        if path.file_name().and_then(|n| n.to_str()) == Some("global.json") { continue; }
+        
         let config_str = fs::read_to_string(&path)?;
         let config: NekoConfig = match serde_json::from_str(&config_str) {
             Ok(c) => c,
