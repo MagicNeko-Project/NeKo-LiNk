@@ -54,6 +54,12 @@ struct NekoState {
     pub_key: PublicKey,
 }
 
+impl NekoState {
+    fn pub_key_b64(&self) -> String {
+        BASE64.encode(self.pub_key.as_bytes())
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -256,55 +262,6 @@ async fn run_instance(state: NekoState) -> Result<()> {
     Ok(())
 }
 
-async fn run_global_signaling(configs: Vec<NekoConfig>) -> Result<()> {
-    // 预处理所有状态 (加载密钥)
-    let mut states = vec![];
-    for config in configs {
-        let key_path = format!("/etc/neko-link/{}.key", config.interface);
-        if let Ok(existing_key_b64) = fs::read_to_string(&key_path) {
-            if let Ok(bytes) = BASE64.decode(existing_key_b64.trim()) {
-                if let Ok(priv_bytes) = <[u8; 32]>::try_from(bytes) {
-                    let priv_key = StaticSecret::from(priv_bytes);
-                    let pub_key = PublicKey::from(&priv_key);
-                    states.push(NekoState { config, _priv_key: priv_key, pub_key });
-                    continue;
-                }
-            }
-        }
-        // 如果没有预先生成的密钥，全局管理器会等待 run_instance 生成它（通常第一次运行会出现这情况）喵
-        println!("接口 {} 的密钥尚未就绪，信令将稍后尝试...", config.interface);
-        states.push(NekoState {
-            config,
-            _priv_key: StaticSecret::from([0u8; 32]), // 占位符
-            pub_key: PublicKey::from(&StaticSecret::from([0u8; 32])),
-        });
-    }
-
-    let states = Arc::new(states);
-    
-    // 启动三种模式的全局任务
-    let udp_states = Arc::clone(&states);
-    let udp_task = tokio::spawn(async move {
-        let _ = run_global_udp_signaling(udp_states).await;
-    });
-
-    let tcp_states = Arc::clone(&states);
-    let tcp_task = tokio::spawn(async move {
-        let _ = run_global_tcp_signaling(tcp_states).await;
-    });
-
-    let raw_states = Arc::clone(&states);
-    let raw_task = tokio::spawn(async move {
-        let _ = run_global_raw_signaling(raw_states).await;
-    });
-
-    tokio::select! {
-        _ = udp_task => {},
-        _ = tcp_task => {},
-        _ = raw_task => {},
-    }
-    Ok(())
-}
 
 async fn run_global_udp_signaling(states: Arc<Vec<NekoState>>) -> Result<()> {
     // 全局绑定 12580 (或者第一个配置里的端口)
@@ -889,4 +846,28 @@ fn get_actual_listen_port(interface: &str) -> Option<u16> {
         }
     }
     None
+}
+
+fn load_or_generate_keys(interface: &str) -> Result<(String, String, PublicKey)> {
+    let key_path = format!("/etc/neko-link/{}.key", interface);
+    let pub_path = format!("/etc/neko-link/{}.pub", interface);
+    
+    let priv_key = if let Ok(existing_key_b64) = fs::read_to_string(&key_path) {
+        let trimmed = existing_key_b64.trim();
+        let bytes = BASE64.decode(trimmed).context("无法解码现有私钥喵")?;
+        StaticSecret::from(<[u8; 32]>::try_from(bytes).map_err(|_| anyhow::anyhow!("私钥长度不对喵"))?)
+    } else {
+        println!("正在为接口 {} 生成新的魔法密钥对喵...", interface);
+        let new_priv = StaticSecret::random_from_rng(OsRng);
+        let new_b64 = BASE64.encode(new_priv.to_bytes());
+        fs::write(&key_path, new_b64).context("无法保存私钥文件喵")?;
+        new_priv
+    };
+
+    let pub_key = PublicKey::from(&priv_key);
+    let priv_b64 = BASE64.encode(priv_key.to_bytes());
+    let pub_b64 = BASE64.encode(pub_key.as_bytes());
+    let _ = fs::write(&pub_path, &pub_b64);
+    
+    Ok((priv_b64, pub_b64, pub_key))
 }
