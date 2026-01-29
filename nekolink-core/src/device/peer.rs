@@ -6,7 +6,7 @@ use socket2::{Domain, Protocol, Type};
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::AtomicU32;
 
 use crate::device::{AllowedIps, Error, TransportMode};
 use crate::noise::{Tunn, TunnResult};

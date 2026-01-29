@@ -165,9 +165,23 @@ async fn main() -> Result<()> {
         let s2 = Arc::clone(&signaling_states);
         tokio::spawn(async move { if let Err(e) = run_global_tcp_signaling(s2, signal_port).await { eprintln!("TCP 信令管线异常退出喵: {:?}", e); } });
 
-        println!("ฅ^•ﻌ•^ฅ 全局信令中枢：Raw IP 管线启动...");
-        let s3 = Arc::clone(&signaling_states);
-        tokio::spawn(async move { if let Err(e) = run_global_raw_signaling(s3).await { eprintln!("Raw IP 信令管线异常退出喵: {:?}", e); } });
+        // 收集所有 Raw IP 使用的协议号喵
+        let mut raw_protos = std::collections::HashSet::new();
+        for s in signaling_states.iter() {
+            if s.config.mode == "ip" {
+                if let Some(p) = s.config.ip_protocol {
+                    raw_protos.insert(p);
+                } else {
+                    raw_protos.insert(141); // 默认协议号
+                }
+            }
+        }
+
+        for proto in raw_protos {
+            println!("ฅ^•ﻌ•^ฅ 全局信令中枢：Raw IP (协议 {}) 管线启动...", proto);
+            let s3 = Arc::clone(&signaling_states);
+            tokio::spawn(async move { if let Err(e) = run_global_raw_signaling(s3, proto).await { eprintln!("Raw IP (协议 {}) 信令管线异常退出喵: {:?}", proto, e); } });
+        }
     });
 
     let mut handles = vec![];
@@ -357,7 +371,7 @@ async fn run_global_udp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                         }
                     }
                 }
-                time::sleep(Duration::from_secs(10)).await;
+                time::sleep(Duration::from_secs(5)).await;
             }
         }
     };
@@ -526,7 +540,7 @@ async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                         }
                     }
                 }
-                time::sleep(Duration::from_secs(10)).await;
+                time::sleep(Duration::from_secs(5)).await;
             }
         }
     };
@@ -601,13 +615,9 @@ async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
     Ok(())
 }
 
-async fn run_global_raw_signaling(states: Arc<Vec<NekoState>>) -> Result<()> {
-    // 这里简单处理：监听默认的协议号 141
-    let proto = 141; 
+async fn run_global_raw_signaling(states: Arc<Vec<NekoState>>, proto: u8) -> Result<()> {
     let v4_socket = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::from(proto as i32))).ok();
     
-    println!("ฅ^•ﻌ•^ฅ Raw IP 信令管线就绪，正在监控 {} 个接口喵。", states.len());
-
     let v4_socket = v4_socket.map(|s| { s.set_nonblocking(true).unwrap(); Arc::new(tokio::io::unix::AsyncFd::new(s).unwrap()) });
 
     let magic_byte: u8 = 0x99;
@@ -618,7 +628,8 @@ async fn run_global_raw_signaling(states: Arc<Vec<NekoState>>) -> Result<()> {
         async move {
             loop {
                 for state in states.iter() {
-                    if state.config.mode != "ip" || state.pub_key.as_bytes() == &[0u8; 32] { continue; }
+                    let st_proto = state.config.ip_protocol.unwrap_or(141);
+                    if state.config.mode != "ip" || st_proto != proto || state.pub_key.as_bytes() == &[0u8; 32] { continue; }
                     let established = get_established_peers(&state.config.interface).await;
                     if !established.is_empty() { continue; }
 
@@ -627,7 +638,15 @@ async fn run_global_raw_signaling(states: Arc<Vec<NekoState>>) -> Result<()> {
                     let current_mtu = get_interface_mtu(&state.config.interface).unwrap_or(1420);
 
                     for peer in &state.config.peers {
-                        if let Ok(ip) = peer.endpoint.parse::<IpAddr>() {
+                        let ip_opt = if let Ok(ip) = peer.endpoint.parse::<IpAddr>() {
+                            Some(ip)
+                        } else if let Ok(sa) = peer.endpoint.parse::<SocketAddr>() {
+                            Some(sa.ip())
+                        } else {
+                            None
+                        };
+
+                        if let Some(ip) = ip_opt {
                             let mut msg = pub_key_bytes.clone();
                             msg.extend_from_slice(&current_mtu.to_be_bytes());
                             let mut nonce_bytes = [0u8; 12];
@@ -647,7 +666,7 @@ async fn run_global_raw_signaling(states: Arc<Vec<NekoState>>) -> Result<()> {
                         }
                     }
                 }
-                time::sleep(Duration::from_secs(10)).await;
+                time::sleep(Duration::from_secs(5)).await;
             }
         }
     };
@@ -666,7 +685,8 @@ async fn run_global_raw_signaling(states: Arc<Vec<NekoState>>) -> Result<()> {
                                  let nonce = Nonce::from_slice(&buf[offset+1..offset+13]);
                                  let encrypted = &buf[offset+13..len];
                                  for state in states.iter() {
-                                     if state.config.mode != "ip" { continue; }
+                                     let st_proto = state.config.ip_protocol.unwrap_or(141);
+                                     if state.config.mode != "ip" || st_proto != proto { continue; }
                                      let cipher = derive_cipher(&state.config.psk);
                                      if let Ok(decrypted) = cipher.decrypt(nonce, encrypted) {
                                          let ip_addr = addr.as_socket().map(|s| s.ip()).unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
@@ -697,7 +717,7 @@ async fn run_global_raw_signaling(states: Arc<Vec<NekoState>>) -> Result<()> {
                         }
                     }
                 }
-                time::sleep(Duration::from_secs(10)).await;
+                time::sleep(Duration::from_secs(5)).await;
             }
         }
     };
