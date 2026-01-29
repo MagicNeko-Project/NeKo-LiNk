@@ -308,6 +308,19 @@ impl Drop for DeviceHandle {
 }
 
 impl Device {
+    fn get_local_ip(&self, dst: SocketAddr) -> Option<Ipv4Addr> {
+        if let Ok(temp_sock) = std::net::UdpSocket::bind("0.0.0.0:0") {
+            if temp_sock.connect(dst).is_ok() {
+                if let Ok(local_addr) = temp_sock.local_addr() {
+                    if let IpAddr::V4(v4) = local_addr.ip() {
+                        return Some(v4);
+                    }
+                }
+            }
+        }
+        None
+    }
+
     fn next_index(&mut self) -> u32 {
         self.next_index.next()
     }
@@ -816,27 +829,30 @@ impl Device {
                                      }
                                  }
                                  TcpState::Idle | TcpState::SynReceived => {
-                                      if (flags & TCP_FLAG_SYN) != 0 {
-                                          tracing::info!("喵！TCP 状态 [Idle -> SynReceived]，收到 SYN， Seq={}, Ack={}, 来自 {:?}", tcp.seq, tcp.ack, addr);
+                                      if (flags & TCP_FLAG_SYN) != 0 && (flags & TCP_FLAG_ACK) == 0 {
+                                          let remote_addr = addr.as_socket().unwrap();
+                                          tracing::info!("喵！TCP 状态 [Idle -> SynReceived]，收到 SYN， Seq={}, 来自 {}", tcp.seq, remote_addr);
                                           let next_ack = tcp.seq.wrapping_add(1);
                                           if let Some(peer) = matched_peer {
                                               let p = peer.lock();
                                               p.tcp_ack.store(next_ack, Ordering::SeqCst);
                                               p.tcp_state.store(2, Ordering::SeqCst);
-                                              let dst_ip = match addr.as_socket().unwrap().ip() { IpAddr::V4(v4) => v4, _ => continue };
+                                              let dst_ip = match remote_addr.ip() { IpAddr::V4(v4) => v4, _ => continue };
+                                              let local_ip = p.local_ip.read().unwrap_or(d.get_local_ip(remote_addr).unwrap_or(Ipv4Addr::UNSPECIFIED));
                                               let len = fake_tcp::prepare_tcp_packet(
-                                                  p.local_ip.read().unwrap_or(Ipv4Addr::UNSPECIFIED), dst_ip, *p.local_port.read(),
-                                                  tcp.src_port, p_init_seq, next_ack, TCP_FLAG_SYN | TCP_FLAG_ACK, None, &mut t.tcp_buf
+                                                  local_ip, dst_ip, *p.local_port.read(), tcp.src_port,
+                                                  p_init_seq, next_ack, TCP_FLAG_SYN | TCP_FLAG_ACK, None, &mut t.tcp_buf
                                               );
                                               udp.send_to(&t.tcp_buf[..len], &addr).ok();
                                           } else {
                                               let conns = d.fake_tcp_conns.lock();
-                                              if let Some(conn) = conns.get(&addr.as_socket().unwrap()) {
+                                              if let Some(conn) = conns.get(&remote_addr) {
                                                   conn.ack.store(next_ack, Ordering::SeqCst);
                                                   conn.state.store(2, Ordering::SeqCst);
-                                                  let dst_ip = match addr.as_socket().unwrap().ip() { IpAddr::V4(v4) => v4, _ => continue };
+                                                  let dst_ip = match remote_addr.ip() { IpAddr::V4(v4) => v4, _ => continue };
+                                                  let local_ip = d.get_local_ip(remote_addr).unwrap_or(Ipv4Addr::UNSPECIFIED);
                                                   let len = fake_tcp::prepare_tcp_packet(
-                                                      Ipv4Addr::UNSPECIFIED, dst_ip, d.listen_port, tcp.src_port,
+                                                      local_ip, dst_ip, d.listen_port, tcp.src_port,
                                                       p_init_seq, next_ack, TCP_FLAG_SYN | TCP_FLAG_ACK, None, &mut t.tcp_buf
                                                   );
                                                   udp.send_to(&t.tcp_buf[..len], &addr).ok();
