@@ -38,9 +38,10 @@ function show_menu() {
     echo "3. 重启 NekoLink 服务 (Systemd Restart)"
     echo "4. 查看运行状态 (Status)"
     echo "5. 管理密钥与公钥 (Key Management)"
-    echo "6. 查看配置文件列表"
-    echo "7. 退出"
-    read -p "请输入数字 [1-7]: " choice
+    echo "6. 配置文件一键检查与修复 (Fix Configs)"
+    echo "7. 查看配置文件列表"
+    echo "8. 退出"
+    read -p "请输入数字 [1-8]: " choice
 }
 
 function edit_config() {
@@ -76,7 +77,7 @@ function edit_config() {
     curr_ka=$(jq -r '.persistent_keepalive // "null"' "$selected_cfg")
     curr_mtu=$(jq -r '.mtu // "null"' "$selected_cfg")
     curr_mss=$(jq -r '.clamp_mss' "$selected_cfg")
-    curr_sig=$(jq -r '.signal_port // 0' "$selected_cfg")
+    curr_mss=$(jq -r '.clamp_mss' "$selected_cfg")
     curr_ep=$(jq -r '.peers[0].endpoint // empty' "$selected_cfg")
 
     # 交互式修改
@@ -104,7 +105,12 @@ function edit_config() {
     read -p "本地隧道 IP (当前: $curr_addr, 直接回车保持不变): " local_addr
     [ -z "$local_addr" ] && local_addr="$curr_addr"
 
-    read -p "对端 Endpoint (当前: $curr_ep, 直接回车保持不变): " endpoint
+    if [ "$mode" == "ip" ]; then
+        read -p "对端公网 IP (当前: $curr_ep, 直接回车保持不变): " endpoint
+    else
+        echo -e "${PINK}提示：对端端点应为 IP:服务端信令端口 (通常为 12580) 喵！${NC}"
+        read -p "对端 Endpoint (当前: $curr_ep, 直接回车保持不变): " endpoint
+    fi
     [ -z "$endpoint" ] && endpoint="$curr_ep"
 
     read -p "Keepalive 间隔 (当前: $curr_ka, 直接回车保持不变): " keepalive
@@ -130,8 +136,7 @@ function edit_config() {
         *) auto_route="$curr_aroute" ;;
     esac
 
-    read -p "信令端口 (全局默认: 12580, 直接回车保持不变): " sig_port
-    [ -z "$sig_port" ] && sig_port=${curr_sig:-12580}
+    # signal_port 统一迁移到 global.json 喵
 
     # 使用 jq 构建新 JSON 并覆盖
     tmp_cfg=$(mktemp)
@@ -147,7 +152,6 @@ function edit_config() {
         --arg addr "$local_addr" \
         --arg psk "$psk" \
         --arg ep "$endpoint" \
-        --argjson sig "$sig_port" \
         '{
             interface: $iface,
             mode: $mode,
@@ -159,8 +163,7 @@ function edit_config() {
             clamp_mss: $clamp_mss,
             local_address: $addr,
             psk: $psk,
-            peers: (if $ep != "" then [{endpoint: $ep}] else [] end),
-            signal_port: $sig
+            peers: (if $ep != "" then [{endpoint: $ep}] else [] end)
         }' > "$tmp_cfg"
     
     mv "$tmp_cfg" "$selected_cfg"
@@ -192,8 +195,8 @@ function create_config() {
         if [ "$mode" == "ip" ]; then
             read -p "请输入服务端的公网 IP ( e.g. 1.2.3.4 ): " endpoint
         else
-            echo -e "${PINK}提示：现在信令与数据分离。对端地址通常格式为 IP:12580${NC}"
-            read -p "请输入服务端的公网端点 ( IP:信令端口, 默认 1.2.3.4:12580 ): " endpoint
+            echo -e "${PINK}提示：请务必输入服务端的公网 IP 和信令端口 (通常为 12580) 喵！${NC}"
+            read -p "请输入服务端的公网端点 ( IP:服务端信令端口, 示例 1.2.3.4:12580 ): " endpoint
         fi
         while [ -z "$endpoint" ]; do
             read -p "客户端必须指定对端地址喵！请重新输入: " endpoint
@@ -284,9 +287,7 @@ function create_config() {
         auto_route="false"
     fi
 
-    echo -e "${PINK}正在使用 12580 (一按我帮您) 作为默认信令交换端口喵！${NC}"
-    read -p "请输入信令交换端口 ( 默认 12580 ): " sig_port
-    [ -z "$sig_port" ] && sig_port=12580
+    # signal_port 统一迁移到 global.json 喵
 
     # 构建 JSON
     json_path="$CONFIG_DIR/$iface.json"
@@ -315,8 +316,7 @@ EOF
     fi
 
     cat >> "$json_path" <<EOF
-  ],
-  "signal_port": $sig_port
+  ]
 }
 EOF
 
@@ -358,6 +358,90 @@ function manage_keys() {
         *) return ;;
     esac
 }
+function check_and_fix_configs() {
+    echo -e "\n${PINK}--- 正在施展配置文件修复魔法 ---${NC}"
+    configs=("$CONFIG_DIR"/*.json)
+    if [ ! -e "${configs[0]}" ]; then
+        echo -e "${CYAN}目录里空荡荡的喵，没有发现配置文件。${NC}"
+        return
+    fi
+
+    for cfg in "${configs[@]}"; do
+        ifname=$(basename "$cfg" .json)
+        echo -e "${CYAN}检查接口 [$ifname] 的配置...${NC}"
+        
+        # 定义字段及其默认值
+        # 注意：这里使用数组模拟字典，因为 bash 3.x 兼容性考虑
+        # 格式：字段名|默认值|如果是 null 转为什么
+        fields=(
+            "interface|\"$ifname\""
+            "mode|\"udp\""
+            "ip_protocol|null"
+            "listen_port|0"
+            "auto_route|false"
+            "persistent_keepalive|25"
+            "mtu|1420"
+            "clamp_mss|true"
+            "local_address|\"10.0.0.1/24\""
+            "psk|\"NekoMagic_Default_PSK\""
+            "peers|[]"
+        )
+
+        tmp_cfg=$(mktemp)
+        cp "$cfg" "$tmp_cfg"
+
+        for f in "${fields[@]}"; do
+            key=$(echo "$f" | cut -d'|' -f1)
+            default=$(echo "$f" | cut -d'|' -f2)
+            
+            # 检查字段是否存在
+            exists=$(jq "has(\"$key\")" "$tmp_cfg")
+            if [ "$exists" != "true" ]; then
+                echo -e "${PINK}  补全缺失字段: $key -> $default${NC}"
+                new_tmp=$(mktemp)
+                jq ". + {\"$key\": $default}" "$tmp_cfg" > "$new_tmp"
+                mv "$new_tmp" "$tmp_cfg"
+            fi
+        done
+
+        # 移除过时的 signal_port 字段喵
+        if jq -e 'has("signal_port")' "$tmp_cfg" > /dev/null; then
+            echo -e "${PINK}  发现并迁移过时的 signal_port 字段...${NC}"
+            new_tmp=$(mktemp)
+            jq 'del(.signal_port)' "$tmp_cfg" > "$new_tmp"
+            mv "$new_tmp" "$tmp_cfg"
+        fi
+
+        # 特殊逻辑修复：确保 listen_port 和 ip_protocol 在某些模式下合法
+        # 暂时只做基础补全，如果主人需要更复杂的逻辑可以后续追加喵
+        
+        # 比较是否有变化
+        if ! diff -q "$cfg" "$tmp_cfg" > /dev/null; then
+            mv "$tmp_cfg" "$cfg"
+            echo -e "${PINK}  修复完成喵！${NC}"
+        else
+            echo -e "${CYAN}  配置看起来很健康喵！${NC}"
+            rm "$tmp_cfg"
+        fi
+    done
+
+    # 统一维护 global.json
+    echo -e "${CYAN}检查全局配置 global.json...${NC}"
+    global_json="$CONFIG_DIR/global.json"
+    if [ ! -f "$global_json" ]; then
+        echo -e "${PINK}  创建缺失的 global.json ...${NC}"
+        echo '{"signal_port": 12580}' > "$global_json"
+    else
+        if ! jq -e 'has("signal_port")' "$global_json" > /dev/null; then
+            echo -e "${PINK}  补全 global.json 中的 signal_port ...${NC}"
+            tmp_g=$(mktemp)
+            jq '. + {"signal_port": 12580}' "$global_json" > "$tmp_g"
+            mv "$tmp_g" "$global_json"
+        fi
+    fi
+
+    echo -e "${PINK}所有配置检查与迁移完毕喵！${NC}"
+}
 
 while true; do
     show_menu
@@ -371,8 +455,9 @@ while true; do
             ;;
         4) nekolink status ;;
         5) manage_keys ;;
-        6) ls -l "$CONFIG_DIR"/*.json ;;
-        7) exit 0 ;;
+        6) check_and_fix_configs ;;
+        7) ls -l "$CONFIG_DIR"/*.json ;;
+        8) exit 0 ;;
         *) echo "无效选择喵！" ;;
     esac
 done

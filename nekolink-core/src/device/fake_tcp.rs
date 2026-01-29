@@ -1,8 +1,7 @@
 // NekoLink Fake-TCP Module ฅ^•ﻌ•^ฅ
 // 这个模块负责在用户态模拟 TCP 头部，让 UDP 数据包看起来像标准 TCP 流量。
 
-use std::net::{IpAddr, Ipv4Addr};
-use std::io;
+use std::net::Ipv4Addr;
 
 #[derive(Debug, Clone, Copy)]
 pub struct TcpHeader {
