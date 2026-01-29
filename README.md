@@ -148,4 +148,18 @@ sudo tcpdump -i eth0 proto 141 -n -v
 
 ---
 
+---
+
+## 📜 更新日志 (CHANGELOG) ฅ^•ﻌ•^ฅ
+
+### v2.4.5 (2026-01-29)
+- **🔥 Fake-TCP 深度修复**：彻底重构 Fake-TCP 核心逻辑，修复了 Socket 类型错误、IP/TCP 头部偏移问题以及至关重要的握手响应时序 Bug，现在 Fake-TCP 已能完美闭环通讯。
+- **✨ UAPI 状态报告进化**：修复了运行状态下无法显示传输协议（UDP/TCP/IP）的问题，新增美轮美奂的中文运行报告，支持实时握手时间计算与详细流量统计。
+- **📦 配置管理优化**：引入 `global.json` 集中管理全局 `signal_port`。
+- **🧹 自动修复魔法**：`neko-link.sh` 新增配置一键修复功能，支持自动补全缺失字段、迁移旧配置并严格清理 `global.json` 冗余字段。
+- **🛡️ 防火墙提示升级**：将所有的防火墙提示从 `iptables` 更新为更现代的 `nftables`。
+- **🚀 性能与稳定性**：重构了 RawIP 动态协议信令逻辑，缩短握手重试频率，并消除了核心库中的多处编译警告。
+
+---
+
 May your packets be as agile as a Neko! ฅ^•ﻌ•^ฅ
