@@ -251,17 +251,22 @@ async fn run_instance(state: NekoState) -> Result<()> {
     
     let mut child = cmd.spawn().context("启动 nekolink-cli 失败")?;
 
-    // 等待接口创建喵，500ms 通常足够了
-    time::sleep(Duration::from_millis(500)).await;
-
     // 3. 配置接口与私钥 (UAPI 方式)
-    let mut uapi_cmd = format!("set=1\nprivate_key={}\n", state.priv_b64);
-    if let Some(port) = config.listen_port {
-        uapi_cmd.push_str(&format!("listen_port={}\n", port));
-    }
-    uapi_cmd.push('\n');
+    {
+        let locker = CONFIG_MUTEX.get_or_init(|| tokio::sync::Mutex::new(()));
+        let _guard = locker.lock().await;
 
-    send_uapi(&config.interface, &uapi_cmd).await.context("配置私钥失败")?;
+        // 等待接口创建喵，500ms 通常足够了
+        time::sleep(Duration::from_millis(500)).await;
+
+        let mut uapi_cmd = format!("set=1\nprivate_key={}\n", state.priv_b64);
+        if let Some(port) = config.listen_port {
+            uapi_cmd.push_str(&format!("listen_port={}\n", port));
+        }
+        uapi_cmd.push('\n');
+
+        send_uapi(&config.interface, &uapi_cmd).await.context("配置私钥失败")?;
+    }
 
     println!("正在启用网卡 {} 喵...", config.interface);
     run_cmd(&format!("ip link set up dev {}", config.interface)).context("启用网卡失败")?;
