@@ -40,7 +40,8 @@ use crate::noise::errors::WireGuardError;
 use crate::noise::handshake::parse_handshake_anon;
 use crate::noise::rate_limiter::RateLimiter;
 use crate::noise::{Packet, Tunn, TunnResult};
-use fake_tcp::{TcpHeader, TCP_FLAG_PSH, TCP_FLAG_ACK};
+use fake_tcp::{TcpHeader, TCP_FLAG_PSH, TCP_FLAG_ACK, TCP_FLAG_SYN, TCP_FLAG_RST};
+use peer::{TcpState};
 use crate::x25519;
 use allowed_ips::AllowedIps;
 use parking_lot::Mutex;
@@ -604,11 +605,36 @@ impl Device {
                                                 IpAddr::V4(v4) => v4,
                                                 _ => continue,
                                             };
+                                            
+                                            let current_state = TcpState::from(p.tcp_state.load(Ordering::SeqCst));
+                                            
+                                            if current_state == TcpState::Idle {
+                                                // 主动发起握手喵
+                                                use rand::Rng;
+                                                let init_seq = rand::thread_rng().gen();
+                                                p.reset_tcp(init_seq);
+                                                p.tcp_state.store(1, Ordering::SeqCst); // SynSent
+                                                
+                                                let len = fake_tcp::prepare_tcp_packet(
+                                                    local_ip, dst_ip, *p.local_port.read(), endpoint_addr.port(),
+                                                    init_seq, 0, TCP_FLAG_SYN, None, &mut t.tcp_buf
+                                                );
+                                                match endpoint_addr {
+                                                    SocketAddr::V4(_) => { udp4.send_to(&t.tcp_buf[..len], &endpoint_addr.into()).ok(); }
+                                                    SocketAddr::V6(_) => { udp6.send_to(&t.tcp_buf[..len], &endpoint_addr.into()).ok(); }
+                                                }
+                                                continue;
+                                            }
+
+                                            if current_state != TcpState::Established {
+                                                continue; // 没握手成功前不发数据喵
+                                            }
+
                                             let seq = p.tcp_seq.fetch_add(packet.len() as u32, Ordering::SeqCst);
                                             let ack = p.tcp_ack.load(Ordering::SeqCst);
                                             let len = fake_tcp::prepare_tcp_packet(
                                                 local_ip, dst_ip, *p.local_port.read(), endpoint_addr.port(),
-                                                seq, ack, TCP_FLAG_PSH | TCP_FLAG_ACK, packet, &mut t.tcp_buf
+                                                seq, ack, TCP_FLAG_PSH | TCP_FLAG_ACK, Some(packet), &mut t.tcp_buf
                                             );
                                             match endpoint_addr {
                                                 SocketAddr::V4(_) => {
@@ -690,8 +716,87 @@ impl Device {
                     // NekoLink 2.3.0: 处理 TCP 层头部 (Fake-TCP 模式) 喵
                     if d.config.transport_mode == TransportMode::FakeTcp && addr.as_socket().unwrap().is_ipv4() {
                         if packet_len < offset + 20 { continue; }
-                        // 这里我们同步 TCP ACK 并跳过 TCP 头喵
-                        offset += 20;
+                        if let Some(tcp) = TcpHeader::parse(&t.src_buf[offset..offset+20]) {
+                             // 处理握手喵
+                             offset += 20;
+                             let payload_len = (packet_len - offset) as u32;
+                             
+                             // 寻找匹配的 Peer 来维护状态喵
+                             let peer = d.peers.values().find(|peer_ref| {
+                                 let p = peer_ref.lock();
+                                 let ep_addr = p.endpoint().addr;
+                                 if let Some(ep) = ep_addr {
+                                     ep.ip() == addr.as_socket().unwrap().ip() && ep.port() == tcp.src_port
+                                 } else {
+                                     false
+                                 }
+                             });
+
+                             if let Some(peer) = peer {
+                                 let p = peer.lock();
+                                 let current_state = TcpState::from(p.tcp_state.load(Ordering::SeqCst));
+                                 let flags = tcp.flags;
+                                 
+                                 if (flags & TCP_FLAG_RST) != 0 {
+                                     p.tcp_state.store(0, Ordering::SeqCst); // Reset
+                                     continue;
+                                 }
+
+                                 match current_state {
+                                     TcpState::SynSent => {
+                                         if (flags & TCP_FLAG_SYN) != 0 && (flags & TCP_FLAG_ACK) != 0 {
+                                             p.tcp_ack.store(tcp.seq.wrapping_add(1), Ordering::SeqCst);
+                                             p.tcp_seq.store(tcp.ack, Ordering::SeqCst);
+                                             p.tcp_state.store(3, Ordering::SeqCst); // Established
+                                             
+                                             // 回复 ACK 喵
+                                             let local_ip = p.local_ip.read().unwrap_or(Ipv4Addr::UNSPECIFIED);
+                                             let dst_ip = match addr.as_socket().unwrap().ip() { IpAddr::V4(v4) => v4, _ => continue };
+                                             let len = fake_tcp::prepare_tcp_packet(
+                                                 local_ip, dst_ip, *p.local_port.read(), tcp.src_port,
+                                                 p.tcp_seq.load(Ordering::SeqCst), p.tcp_ack.load(Ordering::SeqCst),
+                                                 TCP_FLAG_ACK, None, &mut t.tcp_buf
+                                             );
+                                             udp.send_to(&t.tcp_buf[..len], &addr).ok();
+                                         }
+                                     }
+                                     TcpState::Idle | TcpState::SynReceived => {
+                                          if (flags & TCP_FLAG_SYN) != 0 {
+                                              use rand::Rng;
+                                              let init_seq = rand::thread_rng().gen();
+                                              p.reset_tcp(init_seq);
+                                              p.tcp_ack.store(tcp.seq.wrapping_add(1), Ordering::SeqCst);
+                                              p.tcp_state.store(2, Ordering::SeqCst); // SynReceived
+                                              
+                                              // 回复 SYN-ACK 喵
+                                              let local_ip = p.local_ip.read().unwrap_or(Ipv4Addr::UNSPECIFIED);
+                                              let dst_ip = match addr.as_socket().unwrap().ip() { IpAddr::V4(v4) => v4, _ => continue };
+                                              let len = fake_tcp::prepare_tcp_packet(
+                                                  local_ip, dst_ip, *p.local_port.read(), tcp.src_port,
+                                                  init_seq, p.tcp_ack.load(Ordering::SeqCst),
+                                                  TCP_FLAG_SYN | TCP_FLAG_ACK, None, &mut t.tcp_buf
+                                              );
+                                              udp.send_to(&t.tcp_buf[..len], &addr).ok();
+                                          } else if current_state == TcpState::SynReceived && (flags & TCP_FLAG_ACK) != 0 {
+                                              if tcp.ack == p.tcp_init_seq.load(Ordering::SeqCst).wrapping_add(1) {
+                                                  p.tcp_state.store(3, Ordering::SeqCst); // Established
+                                                  p.tcp_seq.store(tcp.ack, Ordering::SeqCst);
+                                              }
+                                          }
+                                     }
+                                     TcpState::Established => {
+                                         let increment = if payload_len == 0 { 0 } else { payload_len };
+                                         p.tcp_ack.store(tcp.seq.wrapping_add(increment), Ordering::SeqCst);
+                                         p.tcp_seq.store(tcp.ack, Ordering::SeqCst);
+                                     }
+                                     _ => {}
+                                 }
+                             }
+
+                             if payload_len == 0 { continue; } // 控制报文，没数据喵
+                        } else {
+                            continue;
+                        }
                     }
 
                     let packet = &t.src_buf[offset..packet_len];
@@ -770,10 +875,10 @@ impl Device {
                                     };
                                     let seq = p.tcp_seq.fetch_add(packet.len() as u32, Ordering::SeqCst);
                                     let ack = p.tcp_ack.load(Ordering::SeqCst);
-                                     let len = fake_tcp::prepare_tcp_packet(
-                                         local_ip, dst_ip, *p.local_port.read(), remote_port,
-                                         seq, ack, TCP_FLAG_PSH | TCP_FLAG_ACK, packet, &mut t.tcp_buf
-                                     );
+                                      let len = fake_tcp::prepare_tcp_packet(
+                                          local_ip, dst_ip, *p.local_port.read(), remote_port,
+                                          seq, ack, TCP_FLAG_PSH | TCP_FLAG_ACK, Some(packet), &mut t.tcp_buf
+                                      );
                                      let _: Result<_, _> = udp.send_to(&t.tcp_buf[..len], &SocketAddr::new(IpAddr::V4(dst_ip), remote_port).into());
                                 }
                             } else {
@@ -898,10 +1003,10 @@ impl Device {
                                      };
                                      if dst_port == 0 { dst_port = remote_port; }
 
-                                     let len = fake_tcp::prepare_tcp_packet(
-                                         local_ip, dst_ip, *p.local_port.read(), dst_port,
-                                         seq, ack, TCP_FLAG_PSH | TCP_FLAG_ACK, packet, &mut t.tcp_buf
-                                     );
+                                      let len = fake_tcp::prepare_tcp_packet(
+                                          local_ip, dst_ip, *p.local_port.read(), dst_port,
+                                          seq, ack, TCP_FLAG_PSH | TCP_FLAG_ACK, Some(packet), &mut t.tcp_buf
+                                      );
                                      let _: Result<_, _> = udp.send(&t.tcp_buf[..len]);
                                 }
                             } else {
