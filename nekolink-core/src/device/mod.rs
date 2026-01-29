@@ -31,7 +31,7 @@ use std::io::{self, Write as _};
 use std::mem::MaybeUninit;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::os::unix::io::AsRawFd;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, AtomicU8, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::thread::JoinHandle;
@@ -172,6 +172,17 @@ pub struct Device {
 
     #[cfg(target_os = "linux")]
     uapi_fd: i32,
+
+    // NekoLink 2.3.0: 匿名 Fake-TCP 连接池喵
+    fake_tcp_conns: Mutex<HashMap<SocketAddr, Arc<FakeTcpState>>>,
+}
+
+// 匿名 TCP 连接状态喵
+pub struct FakeTcpState {
+    pub state: AtomicU8,
+    pub seq: AtomicU32,
+    pub ack: AtomicU32,
+    pub init_seq: u32,
 }
 
 struct ThreadData {
@@ -359,6 +370,7 @@ impl Device {
         let peer = Peer::new(tunn, next_index, endpoint, allowed_ips, preshared_key, self.config.transport_mode);
 
         let peer = Arc::new(Mutex::new(peer));
+        *peer.lock().local_port.write() = self.listen_port;
         self.peers.insert(pub_key, Arc::clone(&peer));
         self.peers_by_idx.insert(next_index, Arc::clone(&peer));
 
@@ -402,6 +414,7 @@ impl Device {
             rate_limiter: None,
             #[cfg(target_os = "linux")]
             uapi_fd,
+            fake_tcp_conns: Default::default(),
         };
 
         if uapi_fd >= 0 {
@@ -483,6 +496,9 @@ impl Device {
         self.udp6 = Some(udp_sock6);
 
         self.listen_port = port;
+        for peer in self.peers.values() {
+            *peer.lock().local_port.write() = port;
+        }
 
         Ok(())
     }
@@ -570,6 +586,14 @@ impl Device {
         self.queue.new_periodic_event(
             // Execute the timed function of every peer in the list
             Box::new(|d, t| {
+                // 定期同步内核接口的 MTU 喵
+                if let Ok(new_mtu) = d.iface.mtu() {
+                    let old_mtu = d.mtu.swap(new_mtu, Ordering::SeqCst);
+                    if old_mtu != new_mtu {
+                         tracing::info!("喵！检测到物理接口 MTU 变化: {} -> {}", old_mtu, new_mtu);
+                    }
+                }
+
                 let peer_map = &d.peers;
                 tracing::debug!("喵！设备定时器触发，监测 {} 个 Peer", peer_map.len());
 
@@ -729,7 +753,8 @@ impl Device {
                              let payload_len = (packet_len - offset) as u32;
                              
                              // 寻找匹配的 Peer 来维护状态喵
-                             let peer = d.peers.values().find(|peer_ref| {
+                             // 寻找匹配的 Peer 来维护状态喵
+                             let matched_peer = d.peers.values().find(|peer_ref| {
                                  let p = peer_ref.lock();
                                  let ep_addr = p.endpoint().addr;
                                  if let Some(ep) = ep_addr {
@@ -739,69 +764,117 @@ impl Device {
                                  }
                              });
 
-                             if let Some(peer) = peer {
+                             // 获取连接状态引用喵
+                             let (p_state, p_seq, p_ack, p_init_seq) = if let Some(peer) = matched_peer.as_ref() {
                                  let p = peer.lock();
-                                 let current_state = TcpState::from(p.tcp_state.load(Ordering::SeqCst));
-                                 let flags = tcp.flags;
-                                 
-                                 if (flags & TCP_FLAG_RST) != 0 {
-                                     tracing::warn!("喵呜... 收到来自 {:?} 的 TCP RST，连接重置喵！", addr.as_socket());
-                                     p.tcp_state.store(0, Ordering::SeqCst); // Reset
-                                     continue;
-                                 }
+                                 (p.tcp_state.load(Ordering::SeqCst), p.tcp_seq.load(Ordering::SeqCst), p.tcp_ack.load(Ordering::SeqCst), p.tcp_init_seq.load(Ordering::SeqCst))
+                             } else {
+                                 // 尝试从匿名池查找喵
+                                 let mut conns = d.fake_tcp_conns.lock();
+                                 let conn = conns.entry(addr.as_socket().unwrap()).or_insert_with(|| {
+                                     use rand::Rng;
+                                     Arc::new(FakeTcpState {
+                                         state: AtomicU8::new(0), // Idle
+                                         seq: AtomicU32::new(0),
+                                         ack: AtomicU32::new(0),
+                                         init_seq: rand::thread_rng().gen(),
+                                     })
+                                 });
+                                 (conn.state.load(Ordering::SeqCst), conn.seq.load(Ordering::SeqCst), conn.ack.load(Ordering::SeqCst), conn.init_seq)
+                             };
 
-                                 match current_state {
-                                     TcpState::SynSent => {
-                                         if (flags & TCP_FLAG_SYN) != 0 && (flags & TCP_FLAG_ACK) != 0 {
-                                             tracing::info!("喵！TCP 状态 [SynSent -> Established]，握手成功！来自 {:?}", addr);
-                                             p.tcp_ack.store(tcp.seq.wrapping_add(1), Ordering::SeqCst);
-                                             p.tcp_seq.store(tcp.ack, Ordering::SeqCst);
-                                             p.tcp_state.store(3, Ordering::SeqCst); // Established
-                                             
-                                             // 回复 ACK 喵
-                                             let local_ip = p.local_ip.read().unwrap_or(Ipv4Addr::UNSPECIFIED);
+                             let flags = tcp.flags;
+                             if (flags & TCP_FLAG_RST) != 0 {
+                                 tracing::warn!("喵呜... 收到来自 {:?} 的 TCP RST，连接重置喵！", addr.as_socket());
+                                 if let Some(peer) = matched_peer {
+                                     peer.lock().tcp_state.store(0, Ordering::SeqCst);
+                                 } else {
+                                     d.fake_tcp_conns.lock().get(&addr.as_socket().unwrap()).map(|c| c.state.store(0, Ordering::SeqCst));
+                                 }
+                                 continue;
+                             }
+
+                             let current_state = TcpState::from(p_state);
+                             match current_state {
+                                 TcpState::SynSent => {
+                                     if (flags & TCP_FLAG_SYN) != 0 && (flags & TCP_FLAG_ACK) != 0 {
+                                         tracing::info!("喵！TCP 状态 [SynSent -> Established]，握手成功！来自 {:?}", addr);
+                                         let next_ack = tcp.seq.wrapping_add(1);
+                                         let next_seq = tcp.ack;
+                                         if let Some(peer) = matched_peer {
+                                             let p = peer.lock();
+                                             p.tcp_ack.store(next_ack, Ordering::SeqCst);
+                                             p.tcp_seq.store(next_seq, Ordering::SeqCst);
+                                             p.tcp_state.store(3, Ordering::SeqCst);
                                              let dst_ip = match addr.as_socket().unwrap().ip() { IpAddr::V4(v4) => v4, _ => continue };
                                              let len = fake_tcp::prepare_tcp_packet(
-                                                 local_ip, dst_ip, *p.local_port.read(), tcp.src_port,
-                                                 p.tcp_seq.load(Ordering::SeqCst), p.tcp_ack.load(Ordering::SeqCst),
-                                                 TCP_FLAG_ACK, None, &mut t.tcp_buf
+                                                 p.local_ip.read().unwrap_or(Ipv4Addr::UNSPECIFIED), dst_ip, *p.local_port.read(),
+                                                 tcp.src_port, next_seq, next_ack, TCP_FLAG_ACK, None, &mut t.tcp_buf
                                              );
                                              udp.send_to(&t.tcp_buf[..len], &addr).ok();
                                          }
                                      }
-                                     TcpState::Idle | TcpState::SynReceived => {
-                                          if (flags & TCP_FLAG_SYN) != 0 {
-                                              use rand::Rng;
-                                              let init_seq = rand::thread_rng().gen();
-                                              tracing::info!("喵！TCP 状态 [Idle -> SynReceived]，收到 SYN， Seq={}, Ack={}, 来自 {:?}", tcp.seq, tcp.ack, addr);
-                                              p.reset_tcp(init_seq);
-                                              p.tcp_ack.store(tcp.seq.wrapping_add(1), Ordering::SeqCst);
-                                              p.tcp_state.store(2, Ordering::SeqCst); // SynReceived
-                                              
-                                              // 回复 SYN-ACK 喵
-                                              let local_ip = p.local_ip.read().unwrap_or(Ipv4Addr::UNSPECIFIED);
+                                 }
+                                 TcpState::Idle | TcpState::SynReceived => {
+                                      if (flags & TCP_FLAG_SYN) != 0 {
+                                          tracing::info!("喵！TCP 状态 [Idle -> SynReceived]，收到 SYN， Seq={}, Ack={}, 来自 {:?}", tcp.seq, tcp.ack, addr);
+                                          let next_ack = tcp.seq.wrapping_add(1);
+                                          if let Some(peer) = matched_peer {
+                                              let p = peer.lock();
+                                              p.tcp_ack.store(next_ack, Ordering::SeqCst);
+                                              p.tcp_state.store(2, Ordering::SeqCst);
                                               let dst_ip = match addr.as_socket().unwrap().ip() { IpAddr::V4(v4) => v4, _ => continue };
                                               let len = fake_tcp::prepare_tcp_packet(
-                                                  local_ip, dst_ip, *p.local_port.read(), tcp.src_port,
-                                                  init_seq, p.tcp_ack.load(Ordering::SeqCst),
-                                                  TCP_FLAG_SYN | TCP_FLAG_ACK, None, &mut t.tcp_buf
+                                                  p.local_ip.read().unwrap_or(Ipv4Addr::UNSPECIFIED), dst_ip, *p.local_port.read(),
+                                                  tcp.src_port, p_init_seq, next_ack, TCP_FLAG_SYN | TCP_FLAG_ACK, None, &mut t.tcp_buf
                                               );
                                               udp.send_to(&t.tcp_buf[..len], &addr).ok();
-                                          } else if current_state == TcpState::SynReceived && (flags & TCP_FLAG_ACK) != 0 {
-                                              if tcp.ack == p.tcp_init_seq.load(Ordering::SeqCst).wrapping_add(1) {
-                                                  tracing::info!("喵！TCP 状态 [SynReceived -> Established]，被动握手成功！来自 {:?}", addr);
-                                                  p.tcp_state.store(3, Ordering::SeqCst); // Established
-                                                  p.tcp_seq.store(tcp.ack, Ordering::SeqCst);
+                                          } else {
+                                              let conns = d.fake_tcp_conns.lock();
+                                              if let Some(conn) = conns.get(&addr.as_socket().unwrap()) {
+                                                  conn.ack.store(next_ack, Ordering::SeqCst);
+                                                  conn.state.store(2, Ordering::SeqCst);
+                                                  let dst_ip = match addr.as_socket().unwrap().ip() { IpAddr::V4(v4) => v4, _ => continue };
+                                                  let len = fake_tcp::prepare_tcp_packet(
+                                                      Ipv4Addr::UNSPECIFIED, dst_ip, d.listen_port, tcp.src_port,
+                                                      p_init_seq, next_ack, TCP_FLAG_SYN | TCP_FLAG_ACK, None, &mut t.tcp_buf
+                                                  );
+                                                  udp.send_to(&t.tcp_buf[..len], &addr).ok();
                                               }
                                           }
-                                     }
-                                     TcpState::Established => {
-                                         let increment = if payload_len == 0 { 0 } else { payload_len };
-                                         p.tcp_ack.store(tcp.seq.wrapping_add(increment), Ordering::SeqCst);
-                                         p.tcp_seq.store(tcp.ack, Ordering::SeqCst);
-                                     }
-                                     _ => {}
+                                      } else if current_state == TcpState::SynReceived && (flags & TCP_FLAG_ACK) != 0 {
+                                          if tcp.ack == p_init_seq.wrapping_add(1) {
+                                              tracing::info!("喵！TCP 状态 [SynReceived -> Established]，被动握手成功！来自 {:?}", addr);
+                                              if let Some(peer) = matched_peer {
+                                                  let p = peer.lock();
+                                                  p.tcp_state.store(3, Ordering::SeqCst);
+                                                  p.tcp_seq.store(tcp.ack, Ordering::SeqCst);
+                                              } else {
+                                                  let conns = d.fake_tcp_conns.lock();
+                                                  if let Some(conn) = conns.get(&addr.as_socket().unwrap()) {
+                                                      conn.state.store(3, Ordering::SeqCst);
+                                                      conn.seq.store(tcp.ack, Ordering::SeqCst);
+                                                  }
+                                              }
+                                          }
+                                      }
                                  }
+                                 TcpState::Established => {
+                                     let next_ack = tcp.seq.wrapping_add(if payload_len == 0 { 0 } else { payload_len });
+                                     let next_seq = tcp.ack;
+                                     if let Some(peer) = matched_peer {
+                                         let p = peer.lock();
+                                         p.tcp_ack.store(next_ack, Ordering::SeqCst);
+                                         p.tcp_seq.store(next_seq, Ordering::SeqCst);
+                                     } else {
+                                         let conns = d.fake_tcp_conns.lock();
+                                         if let Some(conn) = conns.get(&addr.as_socket().unwrap()) {
+                                             conn.ack.store(next_ack, Ordering::SeqCst);
+                                             conn.seq.store(next_seq, Ordering::SeqCst);
+                                         }
+                                     }
+                                 }
+                                 _ => {}
                              }
 
                              if payload_len == 0 { continue; } // 控制报文，没数据喵
@@ -849,9 +922,6 @@ impl Device {
                     let mut remote_port = addr.as_socket().unwrap().port();
                     if d.config.transport_mode == TransportMode::FakeTcp && addr.as_socket().unwrap().is_ipv4() {
                          if let Some(tcp) = TcpHeader::parse(&t.src_buf[offset-20..offset]) {
-                             let payload_len = (packet_len - offset) as u32;
-                             let increment = if payload_len == 0 { 1 } else { payload_len };
-                             p.tcp_ack.store(tcp.seq.wrapping_add(increment), Ordering::SeqCst);
                              remote_port = tcp.src_port; // 从 TCP 头拿端口喵！
                          }
                     }
@@ -860,18 +930,31 @@ impl Device {
                     let mut flush = false; // Are there packets to send from the queue?
                     let res = p.tunnel.handle_verified_packet(parsed_packet, &mut t.dst_buf[..]);
                     
-                    if !matches!(res, TunnResult::Err(_)) {
-                         // 验证通过，此时才更新端点并尝试连接喵
-                         let ip_addr = addr.as_socket().unwrap().ip();
-                         let final_addr = SocketAddr::new(ip_addr, if remote_port != 0 { remote_port } else { addr.as_socket().unwrap().port() });
-                         p.set_endpoint(final_addr);
+                     if !matches!(res, TunnResult::Err(_)) {
+                          // 验证通过，此时才更新端点并尝试连接喵
+                          let ip_addr = addr.as_socket().unwrap().ip();
+                          let final_addr = SocketAddr::new(ip_addr, if remote_port != 0 { remote_port } else { addr.as_socket().unwrap().port() });
+                          
+                          if d.config.transport_mode == TransportMode::FakeTcp {
+                               // 检查是否有匿名连接需要升级喵
+                               let mut conns = d.fake_tcp_conns.lock();
+                               if let Some(conn) = conns.remove(&addr.as_socket().unwrap()) {
+                                   tracing::info!("喵！将匿名连接升级为 Peer 状态：{:?}", addr);
+                                   p.tcp_state.store(conn.state.load(Ordering::SeqCst), Ordering::SeqCst);
+                                   p.tcp_seq.store(conn.seq.load(Ordering::SeqCst), Ordering::SeqCst);
+                                   p.tcp_ack.store(conn.ack.load(Ordering::SeqCst), Ordering::SeqCst);
+                                   p.tcp_init_seq.store(conn.init_seq, Ordering::SeqCst);
+                               }
+                          }
 
-                         if d.config.use_connected_socket {
-                             let _ = p.connect_endpoint(d.listen_port, d.fwmark, d.config.ip_protocol).map(|sock| {
-                                 d.register_conn_handler(Arc::clone(peer), sock, ip_addr).unwrap();
-                             });
-                         }
-                    }
+                          p.set_endpoint(final_addr);
+
+                          if d.config.use_connected_socket {
+                              let _ = p.connect_endpoint(d.listen_port, d.fwmark, d.config.ip_protocol).map(|sock| {
+                                  d.register_conn_handler(Arc::clone(peer), sock, ip_addr).unwrap();
+                              });
+                          }
+                     }
 
                     match res {
                         TunnResult::Done => {}
