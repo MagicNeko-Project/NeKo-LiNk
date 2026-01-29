@@ -98,15 +98,21 @@ pub fn prepare_tcp_packet(
     seq: u32,
     ack: u32,
     flags: u16,
-    payload: &[u8],
+    payload: Option<&[u8]>,
     out_buf: &mut [u8],
 ) -> usize {
     let header = TcpHeader::new(src_port, dst_port, seq, ack, flags);
     header.write_to(&mut out_buf[0..20]);
-    out_buf[20..20 + payload.len()].copy_from_slice(payload);
     
-    let checksum = calculate_checksum(src_ip, dst_ip, &out_buf[0..20 + payload.len()]);
+    let payload_len = if let Some(p) = payload {
+        out_buf[20..20 + p.len()].copy_from_slice(p);
+        p.len()
+    } else {
+        0
+    };
+    
+    let checksum = calculate_checksum(src_ip, dst_ip, &out_buf[0..20 + payload_len]);
     out_buf[16..18].copy_from_slice(&checksum.to_be_bytes());
     
-    20 + payload.len()
+    20 + payload_len
 }

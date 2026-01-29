@@ -6,10 +6,30 @@ use socket2::{Domain, Protocol, Type};
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::str::FromStr;
-use std::sync::atomic::AtomicU32;
-
 use crate::device::{AllowedIps, Error, TransportMode};
 use crate::noise::{Tunn, TunnResult};
+use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TcpState {
+    Idle,
+    SynSent,
+    SynReceived,
+    Established,
+    Closed,
+}
+
+impl From<u8> for TcpState {
+    fn from(v: u8) -> Self {
+        match v {
+            1 => TcpState::SynSent,
+            2 => TcpState::SynReceived,
+            3 => TcpState::Established,
+            4 => TcpState::Closed,
+            _ => TcpState::Idle,
+        }
+    }
+}
 
 #[derive(Default, Debug)]
 pub struct Endpoint {
@@ -26,8 +46,10 @@ pub struct Peer {
     allowed_ips: AllowedIps<()>,
     preshared_key: Option<[u8; 32]>,
     pub transport_mode: TransportMode,
+    pub tcp_state: AtomicU8,
     pub tcp_seq: AtomicU32,
     pub tcp_ack: AtomicU32,
+    pub tcp_init_seq: AtomicU32,
     pub local_ip: RwLock<Option<Ipv4Addr>>,
     pub local_port: RwLock<u16>,
 }
@@ -75,11 +97,20 @@ impl Peer {
             allowed_ips: allowed_ips.iter().map(|ip| (ip, ())).collect(),
             preshared_key,
             transport_mode,
-            tcp_seq: AtomicU32::new(1000), // 起始序列号喵
+            tcp_state: AtomicU8::new(0), // Idle
+            tcp_seq: AtomicU32::new(0),
             tcp_ack: AtomicU32::new(0),
+            tcp_init_seq: AtomicU32::new(0),
             local_ip: RwLock::new(None),
             local_port: RwLock::new(0),
         }
+    }
+
+    pub fn reset_tcp(&self, init_seq: u32) {
+        self.tcp_init_seq.store(init_seq, Ordering::SeqCst);
+        self.tcp_seq.store(init_seq, Ordering::SeqCst);
+        self.tcp_ack.store(0, Ordering::SeqCst);
+        self.tcp_state.store(0, Ordering::SeqCst);
     }
 
     pub fn update_timers<'a>(&mut self, dst: &'a mut [u8]) -> TunnResult<'a> {
