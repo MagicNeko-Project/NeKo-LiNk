@@ -428,6 +428,7 @@ impl Device {
     }
 
     fn open_listen_socket(&mut self, mut port: u16) -> Result<(), Error> {
+        tracing::debug!("喵！正在打开监听端口: {} (模式: {:?})", port, self.config.transport_mode);
         // Binds the network facing interfaces
         // First close any existing open socket, and remove them from the event loop
         if let Some(s) = self.udp4.take() {
@@ -570,11 +571,14 @@ impl Device {
             // Execute the timed function of every peer in the list
             Box::new(|d, t| {
                 let peer_map = &d.peers;
+                tracing::debug!("喵！设备定时器触发，监测 {} 个 Peer", peer_map.len());
 
-                let (udp4, udp6) = match (d.udp4.as_ref(), d.udp6.as_ref()) {
-                    (Some(udp4), Some(udp6)) => (udp4, udp6),
-                    _ => return Action::Continue,
-                };
+                if d.udp4.is_none() && d.udp6.is_none() {
+                    return Action::Continue;
+                }
+                
+                let udp4 = d.udp4.as_ref();
+                let udp6 = d.udp6.as_ref();
 
                 // Go over each peer and invoke the timer function
                 for peer in peer_map.values() {
@@ -593,9 +597,15 @@ impl Device {
                         TunnResult::WriteToNetwork(packet) => {
                             if p.transport_mode == TransportMode::FakeTcp {
                                     if p.local_ip.read().is_none() || *p.local_ip.read() == Some(Ipv4Addr::UNSPECIFIED) {
-                                        if let Ok(local_addr) = udp4.local_addr() {
-                                            if let Some(addr_v4) = local_addr.as_socket_ipv4() {
-                                                *p.local_ip.write() = Some(*addr_v4.ip());
+                                        if let Ok(temp_sock) = std::net::UdpSocket::bind("0.0.0.0:0") {
+                                            if temp_sock.connect(endpoint_addr).is_ok() {
+                                                if let Ok(local_addr) = temp_sock.local_addr() {
+                                                    if let IpAddr::V4(v4) = local_addr.ip() {
+                                                        let detected = v4;
+                                                        tracing::debug!("喵！探测到本地 IP: {}", detected);
+                                                        *p.local_ip.write() = Some(detected);
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -612,6 +622,7 @@ impl Device {
                                                 // 主动发起握手喵
                                                 use rand::Rng;
                                                 let init_seq = rand::thread_rng().gen();
+                                                tracing::info!("喵！TCP 状态 [Idle -> SynSent]，正在发起握手，Seq={}", init_seq);
                                                 p.reset_tcp(init_seq);
                                                 p.tcp_state.store(1, Ordering::SeqCst); // SynSent
                                                 
@@ -620,8 +631,8 @@ impl Device {
                                                     init_seq, 0, TCP_FLAG_SYN, None, &mut t.tcp_buf
                                                 );
                                                 match endpoint_addr {
-                                                    SocketAddr::V4(_) => { udp4.send_to(&t.tcp_buf[..len], &endpoint_addr.into()).ok(); }
-                                                    SocketAddr::V6(_) => { udp6.send_to(&t.tcp_buf[..len], &endpoint_addr.into()).ok(); }
+                                                    SocketAddr::V4(_) => { if let Some(s) = udp4 { s.send_to(&t.tcp_buf[..len], &endpoint_addr.into()).ok(); } }
+                                                    SocketAddr::V6(_) => { if let Some(s) = udp6 { s.send_to(&t.tcp_buf[..len], &endpoint_addr.into()).ok(); } }
                                                 }
                                                 continue;
                                             }
@@ -638,22 +649,18 @@ impl Device {
                                             );
                                             match endpoint_addr {
                                                 SocketAddr::V4(_) => {
-                                                    udp4.send_to(&t.tcp_buf[..len], &endpoint_addr.into()).ok();
+                                                    if let Some(s) = udp4 { s.send_to(&t.tcp_buf[..len], &endpoint_addr.into()).ok(); }
                                                 }
                                                 SocketAddr::V6(_) => {
-                                                    udp6.send_to(&t.tcp_buf[..len], &endpoint_addr.into()).ok();
+                                                    if let Some(s) = udp6 { s.send_to(&t.tcp_buf[..len], &endpoint_addr.into()).ok(); }
                                                 }
                                             }
                                         }
                                     }
                             } else {
                                 match endpoint_addr {
-                                    SocketAddr::V4(_) => {
-                                        udp4.send_to(packet, &endpoint_addr.into()).ok()
-                                    }
-                                    SocketAddr::V6(_) => {
-                                        udp6.send_to(packet, &endpoint_addr.into()).ok()
-                                    }
+                                    SocketAddr::V4(_) => { if let Some(s) = udp4 { let _ = s.send_to(packet, &endpoint_addr.into()); } }
+                                    SocketAddr::V6(_) => { if let Some(s) = udp6 { let _ = s.send_to(packet, &endpoint_addr.into()); } }
                                 };
                             }
                         }
@@ -738,6 +745,7 @@ impl Device {
                                  let flags = tcp.flags;
                                  
                                  if (flags & TCP_FLAG_RST) != 0 {
+                                     tracing::warn!("喵呜... 收到来自 {:?} 的 TCP RST，连接重置喵！", addr.as_socket());
                                      p.tcp_state.store(0, Ordering::SeqCst); // Reset
                                      continue;
                                  }
@@ -745,6 +753,7 @@ impl Device {
                                  match current_state {
                                      TcpState::SynSent => {
                                          if (flags & TCP_FLAG_SYN) != 0 && (flags & TCP_FLAG_ACK) != 0 {
+                                             tracing::info!("喵！TCP 状态 [SynSent -> Established]，握手成功！来自 {:?}", addr);
                                              p.tcp_ack.store(tcp.seq.wrapping_add(1), Ordering::SeqCst);
                                              p.tcp_seq.store(tcp.ack, Ordering::SeqCst);
                                              p.tcp_state.store(3, Ordering::SeqCst); // Established
@@ -764,6 +773,7 @@ impl Device {
                                           if (flags & TCP_FLAG_SYN) != 0 {
                                               use rand::Rng;
                                               let init_seq = rand::thread_rng().gen();
+                                              tracing::info!("喵！TCP 状态 [Idle -> SynReceived]，收到 SYN， Seq={}, Ack={}, 来自 {:?}", tcp.seq, tcp.ack, addr);
                                               p.reset_tcp(init_seq);
                                               p.tcp_ack.store(tcp.seq.wrapping_add(1), Ordering::SeqCst);
                                               p.tcp_state.store(2, Ordering::SeqCst); // SynReceived
@@ -779,6 +789,7 @@ impl Device {
                                               udp.send_to(&t.tcp_buf[..len], &addr).ok();
                                           } else if current_state == TcpState::SynReceived && (flags & TCP_FLAG_ACK) != 0 {
                                               if tcp.ack == p.tcp_init_seq.load(Ordering::SeqCst).wrapping_add(1) {
+                                                  tracing::info!("喵！TCP 状态 [SynReceived -> Established]，被动握手成功！来自 {:?}", addr);
                                                   p.tcp_state.store(3, Ordering::SeqCst); // Established
                                                   p.tcp_seq.store(tcp.ack, Ordering::SeqCst);
                                               }
@@ -902,7 +913,20 @@ impl Device {
                         while let TunnResult::WriteToNetwork(packet) =
                             p.tunnel.decapsulate(None, &[], &mut t.dst_buf[..])
                         {
-                            let _: Result<_, _> = udp.send_to(packet, &addr);
+                            if d.config.transport_mode == TransportMode::FakeTcp {
+                                if let Some(local_ip) = *p.local_ip.read() {
+                                    let dst_ip = match addr.as_socket().unwrap().ip() { IpAddr::V4(v4) => v4, _ => continue };
+                                    let seq = p.tcp_seq.fetch_add(packet.len() as u32, Ordering::SeqCst);
+                                    let ack = p.tcp_ack.load(Ordering::SeqCst);
+                                    let len = fake_tcp::prepare_tcp_packet(
+                                        local_ip, dst_ip, *p.local_port.read(), addr.as_socket().unwrap().port(),
+                                        seq, ack, TCP_FLAG_PSH | TCP_FLAG_ACK, Some(packet), &mut t.tcp_buf
+                                    );
+                                    let _: Result<_, _> = udp.send_to(&t.tcp_buf[..len], &addr);
+                                }
+                            } else {
+                                let _: Result<_, _> = udp.send_to(packet, &addr);
+                            }
                         }
                     }
 
@@ -1030,7 +1054,26 @@ impl Device {
                         while let TunnResult::WriteToNetwork(packet) =
                             p.tunnel.decapsulate(None, &[], &mut t.dst_buf[..])
                         {
-                            let _: Result<_, _> = udp.send(packet);
+                            if d.config.transport_mode == TransportMode::FakeTcp {
+                                if let Some(local_ip) = *p.local_ip.read() {
+                                    let dst_ip = match peer_addr { IpAddr::V4(v4) => v4, _ => continue };
+                                    let seq = p.tcp_seq.fetch_add(packet.len() as u32, Ordering::SeqCst);
+                                    let ack = p.tcp_ack.load(Ordering::SeqCst);
+                                    let mut dst_port = match p.endpoint().addr {
+                                        Some(SocketAddr::V4(v4)) => v4.port(),
+                                        _ => 0,
+                                    };
+                                    if dst_port == 0 { dst_port = remote_port; }
+
+                                    let len = fake_tcp::prepare_tcp_packet(
+                                        local_ip, dst_ip, *p.local_port.read(), dst_port,
+                                        seq, ack, TCP_FLAG_PSH | TCP_FLAG_ACK, Some(packet), &mut t.tcp_buf
+                                    );
+                                    let _: Result<_, _> = udp.send(&t.tcp_buf[..len]);
+                                }
+                            } else {
+                                let _: Result<_, _> = udp.send(packet);
+                            }
                         }
                     }
 
@@ -1055,10 +1098,11 @@ impl Device {
                 // * Determine peer based on packet destination ip
                 // * Encapsulate the packet for the given peer
                 // * Send encapsulated packet to the peer's endpoint
+                tracing::debug!("喵！TUN 接口接收到原始报文");
                 let mtu = d.mtu.load(Ordering::Relaxed);
 
-                let udp4 = d.udp4.as_ref().expect("Not connected");
-                let udp6 = d.udp6.as_ref().expect("Not connected");
+                let udp4 = d.udp4.as_ref();
+                let udp6 = d.udp6.as_ref();
 
                 let peers = &d.peers_by_ip;
                 for _ in 0..MAX_ITR {
@@ -1098,10 +1142,70 @@ impl Device {
                             if let Some(conn) = endpoint.conn.as_mut() {
                                 // Prefer to send using the connected socket
                                 let _: Result<_, _> = conn.write(packet);
-                            } else if let Some(addr @ SocketAddr::V4(_)) = endpoint.addr {
-                                let _: Result<_, _> = udp4.send_to(packet, &addr.into());
-                            } else if let Some(addr @ SocketAddr::V6(_)) = endpoint.addr {
-                                let _: Result<_, _> = udp6.send_to(packet, &addr.into());
+                            } else if let Some(addr) = endpoint.addr {
+                                if d.config.transport_mode == TransportMode::FakeTcp {
+                                    if peer.local_ip.read().is_none() || *peer.local_ip.read() == Some(Ipv4Addr::UNSPECIFIED) {
+                                        if let Ok(temp_sock) = std::net::UdpSocket::bind("0.0.0.0:0") {
+                                            if temp_sock.connect(addr).is_ok() {
+                                                if let Ok(local_addr) = temp_sock.local_addr() {
+                                                    if let IpAddr::V4(v4) = local_addr.ip() {
+                                                        let detected = v4;
+                                                        tracing::debug!("喵！(Iface) 探测到本地 IP: {}", detected);
+                                                        *peer.local_ip.write() = Some(detected);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    if let Some(local_ip) = *peer.local_ip.read() {
+                                        if local_ip != Ipv4Addr::UNSPECIFIED {
+                                            let dst_ip = match addr.ip() {
+                                                IpAddr::V4(v4) => v4,
+                                                _ => {
+                                                    tracing::error!("Fake-TCP 目前仅支持 IPv4 喵！");
+                                                    continue;
+                                                }
+                                            };
+                                            
+                                            let current_state = TcpState::from(peer.tcp_state.load(Ordering::SeqCst));
+                                            
+                                            if current_state == TcpState::Idle {
+                                                // 主动发起握手喵
+                                                use rand::Rng;
+                                                let init_seq = rand::thread_rng().gen();
+                                                tracing::info!("喵！(Iface) TCP 状态 [Idle -> SynSent]，正在发起握手，Seq={}", init_seq);
+                                                peer.reset_tcp(init_seq);
+                                                peer.tcp_state.store(1, Ordering::SeqCst); // SynSent
+                                                
+                                                let len = fake_tcp::prepare_tcp_packet(
+                                                    local_ip, dst_ip, *peer.local_port.read(), addr.port(),
+                                                    init_seq, 0, TCP_FLAG_SYN, None, &mut t.tcp_buf
+                                                );
+                                                if let Some(s) = udp4 { s.send_to(&t.tcp_buf[..len], &addr.into()).ok(); }
+                                                continue;
+                                            }
+
+                                            if current_state != TcpState::Established {
+                                                // 握手进行中，先丢弃这个数据包喵 (WireGuard 稍后会重传)
+                                                continue; 
+                                            }
+
+                                            let seq = peer.tcp_seq.fetch_add(packet.len() as u32, Ordering::SeqCst);
+                                            let ack = peer.tcp_ack.load(Ordering::SeqCst);
+                                            let len = fake_tcp::prepare_tcp_packet(
+                                                local_ip, dst_ip, *peer.local_port.read(), addr.port(),
+                                                seq, ack, TCP_FLAG_PSH | TCP_FLAG_ACK, Some(packet), &mut t.tcp_buf
+                                            );
+                                            if let Some(s) = udp4 { s.send_to(&t.tcp_buf[..len], &addr.into()).ok(); }
+                                        }
+                                    }
+                                } else {
+                                    match addr {
+                                        SocketAddr::V4(_) => { if let Some(s) = udp4 { let _ = s.send_to(packet, &addr.into()); } }
+                                        SocketAddr::V6(_) => { if let Some(s) = udp6 { let _ = s.send_to(packet, &addr.into()); } }
+                                    }
+                                }
                             } else {
                                 tracing::error!("No endpoint");
                             }
