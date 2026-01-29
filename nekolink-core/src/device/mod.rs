@@ -339,10 +339,12 @@ impl Device {
         }
 
         let next_index = self.next_index();
-        let device_key_pair = self
-            .key_pair
-            .as_ref()
-            .expect("Private key must be set first");
+        let device_key_pair = if let Some(kp) = self.key_pair.as_ref() {
+            kp
+        } else {
+            tracing::error!("Private key must be set before adding peers.");
+            return;
+        };
 
         let tunn = Tunn::new(
             device_key_pair.0.clone(),

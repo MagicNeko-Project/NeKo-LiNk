@@ -251,8 +251,8 @@ async fn run_instance(state: NekoState) -> Result<()> {
     
     let mut child = cmd.spawn().context("启动 nekolink-cli 失败")?;
 
-    // 等待接口创建
-    time::sleep(Duration::from_secs(2)).await;
+    // 等待接口创建喵，500ms 通常足够了
+    time::sleep(Duration::from_millis(500)).await;
 
     // 3. 配置接口与私钥 (UAPI 方式)
     let mut uapi_cmd = format!("set=1\nprivate_key={}\n", state.priv_b64);
