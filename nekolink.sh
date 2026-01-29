@@ -96,7 +96,8 @@ function edit_config() {
         listen_port="null"
     elif [ "$mode" == "tcp" ]; then
         proto="null"
-        listen_port="null"
+        read -p "伪装 TCP 监听端口 (当前: $curr_lport, 直接回车保持不变): " listen_port
+        [ -z "$listen_port" ] && listen_port=$curr_lport
     else
         read -p "WireGuard 监听端口 (当前: $curr_lport, 直接回车保持不变): " listen_port
         [ -z "$listen_port" ] && listen_port=$curr_lport
@@ -218,9 +219,10 @@ function create_config() {
             ;;
         3)
             mode="tcp"
-            echo -e "${PINK}... 使用 Fake-TCP 模式喵 (请确保设置 nftables 规则 DROP 相应端口的 RST 包，示例：nft add rule inet filter output tcp sport <端口> tcp flags rst drop)${NC}"
+            echo -e "${PINK}... 使用 Fake-TCP 模式喵 (请确保设置 nftables 规则 DROP 相应端口 of RST 包)${NC}"
             proto="null"
-            listen_port="null"
+            read -p "请输入伪装 TCP 监听端口 ( 0 为自动协商, 默认 0 ): " listen_port
+            [ -z "$listen_port" ] && listen_port=0
             ;;
         *)
             mode="udp"

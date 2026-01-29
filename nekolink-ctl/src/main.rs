@@ -450,7 +450,7 @@ async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
             loop {
                 for state in states.iter() {
                     let established = get_established_peers(&state.config.interface).await;
-                    if state.config.mode != "tcp" || state.pub_key.as_bytes() == &[0u8; 32] {
+                    if (state.config.mode != "tcp" && state.config.mode != "ip") || state.pub_key.as_bytes() == &[0u8; 32] {
                         continue;
                     }
                     
@@ -476,7 +476,7 @@ async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                             let cipher = cipher.clone();
                             let pub_key_bytes = pub_key_bytes.clone();
                             let interface_inner = interface.clone();
-                            let is_stealth_mode = state.config.mode == "ip" || state.config.mode == "tcp";
+                            let is_raw_ip_mode = state.config.mode == "ip";
                             tokio::spawn(async move {
                                 println!("喵！正在发起 TCP 信令连接: {}...", addr);
                                 match time::timeout(Duration::from_secs(10), tokio::net::TcpStream::connect(addr)).await {
@@ -506,7 +506,7 @@ async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                                                                                 let peer_pub_key = BASE64.encode(&decrypted[..32]);
                                                                                 let peer_mtu = Some(u16::from_be_bytes([decrypted[32], decrypted[33]]));
                                                                                 let peer_tunnel_port = u16::from_be_bytes([decrypted[34], decrypted[35]]);
-                                                                                if peer_tunnel_port == 0 && !is_stealth_mode {
+                                                                                if peer_tunnel_port == 0 && !is_raw_ip_mode {
                                                                                     println!("喵呜... 收到来自 {} 的 ACK，但隧道端口为 0，忽略喵。", addr);
                                                                                     return;
                                                                                 }
@@ -559,7 +559,7 @@ async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                                 let nonce = Nonce::from_slice(nonce_part);
                                 
                                 for state in states.iter() {
-                                    if state.config.mode != "tcp" { continue; }
+                                    if state.config.mode != "tcp" && state.config.mode != "ip" { continue; }
                                     let cipher = derive_cipher(&state.config.psk);
                                     if let Ok(decrypted) = cipher.decrypt(nonce, encrypted_part) {
                                         if decrypted.len() >= 36 {
@@ -567,7 +567,7 @@ async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                                             let peer_mtu = Some(u16::from_be_bytes([decrypted[32], decrypted[33]]));
                                             let peer_tunnel_port = u16::from_be_bytes([decrypted[34], decrypted[35]]);
                                             
-                                            if peer_tunnel_port == 0 && state.config.mode == "udp" {
+                                            if peer_tunnel_port == 0 && state.config.mode != "ip" {
                                                 continue;
                                             }
                                             let mut endpoint = addr.ip().to_string();
