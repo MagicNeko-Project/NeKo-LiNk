@@ -460,8 +460,14 @@ impl Device {
         udp_sock4.set_nonblocking(true)?;
 
         if port == 0 {
-            // Random port was assigned
-            port = udp_sock4.local_addr()?.as_socket().unwrap().port();
+            if self.config.transport_mode == TransportMode::FakeTcp {
+                // RAW Socket 不会自动分配端口，我们需要手动随机一个喵
+                use rand::Rng;
+                port = rand::thread_rng().gen_range(10000..65000);
+            } else {
+                // Random port was assigned
+                port = udp_sock4.local_addr()?.as_socket().unwrap().port();
+            }
         }
 
         let udp_sock6 = socket2::Socket::new(Domain::IPV6, sock_type, Some(protocol))?;
@@ -656,9 +662,15 @@ impl Device {
             Box::new(move |d, t| {
                 // Handler that handles anonymous packets over UDP
                 let mut iter = MAX_ITR;
-                let (private_key, public_key) = d.key_pair.as_ref().expect("Key not set");
+                let (private_key, public_key) = match d.key_pair.as_ref() {
+                    Some(k) => k,
+                    None => return Action::Continue, // 还没设置密钥，先跳过喵
+                };
 
-                let rate_limiter = d.rate_limiter.as_ref().unwrap();
+                let rate_limiter = match d.rate_limiter.as_ref() {
+                    Some(r) => r,
+                    None => return Action::Continue,
+                };
 
                 // Safety: the `recv_from` implementation promises not to write uninitialised
                 // bytes to the buffer, so this casting is safe.
