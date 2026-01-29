@@ -581,7 +581,7 @@ impl Device {
                         TunnResult::Err(e) => tracing::error!(message = "Timer error", error = ?e),
                         TunnResult::WriteToNetwork(packet) => {
                             if p.transport_mode == TransportMode::FakeTcp {
-                                    if p.local_ip.read().is_none() || p.local_ip.read() == Some(Ipv4Addr::UNSPECIFIED) {
+                                    if p.local_ip.read().is_none() || *p.local_ip.read() == Some(Ipv4Addr::UNSPECIFIED) {
                                         if let Ok(local_addr) = udp4.local_addr() {
                                             if let Some(addr_v4) = local_addr.as_socket_ipv4() {
                                                 *p.local_ip.write() = Some(*addr_v4.ip());
