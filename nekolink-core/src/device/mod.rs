@@ -581,26 +581,35 @@ impl Device {
                         TunnResult::Err(e) => tracing::error!(message = "Timer error", error = ?e),
                         TunnResult::WriteToNetwork(packet) => {
                             if p.transport_mode == TransportMode::FakeTcp {
-                                if let Some(local_ip) = *p.local_ip.read() {
-                                    let dst_ip = match endpoint_addr.ip() {
-                                        IpAddr::V4(v4) => v4,
-                                        _ => continue,
-                                    };
-                                    let seq = p.tcp_seq.fetch_add(packet.len() as u32, Ordering::SeqCst);
-                                    let ack = p.tcp_ack.load(Ordering::SeqCst);
-                                    let len = fake_tcp::prepare_tcp_packet(
-                                        local_ip, dst_ip, *p.local_port.read(), endpoint_addr.port(),
-                                        seq, ack, TCP_FLAG_PSH | TCP_FLAG_ACK, packet, &mut t.tcp_buf
-                                    );
-                                    match endpoint_addr {
-                                        SocketAddr::V4(_) => {
-                                            udp4.send_to(&t.tcp_buf[..len], &endpoint_addr.into()).ok();
+                                    if p.local_ip.read().is_none() || p.local_ip.read() == Some(Ipv4Addr::UNSPECIFIED) {
+                                        if let Ok(local_addr) = udp4.local_addr() {
+                                            if let Some(addr_v4) = local_addr.as_socket_ipv4() {
+                                                *p.local_ip.write() = Some(*addr_v4.ip());
+                                            }
                                         }
-                                        SocketAddr::V6(_) => {
-                                            udp6.send_to(&t.tcp_buf[..len], &endpoint_addr.into()).ok();
+                                    }
+                                    if let Some(local_ip) = *p.local_ip.read() {
+                                        if local_ip != Ipv4Addr::UNSPECIFIED {
+                                            let dst_ip = match endpoint_addr.ip() {
+                                                IpAddr::V4(v4) => v4,
+                                                _ => continue,
+                                            };
+                                            let seq = p.tcp_seq.fetch_add(packet.len() as u32, Ordering::SeqCst);
+                                            let ack = p.tcp_ack.load(Ordering::SeqCst);
+                                            let len = fake_tcp::prepare_tcp_packet(
+                                                local_ip, dst_ip, *p.local_port.read(), endpoint_addr.port(),
+                                                seq, ack, TCP_FLAG_PSH | TCP_FLAG_ACK, packet, &mut t.tcp_buf
+                                            );
+                                            match endpoint_addr {
+                                                SocketAddr::V4(_) => {
+                                                    udp4.send_to(&t.tcp_buf[..len], &endpoint_addr.into()).ok();
+                                                }
+                                                SocketAddr::V6(_) => {
+                                                    udp6.send_to(&t.tcp_buf[..len], &endpoint_addr.into()).ok();
+                                                }
+                                            }
                                         }
-                                    };
-                                }
+                                    }
                             } else {
                                 match endpoint_addr {
                                     SocketAddr::V4(_) => {
