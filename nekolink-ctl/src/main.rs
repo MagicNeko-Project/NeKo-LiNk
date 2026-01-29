@@ -245,6 +245,7 @@ async fn run_instance(state: NekoState) -> Result<()> {
     // 3. 启动 nekolink-cli
     let mut cmd = tokio::process::Command::new("nekolink-cli");
     cmd.arg("-f").arg(&config.interface);
+    cmd.env("WG_LOG_LEVEL", "info");
     cmd.arg("--disable-drop-privileges");
     cmd.kill_on_drop(true); // 重点：ctl 退出时一定要带走 cli 喵！
     if config.mode == "ip" {
