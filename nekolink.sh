@@ -368,6 +368,7 @@ function check_and_fix_configs() {
 
     for cfg in "${configs[@]}"; do
         ifname=$(basename "$cfg" .json)
+        if [ "$ifname" == "global" ]; then continue; fi # 跳过全局配置喵
         echo -e "${CYAN}检查接口 [$ifname] 的配置...${NC}"
         
         # 定义字段及其默认值
@@ -426,17 +427,22 @@ function check_and_fix_configs() {
     done
 
     # 统一维护 global.json
-    echo -e "${CYAN}检查全局配置 global.json...${NC}"
+    echo -e "${CYAN}检查并清理全局配置 global.json...${NC}"
     global_json="$CONFIG_DIR/global.json"
     if [ ! -f "$global_json" ]; then
         echo -e "${PINK}  创建缺失的 global.json ...${NC}"
         echo '{"signal_port": 12580}' > "$global_json"
     else
-        if ! jq -e 'has("signal_port")' "$global_json" > /dev/null; then
-            echo -e "${PINK}  补全 global.json 中的 signal_port ...${NC}"
-            tmp_g=$(mktemp)
-            jq '. + {"signal_port": 12580}' "$global_json" > "$tmp_g"
+        # 补全缺失，并强制移除冗余字段喵
+        tmp_g=$(mktemp)
+        sig=$(jq -r '.signal_port // 12580' "$global_json")
+        echo "{\"signal_port\": $sig}" > "$tmp_g"
+        
+        if ! diff -q "$global_json" "$tmp_g" > /dev/null; then
+            echo -e "${PINK}  清理 global.json 中的冗余字段成功喵！${NC}"
             mv "$tmp_g" "$global_json"
+        else
+            rm "$tmp_g"
         fi
     fi
 
