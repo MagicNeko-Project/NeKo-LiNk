@@ -445,9 +445,13 @@ impl Device {
         }
 
         // Then open new sockets and bind to the port
-        let (sock_type, protocol) = match self.config.ip_protocol {
-            Some(p) => (Type::RAW, Protocol::from(i32::from(p))),
-            None => (Type::DGRAM, Protocol::UDP),
+        let (sock_type, protocol) = if self.config.transport_mode == TransportMode::FakeTcp {
+            (Type::RAW, Protocol::TCP)
+        } else {
+            match self.config.ip_protocol {
+                Some(p) => (Type::RAW, Protocol::from(i32::from(p))),
+                None => (Type::DGRAM, Protocol::UDP),
+            }
         };
 
         let udp_sock4 = socket2::Socket::new(Domain::IPV4, sock_type, Some(protocol))?;
@@ -663,8 +667,8 @@ impl Device {
                 while let Ok((packet_len, addr)) = udp.recv_from(src_buf) {
                     let mut offset = 0;
                     
-                    // NekoLink: 处理 IP 层头部 (Raw IP 模式) 喵
-                    if d.config.ip_protocol.is_some() && addr.as_socket().unwrap().is_ipv4() {
+                    // NekoLink: 处理 IP 层头部 (Raw IP 或 Fake-TCP 模式) 喵
+                    if (d.config.ip_protocol.is_some() || d.config.transport_mode == TransportMode::FakeTcp) && addr.as_socket().unwrap().is_ipv4() {
                         if packet_len < 20 { continue; }
                         let ihl = (t.src_buf[0] & 0x0f) as usize * 4;
                         if packet_len < ihl { continue; }
@@ -674,7 +678,7 @@ impl Device {
                     // NekoLink 2.3.0: 处理 TCP 层头部 (Fake-TCP 模式) 喵
                     if d.config.transport_mode == TransportMode::FakeTcp && addr.as_socket().unwrap().is_ipv4() {
                         if packet_len < offset + 20 { continue; }
-                        // 这里我们简单跳过 TCP 头，后续校验可以增强喵
+                        // 这里我们同步 TCP ACK 并跳过 TCP 头喵
                         offset += 20;
                     }
 
@@ -713,12 +717,35 @@ impl Device {
 
                     let mut p = peer.lock();
 
+                    // NekoLink 2.3.0: 在这里同步 TCP ACK 并提取对端端口喵
+                    let mut remote_port = addr.as_socket().unwrap().port();
+                    if d.config.transport_mode == TransportMode::FakeTcp && addr.as_socket().unwrap().is_ipv4() {
+                         if let Some(tcp) = TcpHeader::parse(&t.src_buf[offset-20..offset]) {
+                             let payload_len = (packet_len - offset) as u32;
+                             let increment = if payload_len == 0 { 1 } else { payload_len };
+                             p.tcp_ack.store(tcp.seq.wrapping_add(increment), Ordering::SeqCst);
+                             remote_port = tcp.src_port; // 从 TCP 头拿端口喵！
+                         }
+                    }
+
                     // We found a peer, use it to decapsulate the message+
                     let mut flush = false; // Are there packets to send from the queue?
-                    match p
-                        .tunnel
-                        .handle_verified_packet(parsed_packet, &mut t.dst_buf[..])
-                    {
+                    let res = p.tunnel.handle_verified_packet(parsed_packet, &mut t.dst_buf[..]);
+                    
+                    if !matches!(res, TunnResult::Err(_)) {
+                         // 验证通过，此时才更新端点并尝试连接喵
+                         let ip_addr = addr.as_socket().unwrap().ip();
+                         let final_addr = SocketAddr::new(ip_addr, if remote_port != 0 { remote_port } else { addr.as_socket().unwrap().port() });
+                         p.set_endpoint(final_addr);
+
+                         if d.config.use_connected_socket {
+                             let _ = p.connect_endpoint(d.listen_port, d.fwmark, d.config.ip_protocol).map(|sock| {
+                                 d.register_conn_handler(Arc::clone(peer), sock, ip_addr).unwrap();
+                             });
+                         }
+                    }
+
+                    match res {
                         TunnResult::Done => {}
                         TunnResult::Err(_) => continue,
                         TunnResult::WriteToNetwork(packet) => {
@@ -731,11 +758,11 @@ impl Device {
                                     };
                                     let seq = p.tcp_seq.fetch_add(packet.len() as u32, Ordering::SeqCst);
                                     let ack = p.tcp_ack.load(Ordering::SeqCst);
-                                    let len = fake_tcp::prepare_tcp_packet(
-                                        local_ip, dst_ip, *p.local_port.read(), addr.as_socket().unwrap().port(),
-                                        seq, ack, TCP_FLAG_PSH | TCP_FLAG_ACK, packet, &mut t.tcp_buf
-                                    );
-                                    let _: Result<_, _> = udp.send_to(&t.tcp_buf[..len], &addr);
+                                     let len = fake_tcp::prepare_tcp_packet(
+                                         local_ip, dst_ip, *p.local_port.read(), remote_port,
+                                         seq, ack, TCP_FLAG_PSH | TCP_FLAG_ACK, packet, &mut t.tcp_buf
+                                     );
+                                     let _: Result<_, _> = udp.send_to(&t.tcp_buf[..len], &SocketAddr::new(IpAddr::V4(dst_ip), remote_port).into());
                                 }
                             } else {
                                 let _: Result<_, _> = udp.send_to(packet, &addr);
@@ -759,19 +786,6 @@ impl Device {
                             p.tunnel.decapsulate(None, &[], &mut t.dst_buf[..])
                         {
                             let _: Result<_, _> = udp.send_to(packet, &addr);
-                        }
-                    }
-
-                    // This packet was OK, that means we want to create a connected socket for this peer
-                    let addr = addr.as_socket().unwrap();
-                    let ip_addr = addr.ip();
-                    p.set_endpoint(addr);
-                    if d.config.use_connected_socket {
-                        if let Ok(sock) =
-                            p.connect_endpoint(d.listen_port, d.fwmark, d.config.ip_protocol)
-                        {
-                            d.register_conn_handler(Arc::clone(peer), sock, ip_addr)
-                                .unwrap();
                         }
                     }
 
@@ -808,7 +822,7 @@ impl Device {
 
                 while let Ok(read_bytes) = udp.recv(src_buf) {
                     let mut offset = 0;
-                    if d.config.ip_protocol.is_some() && peer_addr.is_ipv4() {
+                    if (d.config.ip_protocol.is_some() || d.config.transport_mode == TransportMode::FakeTcp) && peer_addr.is_ipv4() {
                         if read_bytes < 20 { continue; }
                         let ihl = (t.src_buf[0] & 0x0f) as usize * 4;
                         if read_bytes < ihl { continue; }
@@ -816,6 +830,7 @@ impl Device {
                     }
 
                     let mut p = peer.lock();
+                    let mut remote_port = 0;
 
                     if d.config.transport_mode == TransportMode::FakeTcp && peer_addr.is_ipv4() {
                          if read_bytes < offset + 20 { continue; }
@@ -824,8 +839,21 @@ impl Device {
                              // TCP 步进：如果负载为 0，通常是 ACK/SYN/FIN 等，这里保守加 1 喵；如果有负载则加负载长度。
                              let increment = if payload_len == 0 { 1 } else { payload_len };
                              p.tcp_ack.store(tcp.seq.wrapping_add(increment), Ordering::SeqCst);
+                             remote_port = tcp.src_port;
                          }
                          offset += 20;
+                    }
+
+                    if remote_port != 0 {
+                        let current_addr = p.endpoint().addr;
+                        if let Some(SocketAddr::V4(v4)) = current_addr {
+                            if v4.port() == 0 {
+                                // 修正端口喵！
+                                drop(p);
+                                peer.lock().set_endpoint(SocketAddr::new(peer_addr, remote_port));
+                                p = peer.lock();
+                            }
+                        }
                     }
 
                     let mut flush = false;
@@ -852,15 +880,17 @@ impl Device {
                                     };
                                     let seq = p.tcp_seq.fetch_add(packet.len() as u32, Ordering::SeqCst);
                                     let ack = p.tcp_ack.load(Ordering::SeqCst);
-                                    let dst_port = match p.endpoint().addr {
-                                        Some(SocketAddr::V4(v4)) => v4.port(),
-                                        _ => 0,
-                                    };
-                                    let len = fake_tcp::prepare_tcp_packet(
-                                        local_ip, dst_ip, *p.local_port.read(), dst_port,
-                                        seq, ack, TCP_FLAG_PSH | TCP_FLAG_ACK, packet, &mut t.tcp_buf
-                                    );
-                                    let _: Result<_, _> = udp.send(&t.tcp_buf[..len]);
+                                     let mut dst_port = match p.endpoint().addr {
+                                         Some(SocketAddr::V4(v4)) => v4.port(),
+                                         _ => 0,
+                                     };
+                                     if dst_port == 0 { dst_port = remote_port; }
+
+                                     let len = fake_tcp::prepare_tcp_packet(
+                                         local_ip, dst_ip, *p.local_port.read(), dst_port,
+                                         seq, ack, TCP_FLAG_PSH | TCP_FLAG_ACK, packet, &mut t.tcp_buf
+                                     );
+                                     let _: Result<_, _> = udp.send(&t.tcp_buf[..len]);
                                 }
                             } else {
                                 let _: Result<_, _> = udp.send(packet);

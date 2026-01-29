@@ -85,7 +85,8 @@ function edit_config() {
     case "$m_choice" in
         1) mode="ip" ;;
         2) mode="udp" ;;
-        3) mode="tcp" ;;
+        3) mode="tcp" 
+           echo -e "${PINK}... 使用 Fake-TCP 模式喵 (请确保设置 iptables 规则 DROP 相应端口的 RST 包，否则会被内核断开喵！)${NC}" ;;
         *) mode="$curr_mode" ;;
     esac
 
@@ -217,6 +218,7 @@ function create_config() {
             ;;
         3)
             mode="tcp"
+            echo -e "${PINK}... 使用 Fake-TCP 模式喵 (请确保设置 iptables 规则 DROP 相应端口的 RST 包，否则会被内核断开喵！)${NC}"
             proto="null"
             listen_port="null"
             ;;
