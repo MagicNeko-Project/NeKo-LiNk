@@ -170,9 +170,10 @@ impl Peer {
         if let Ok(local_addr) = udp_conn.local_addr() {
             if let Some(addr_v4) = local_addr.as_socket_ipv4() {
                 *self.local_ip.write() = Some(*addr_v4.ip());
-                *self.local_port.write() = addr_v4.port();
+                // *self.local_port.write() = addr_v4.port(); // RAW 可能会返回 0 喵
             }
         }
+        *self.local_port.write() = port;
 
         endpoint.conn = Some(udp_conn.try_clone().unwrap());
 
