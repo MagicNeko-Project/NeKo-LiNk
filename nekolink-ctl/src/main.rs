@@ -476,7 +476,7 @@ async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                             let cipher = cipher.clone();
                             let pub_key_bytes = pub_key_bytes.clone();
                             let interface_inner = interface.clone();
-                            let is_ip_mode = state.config.mode == "ip";
+                            let is_stealth_mode = state.config.mode == "ip" || state.config.mode == "tcp";
                             tokio::spawn(async move {
                                 println!("喵！正在发起 TCP 信令连接: {}...", addr);
                                 match time::timeout(Duration::from_secs(10), tokio::net::TcpStream::connect(addr)).await {
@@ -506,7 +506,7 @@ async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                                                                                 let peer_pub_key = BASE64.encode(&decrypted[..32]);
                                                                                 let peer_mtu = Some(u16::from_be_bytes([decrypted[32], decrypted[33]]));
                                                                                 let peer_tunnel_port = u16::from_be_bytes([decrypted[34], decrypted[35]]);
-                                                                                if peer_tunnel_port == 0 && !is_ip_mode {
+                                                                                if peer_tunnel_port == 0 && !is_stealth_mode {
                                                                                     println!("喵呜... 收到来自 {} 的 ACK，但隧道端口为 0，忽略喵。", addr);
                                                                                     return;
                                                                                 }
@@ -567,7 +567,7 @@ async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                                             let peer_mtu = Some(u16::from_be_bytes([decrypted[32], decrypted[33]]));
                                             let peer_tunnel_port = u16::from_be_bytes([decrypted[34], decrypted[35]]);
                                             
-                                            if peer_tunnel_port == 0 && state.config.mode != "ip" {
+                                            if peer_tunnel_port == 0 && state.config.mode == "udp" {
                                                 continue;
                                             }
                                             let mut endpoint = addr.ip().to_string();
