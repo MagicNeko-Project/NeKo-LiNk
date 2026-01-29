@@ -811,7 +811,10 @@ impl Device {
                     if d.config.transport_mode == TransportMode::FakeTcp && peer_addr.is_ipv4() {
                          if read_bytes < offset + 20 { continue; }
                          if let Some(tcp) = TcpHeader::parse(&t.src_buf[offset..offset+20]) {
-                             p.tcp_ack.store(tcp.seq.wrapping_add(1), Ordering::SeqCst);
+                             let payload_len = (read_bytes - (offset + 20)) as u32;
+                             // TCP 步进：如果负载为 0，通常是 ACK/SYN/FIN 等，这里保守加 1 喵；如果有负载则加负载长度。
+                             let increment = if payload_len == 0 { 1 } else { payload_len };
+                             p.tcp_ack.store(tcp.seq.wrapping_add(increment), Ordering::SeqCst);
                          }
                          offset += 20;
                     }
