@@ -175,6 +175,9 @@ fn api_get(writer: &mut BufWriter<&UnixStream>, d: &Device) -> i32 {
         }
         TransportMode::FakeTcp => {
             writeln!(writer, "protocol=tcp").ok();
+            if d.listen_port != 0 {
+                writeln!(writer, "listen_port={}", d.listen_port).ok();
+            }
         }
     }
 
