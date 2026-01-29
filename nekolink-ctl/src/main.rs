@@ -849,10 +849,41 @@ async fn show_status() -> Result<()> {
         
         match get_uapi_info(&config.interface).await {
             Ok(info) => {
-                println!("UAPI 状态:\n{}", info);
+                println!("UAPI 运行状态：");
+                for line in info.lines() {
+                    let line = line.trim();
+                    if line.is_empty() { continue; }
+                    let parts: Vec<&str> = line.splitn(2, '=').collect();
+                    if parts.len() == 2 {
+                        let (k, v) = (parts[0], parts[1]);
+                        match k {
+                            "protocol" => println!("  传输协议: {}", v),
+                            "ip_protocol" => println!("  IP 协议号: {}", v),
+                            "listen_port" => println!("  监听端口: {}", v),
+                            "own_public_key" => println!("  本地公钥: {}", v),
+                            "public_key" => println!("  对端公钥: {}", v),
+                            "endpoint" => println!("  对端端点: {}", v),
+                            "rx_bytes" => println!("  接收流量: {} Bytes", v),
+                            "tx_bytes" => println!("  发送流量: {} Bytes", v),
+                            "last_handshake_time_sec" => {
+                                if let Ok(sec) = v.parse::<u64>() {
+                                    if sec > 0 {
+                                        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                                        println!("  最近握手: {} 秒前", now.saturating_sub(sec));
+                                    } else {
+                                        println!("  最近握手: 尚未完成握手喵");
+                                    }
+                                }
+                            }
+                            "persistent_keepalive_interval" => println!("  保活间隔: {} 秒", v),
+                            "allowed_ip" => println!("  允许路由: {}", v),
+                            _ => println!("  {}: {}", k, v),
+                        }
+                    }
+                }
             },
             Err(e) => {
-                println!("UAPI 状态: 离线喵 (错误: {:?})", e);
+                println!("UAPI 状态: 离线喵 (可能服务未启动) 错误: {:?}", e);
             }
         }
         

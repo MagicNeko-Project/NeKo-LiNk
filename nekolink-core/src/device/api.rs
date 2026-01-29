@@ -3,7 +3,7 @@
 
 use super::dev_lock::LockReadGuard;
 use super::drop_privileges::get_saved_ids;
-use super::{AllowedIP, Device, Error, SocketAddr};
+use super::{AllowedIP, Device, Error, SocketAddr, TransportMode};
 use crate::device::Action;
 use crate::serialization::KeyBytes;
 use crate::x25519;
@@ -160,10 +160,22 @@ fn api_get(writer: &mut BufWriter<&UnixStream>, d: &Device) -> i32 {
         writeln!(writer, "own_public_key={}", encode_hex(k.1.as_bytes()));
     }
 
-    if d.config.ip_protocol.is_some() {
-        writeln!(writer, "protocol={}", d.listen_port).ok();
-    } else if d.listen_port != 0 {
-        writeln!(writer, "listen_port={}", d.listen_port).ok();
+    match d.config.transport_mode {
+        TransportMode::Udp => {
+            writeln!(writer, "protocol=udp").ok();
+            if d.listen_port != 0 {
+                writeln!(writer, "listen_port={}", d.listen_port).ok();
+            }
+        }
+        TransportMode::RawIp => {
+            writeln!(writer, "protocol=ip").ok();
+            if let Some(p) = d.config.ip_protocol {
+                writeln!(writer, "ip_protocol={}", p).ok();
+            }
+        }
+        TransportMode::FakeTcp => {
+            writeln!(writer, "protocol=tcp").ok();
+        }
     }
 
     if let Some(fwmark) = d.fwmark {
