@@ -10,26 +10,6 @@ use crate::device::{AllowedIps, Error, TransportMode};
 use crate::noise::{Tunn, TunnResult};
 use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TcpState {
-    Idle,
-    SynSent,
-    SynReceived,
-    Established,
-    Closed,
-}
-
-impl From<u8> for TcpState {
-    fn from(v: u8) -> Self {
-        match v {
-            1 => TcpState::SynSent,
-            2 => TcpState::SynReceived,
-            3 => TcpState::Established,
-            4 => TcpState::Closed,
-            _ => TcpState::Idle,
-        }
-    }
-}
 
 #[derive(Default, Debug)]
 pub struct Endpoint {
@@ -46,12 +26,6 @@ pub struct Peer {
     allowed_ips: AllowedIps<()>,
     preshared_key: Option<[u8; 32]>,
     pub transport_mode: TransportMode,
-    pub tcp_state: AtomicU8,
-    pub tcp_seq: AtomicU32,
-    pub tcp_ack: AtomicU32,
-    pub tcp_init_seq: AtomicU32,
-    pub local_ip: RwLock<Option<Ipv4Addr>>,
-    pub local_port: RwLock<u16>,
 }
 
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, Debug)]
@@ -97,21 +71,10 @@ impl Peer {
             allowed_ips: allowed_ips.iter().map(|ip| (ip, ())).collect(),
             preshared_key,
             transport_mode,
-            tcp_state: AtomicU8::new(0), // Idle
-            tcp_seq: AtomicU32::new(0),
-            tcp_ack: AtomicU32::new(0),
-            tcp_init_seq: AtomicU32::new(0),
-            local_ip: RwLock::new(None),
-            local_port: RwLock::new(0),
         }
     }
 
-    pub fn reset_tcp(&self, init_seq: u32) {
-        self.tcp_init_seq.store(init_seq, Ordering::SeqCst);
-        self.tcp_seq.store(init_seq, Ordering::SeqCst);
-        self.tcp_ack.store(0, Ordering::SeqCst);
-        self.tcp_state.store(0, Ordering::SeqCst);
-    }
+
 
     pub fn update_timers<'a>(&mut self, dst: &'a mut [u8]) -> TunnResult<'a> {
         self.tunnel.update_timers(dst)
@@ -162,8 +125,7 @@ impl Peer {
 
         let (sock_type, protocol) = match self.transport_mode {
             TransportMode::RawIp => (Type::RAW, Protocol::from(i32::from(ip_protocol.unwrap_or(141)))),
-            TransportMode::FakeTcp => (Type::RAW, Protocol::TCP),
-            TransportMode::Udp => (Type::DGRAM, Protocol::UDP),
+            _ => (Type::DGRAM, Protocol::UDP),
         };
 
         let udp_conn = socket2::Socket::new(Domain::for_address(addr), sock_type, Some(protocol))?;
@@ -197,14 +159,6 @@ impl Peer {
             port=port,
             endpoint=?endpoint.addr.unwrap()
         );
-
-        if let Ok(local_addr) = udp_conn.local_addr() {
-            if let Some(addr_v4) = local_addr.as_socket_ipv4() {
-                *self.local_ip.write() = Some(*addr_v4.ip());
-                // *self.local_port.write() = addr_v4.port(); // RAW 可能会返回 0 喵
-            }
-        }
-        *self.local_port.write() = port;
 
         endpoint.conn = Some(udp_conn.try_clone().unwrap());
 

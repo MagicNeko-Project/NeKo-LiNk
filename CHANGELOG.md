@@ -3,7 +3,13 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## v2.4.3 (2026-01-28)
+## v2.4.5 (2026-01-30)
+- 喵呜！实现了 **Fake-TCP 插件化重构**，引入 Phantun 作为侧车插件：
+    - **核心解耦**: 将复杂的 TCP 模拟协议栈从 `nekolink-core` 中完全剥离，核心层回归原生 UDP/IP 性能。
+    - **自动侧车管理**: `nekolink-ctl` 现在能自动调度 `phantun-client` 进程，为 TCP 模式的队友自动建立中转站。
+    - **现代化适配**: 深度修复了 Phantun 源码与最新版 `nix`, `tokio`, `bytes` 库的兼容性问题。
+    - **全量构建**: 支持工作区全量一键编译，插件与主程序完美合流喵！
+
 - 喵呜！重构了全局信令架构，锁定端口为 **12580** (一按我帮您) ฅ^•ﻌ•^ฅ：
     - **单端口多隧道共享**: 现在一个 12580 端口就能识别并分发所有隧道的握手包，不再需要每个隧道占用不同端口。
     - **数据端口自动协商**: 12580 仅作为控制平面，实际的数据隧道端口会自动通过信令交换并协商，支持监听端口设置为 `0`（自动分配）。

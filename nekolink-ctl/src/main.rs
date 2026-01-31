@@ -32,6 +32,7 @@ impl Default for GlobalConfig {
 
 static PEER_CACHE: OnceLock<Mutex<HashMap<(String, String), String>>> = OnceLock::new();
 static CONFIG_MUTEX: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+static SIDE_CARS: OnceLock<tokio::sync::Mutex<HashMap<(String, String), tokio::process::Child>>> = OnceLock::new();
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct NekoConfig {
@@ -252,8 +253,6 @@ async fn run_instance(state: NekoState) -> Result<()> {
         if let Some(proto) = config.ip_protocol {
             cmd.arg("--ip-protocol").arg(proto.to_string());
         }
-    } else if config.mode == "tcp" {
-        cmd.arg("--fake-tcp");
     }
     
     // 强制设置 MTU，默认 1420 喵
@@ -407,7 +406,7 @@ async fn run_global_udp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                                 }
 
                                 println!("喵！12580 (UDP) 握手处理成功：{} -> {}", endpoint, state.config.interface);
-                                let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0)).await;
+                                let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0), &state.config.mode).await;
                                 
                                 // 回发响应喵
                                 let msg_base = state.pub_key.as_bytes().to_vec();
@@ -517,7 +516,7 @@ async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                                                                                     endpoint = format!("{}:{}", endpoint, peer_tunnel_port);
                                                                                 }
                                                                                 println!("喵！成功接收 TCP 信令响应 (ACK)：来自 {} (隧道端口: {})", endpoint, peer_tunnel_port);
-                                                                                let _ = configure_peer(&interface_inner, &peer_pub_key, endpoint, None, peer_mtu, true).await;
+                                                                                let _ = configure_peer(&interface_inner, &peer_pub_key, endpoint, None, peer_mtu, true, "tcp").await;
                                                                             }
                                                                         } else {
                                                                             println!("喵呜... 无法解密来自 {} 的 TCP ACK，PSK 匹配吗喵？", addr);
@@ -577,7 +576,7 @@ async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                                             }
 
                                             println!("喵！12580 (TCP) 识别成功：{} -> {}", endpoint, state.config.interface);
-                                            let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0)).await;
+                                            let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0), &state.config.mode).await;
                                             
                                             // TCP 握手响应喵！直接在当前流回发
                                             let msg_base = state.pub_key.as_bytes().to_vec();
@@ -693,7 +692,7 @@ async fn run_global_raw_signaling(states: Arc<Vec<NekoState>>, proto: u8) -> Res
                                          let ip_addr = addr.as_socket().map(|s| s.ip()).unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
                                          let peer_mtu = if decrypted.len() >= 34 { Some(u16::from_be_bytes([decrypted[32], decrypted[33]])) } else { None };
                                          println!("喵！12580 (Raw IP) 识别成功：{} -> {}", ip_addr, state.config.interface);
-                                         let _ = configure_peer(&state.config.interface, &BASE64.encode(&decrypted[..32]), ip_addr.to_string(), state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0)).await;
+                                         let _ = configure_peer(&state.config.interface, &BASE64.encode(&decrypted[..32]), ip_addr.to_string(), state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0), "ip").await;
 
                                          // Raw IP 响应喵！
                                          let msg_base = state.pub_key.as_bytes().to_vec();
@@ -742,7 +741,61 @@ fn derive_cipher(psk: &str) -> ChaCha20Poly1305 {
     ChaCha20Poly1305::new(&psk_bytes.into())
 }
 
-async fn configure_peer(interface: &str, peer_pub_key: &str, endpoint: String, keepalive: Option<u16>, peer_mtu: Option<u16>, auto_sync_mtu: bool) -> Result<()> {
+async fn configure_peer(interface: &str, peer_pub_key: &str, mut endpoint: String, keepalive: Option<u16>, peer_mtu: Option<u16>, auto_sync_mtu: bool, mode: &str) -> Result<()> {
+    // 处理 TCP 模式下的侧车逻辑喵
+    if mode == "tcp" {
+        let sidecar_key = (interface.to_string(), peer_pub_key.to_string());
+        let mut sidecars = SIDE_CARS.get_or_init(|| tokio::sync::Mutex::new(HashMap::new())).lock().await;
+
+        // 如果已经有侧车且 Endpoint 没变，直接复用喵
+        let mut need_new_sidecar = true;
+        let mut local_port = 0;
+
+        if let Some(_) = sidecars.get(&sidecar_key) {
+             // 检查缓存的 Endpoint 喵
+             let cache_mutex = PEER_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+             let cache = cache_mutex.lock().unwrap();
+             if let Some(old_ep) = cache.get(&sidecar_key) {
+                 if old_ep.starts_with("127.0.0.1:") {
+                      // 已经是一个本地中转了喵
+                      need_new_sidecar = false;
+                      local_port = old_ep[10..].parse().unwrap_or(0);
+                 }
+             }
+        }
+
+        if need_new_sidecar {
+            // 先清理旧侧车喵
+            if let Some(mut old_child) = sidecars.remove(&sidecar_key) {
+                let _ = old_child.kill().await;
+            }
+
+            // 寻找一个闲置的本地 UDP 端口（简单起见，从 40000 开始随机抽一个喵）
+            local_port = (OsRng.next_u32() % 10000 + 40000) as u16;
+            let local_udp = format!("127.0.0.1:{}", local_port);
+            
+            println!("喵！正在为队友 {} 启动 Phantun 侧车：{} <-> {} (TCP)", peer_pub_key, local_udp, endpoint);
+            
+            // 启动 phantun-client 喵！
+            // 备注：为了方便，先尝试当前目录，再尝试常规路径喵
+            let mut child = tokio::process::Command::new("phantun-client")
+                .arg("--local").arg(&local_udp)
+                .arg("--remote").arg(&endpoint)
+                .spawn()
+                .or_else(|_| {
+                    tokio::process::Command::new("./target/release/phantun-client")
+                    .arg("--local").arg(&local_udp)
+                    .arg("--remote").arg(&endpoint)
+                    .spawn()
+                })?;
+            
+            sidecars.insert(sidecar_key, child);
+            endpoint = local_udp;
+        } else {
+            endpoint = format!("127.0.0.1:{}", local_port);
+        }
+    }
+
     let locker = CONFIG_MUTEX.get_or_init(|| tokio::sync::Mutex::new(()));
     let _guard = locker.lock().await;
 

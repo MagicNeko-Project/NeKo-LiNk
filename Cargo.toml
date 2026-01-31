@@ -1,5 +1,6 @@
 [workspace]
-members = ["nekolink-core", "nekolink-cli", "nekolink-ctl"]
+resolver = "3"
+members = ["nekolink-core", "nekolink-cli", "nekolink-ctl", "nekolink-tcp/fake-tcp", "nekolink-tcp/phantun"]
 
 [profile.release]
 lto = true        # Enable full link-time optimization.
@@ -8,3 +9,7 @@ codegen-units = 1 # Use only 1 codegen-unit to enable full optimizations.
 [profile.bench]
 lto = true        # Enable full link-time optimization.
 codegen-units = 1 # Use only 1 codegen-unit to enable full optimizations.
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+log = "0"

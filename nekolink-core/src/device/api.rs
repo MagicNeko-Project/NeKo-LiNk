@@ -173,12 +173,6 @@ fn api_get(writer: &mut BufWriter<&UnixStream>, d: &Device) -> i32 {
                 writeln!(writer, "ip_protocol={}", p).ok();
             }
         }
-        TransportMode::FakeTcp => {
-            writeln!(writer, "protocol=tcp").ok();
-            if d.listen_port != 0 {
-                writeln!(writer, "listen_port={}", d.listen_port).ok();
-            }
-        }
     }
 
     if let Some(fwmark) = d.fwmark {
