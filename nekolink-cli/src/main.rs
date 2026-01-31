@@ -87,9 +87,6 @@ fn main() {
                 .takes_value(true)
                 .env("WG_IP_PROTOCOL")
                 .help("Use a custom IP protocol instead of UDP"),
-            Arg::new("fake-tcp")
-                .long("fake-tcp")
-                .help("Enable Fake-TCP transport mode"),
         ])
         .get_matches();
 
@@ -160,9 +157,7 @@ fn main() {
         #[cfg(target_os = "linux")]
         use_multi_queue: !matches.is_present("disable-multi-queue"),
         ip_protocol: matches.value_of("ip-protocol").map(|v| v.parse().expect("Invalid IP protocol")),
-        transport_mode: if matches.is_present("fake-tcp") {
-            TransportMode::FakeTcp
-        } else if matches.is_present("ip-protocol") {
+        transport_mode: if matches.is_present("ip-protocol") {
             TransportMode::RawIp
         } else {
             TransportMode::Udp
