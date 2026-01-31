@@ -50,6 +50,13 @@ struct NekoConfig {
     pub mtu: Option<u16>,
     #[serde(default)]
     pub clamp_mss: bool,
+    /// TCP 模式下，Phantun 的远端数据端口（默认 4567）喵
+    #[serde(default = "default_tcp_data_port")]
+    pub tcp_data_port: u16,
+}
+
+fn default_tcp_data_port() -> u16 {
+    4567
 }
 
 fn default_mode() -> String {
@@ -406,7 +413,7 @@ async fn run_global_udp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                                 }
 
                                 println!("喵！12580 (UDP) 握手处理成功：{} -> {}", endpoint, state.config.interface);
-                                let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0), &state.config.mode).await;
+                                let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0), &state.config.mode, state.config.tcp_data_port).await;
                                 
                                 // 回发响应喵
                                 let msg_base = state.pub_key.as_bytes().to_vec();
@@ -516,7 +523,7 @@ async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                                                                                     endpoint = format!("{}:{}", endpoint, peer_tunnel_port);
                                                                                 }
                                                                                 println!("喵！成功接收 TCP 信令响应 (ACK)：来自 {} (隧道端口: {})", endpoint, peer_tunnel_port);
-                                                                                let _ = configure_peer(&interface_inner, &peer_pub_key, endpoint, None, peer_mtu, true, "tcp").await;
+                                                                                let _ = configure_peer(&interface_inner, &peer_pub_key, endpoint, None, peer_mtu, true, "tcp", 4567).await;
                                                                             }
                                                                         } else {
                                                                             println!("喵呜... 无法解密来自 {} 的 TCP ACK，PSK 匹配吗喵？", addr);
@@ -576,7 +583,7 @@ async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                                             }
 
                                             println!("喵！12580 (TCP) 识别成功：{} -> {}", endpoint, state.config.interface);
-                                            let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0), &state.config.mode).await;
+                                            let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0), &state.config.mode, state.config.tcp_data_port).await;
                                             
                                             // TCP 握手响应喵！直接在当前流回发
                                             let msg_base = state.pub_key.as_bytes().to_vec();
@@ -692,7 +699,7 @@ async fn run_global_raw_signaling(states: Arc<Vec<NekoState>>, proto: u8) -> Res
                                          let ip_addr = addr.as_socket().map(|s| s.ip()).unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
                                          let peer_mtu = if decrypted.len() >= 34 { Some(u16::from_be_bytes([decrypted[32], decrypted[33]])) } else { None };
                                          println!("喵！12580 (Raw IP) 识别成功：{} -> {}", ip_addr, state.config.interface);
-                                         let _ = configure_peer(&state.config.interface, &BASE64.encode(&decrypted[..32]), ip_addr.to_string(), state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0), "ip").await;
+                                         let _ = configure_peer(&state.config.interface, &BASE64.encode(&decrypted[..32]), ip_addr.to_string(), state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0), "ip", 0).await;
 
                                          // Raw IP 响应喵！
                                          let msg_base = state.pub_key.as_bytes().to_vec();
@@ -741,7 +748,71 @@ fn derive_cipher(psk: &str) -> ChaCha20Poly1305 {
     ChaCha20Poly1305::new(&psk_bytes.into())
 }
 
-async fn configure_peer(interface: &str, peer_pub_key: &str, mut endpoint: String, keepalive: Option<u16>, peer_mtu: Option<u16>, auto_sync_mtu: bool, mode: &str) -> Result<()> {
+/// 配置 nftables 规则以支持 Phantun 喵
+/// 确保 TUN 接口的流量能正确进行 NAT 转发
+async fn setup_nftables_for_phantun() -> Result<()> {
+    // 检查是否已经配置过（避免重复添加规则）
+    let check = std::process::Command::new("nft")
+        .args(["list", "table", "inet", "phantun"])
+        .output();
+    
+    if check.is_ok() && check.unwrap().status.success() {
+        // 规则已存在，跳过喵
+        return Ok(());
+    }
+
+    println!("喵！正在配置 nftables 规则以支持 Phantun...");
+    
+    // 创建 Phantun 专用表和链
+    let nft_rules = r#"
+table inet phantun {
+    chain postrouting {
+        type nat hook postrouting priority srcnat; policy accept;
+        # Phantun TUN 接口出站流量 MASQUERADE
+        oifname != "lo" ip saddr 192.168.200.0/24 masquerade
+        oifname != "lo" ip6 saddr fcc8::/64 masquerade
+    }
+    chain forward {
+        type filter hook forward priority filter; policy accept;
+        # 允许 Phantun TUN 接口的转发
+        iifname "tun*" accept
+        oifname "tun*" accept
+    }
+}
+"#;
+
+    // 写入临时文件并应用
+    let tmp_path = "/tmp/phantun_nft.conf";
+    if let Err(e) = std::fs::write(tmp_path, nft_rules) {
+        eprintln!("喵呜... 无法写入 nftables 配置: {:?}", e);
+        return Err(anyhow::anyhow!("无法写入 nftables 配置"));
+    }
+
+    let result = std::process::Command::new("nft")
+        .args(["-f", tmp_path])
+        .output();
+
+    match result {
+        Ok(output) if output.status.success() => {
+            println!("喵！nftables 规则配置成功！");
+            let _ = std::fs::remove_file(tmp_path);
+            Ok(())
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            eprintln!("喵呜... nftables 配置失败: {}", stderr);
+            let _ = std::fs::remove_file(tmp_path);
+            Err(anyhow::anyhow!("nftables 配置失败"))
+        }
+        Err(e) => {
+            eprintln!("喵呜... 无法执行 nft 命令: {:?}", e);
+            let _ = std::fs::remove_file(tmp_path);
+            Err(anyhow::anyhow!("无法执行 nft 命令"))
+        }
+    }
+}
+
+async fn configure_peer(interface: &str, peer_pub_key: &str, mut endpoint: String, keepalive: Option<u16>, peer_mtu: Option<u16>, auto_sync_mtu: bool, mode: &str, tcp_data_port: u16) -> Result<()> {
     // 处理 TCP 模式下的侧车逻辑喵
     if mode == "tcp" {
         let sidecar_key = (interface.to_string(), peer_pub_key.to_string());
@@ -770,22 +841,30 @@ async fn configure_peer(interface: &str, peer_pub_key: &str, mut endpoint: Strin
                 let _ = old_child.kill().await;
             }
 
+            // 解析远端 IP（endpoint 格式可能是 IP:PORT 或纯 IP）
+            let remote_ip = endpoint.split(':').next().unwrap_or(&endpoint);
+            // 使用配置的 tcp_data_port 作为 Phantun 数据端口喵
+            let remote_phantun = format!("{}:{}", remote_ip, tcp_data_port);
+
             // 寻找一个闲置的本地 UDP 端口（简单起见，从 40000 开始随机抽一个喵）
             local_port = (OsRng.next_u32() % 10000 + 40000) as u16;
             let local_udp = format!("127.0.0.1:{}", local_port);
             
-            println!("喵！正在为队友 {} 启动 Phantun 侧车：{} <-> {} (TCP)", peer_pub_key, local_udp, endpoint);
+            println!("喵！正在为队友 {} 启动 Phantun 侧车：{} <-> {} (TCP 数据端口: {})", peer_pub_key, local_udp, remote_phantun, tcp_data_port);
+            
+            // 配置 nftables 规则喵（确保 Phantun TUN 接口的流量能正确转发）
+            let _ = setup_nftables_for_phantun().await;
             
             // 启动 phantun-client 喵！
-            // 备注：为了方便，先尝试当前目录，再尝试常规路径喵
-            let mut child = tokio::process::Command::new("phantun-client")
+            // 备注：为了方便，先尝试系统路径，再尝试本地路径喵
+            let child = tokio::process::Command::new("phantun-client")
                 .arg("--local").arg(&local_udp)
-                .arg("--remote").arg(&endpoint)
+                .arg("--remote").arg(&remote_phantun)
                 .spawn()
                 .or_else(|_| {
                     tokio::process::Command::new("./target/release/phantun-client")
                     .arg("--local").arg(&local_udp)
-                    .arg("--remote").arg(&endpoint)
+                    .arg("--remote").arg(&remote_phantun)
                     .spawn()
                 })?;
             

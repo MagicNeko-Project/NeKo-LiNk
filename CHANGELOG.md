@@ -3,6 +3,13 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v2.4.6 (2026-01-31)
+- 喵呜！**Phantun 联动完善修复**，解决了 v2.4.5 发现的集成问题：
+    - **二进制部署**: `phantun-client` 和 `phantun-server` 现已纳入 deb 安装包，并自动设置 `CAP_NET_ADMIN` 能力。
+    - **nftables 自动配置**: 启动 TCP 侧车时会自动配置所需的 NAT/MASQUERADE 规则，无需手动干预喵。
+    - **端口分离**: 新增 `tcp_data_port` 配置项（默认 4567），区分信令端口（12580）和 Phantun 数据端口。
+    - **全局信令端口遵守**: TCP/UDP 模式均遵守 `/etc/neko-link/global.json` 中的 `signal_port` 配置。
+
 ## v2.4.5 (2026-01-30)
 - 喵呜！实现了 **Fake-TCP 插件化重构**，引入 Phantun 作为侧车插件：
     - **核心解耦**: 将复杂的 TCP 模拟协议栈从 `nekolink-core` 中完全剥离，核心层回归原生 UDP/IP 性能。

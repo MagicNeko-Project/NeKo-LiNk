@@ -35,6 +35,8 @@ cat > "$BUILD_DIR/DEBIAN/postinst" <<EOF
 set -e
 setcap cap_net_admin,cap_net_raw+epi /usr/local/bin/nekolink-cli
 setcap cap_net_admin,cap_net_raw+epi /usr/local/bin/nekolink-ctl
+setcap cap_net_admin,cap_net_raw+epi /usr/local/bin/phantun-client
+setcap cap_net_admin,cap_net_raw+epi /usr/local/bin/phantun-server
 systemctl daemon-reload
 echo "NekoLink 安装完成喵！配置文件请放在 /etc/neko-link/ 喵。"
 exit 0
@@ -44,12 +46,19 @@ chmod 755 "$BUILD_DIR/DEBIAN/postinst"
 # 4. 拷贝文件
 # 假设已经编译好了
 if [ ! -f "target/release/nekolink-cli" ] || [ ! -f "target/release/nekolink-ctl" ]; then
-    echo "喵？找不到二进制文件，请先运行 cargo build --release 喵！"
+    echo "喵？找不到主二进制文件，请先运行 cargo build --release 喵！"
+    exit 1
+fi
+
+if [ ! -f "target/release/phantun-client" ] || [ ! -f "target/release/phantun-server" ]; then
+    echo "喵？找不到 Phantun 二进制文件，请先运行 cargo build --release 喵！"
     exit 1
 fi
 
 cp target/release/nekolink-cli "$BUILD_DIR/usr/local/bin/"
 cp target/release/nekolink-ctl "$BUILD_DIR/usr/local/bin/"
+cp target/release/phantun-client "$BUILD_DIR/usr/local/bin/"
+cp target/release/phantun-server "$BUILD_DIR/usr/local/bin/"
 cp nekolink.sh "$BUILD_DIR/usr/local/bin/nekolink"
 chmod +x "$BUILD_DIR/usr/local/bin/nekolink"
 cp nekolink.service "$BUILD_DIR/etc/systemd/system/"
