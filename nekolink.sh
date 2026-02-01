@@ -235,10 +235,10 @@ function create_config() {
         3)
             mode="tcp"
             echo -e "${PINK}... 使用 Fake-TCP 模式喵！${NC}"
-            echo -e "${CYAN}Phantun 数据端口将通过信令自动协商，无需手动设置喵。${NC}"
-            echo -e "${CYAN}WireGuard 在 Phantun 隧道内运行，完全自动化喵！${NC}"
+            echo -e "${CYAN}UDP 流量将通过 udp2raw 伪装为 TCP 流量喵！${NC}"
             proto="null"
-            tcp_data_port=0  # 0 表示自动协商
+            read -p "请输入 Fake-TCP 数据端口 ( 默认 4567 ): " tcp_data_port
+            [ -z "$tcp_data_port" ] && tcp_data_port=4567
             read -p "请输入 WireGuard 监听端口 ( 0 为自动, 默认 0 ): " listen_port
             [ -z "$listen_port" ] && listen_port=0
             ;;
