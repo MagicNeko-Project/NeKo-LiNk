@@ -60,10 +60,18 @@ async fn get_auto_mtu(endpoint: &str, mode: &str) -> u16 {
         perform_mtu_probe(host).await.unwrap_or(1500)
     };
 
+    // 检测是否为 IPv6 地址喵（IPv6 头比 IPv4 大 20 字节）
+    let is_ipv6 = host.contains(':') || host.parse::<std::net::Ipv6Addr>().is_ok();
+    let ip_header_size: u16 = if is_ipv6 { 40 } else { 20 };
+
+    // 计算各模式的开销喵
+    // RawIP: IP头 + WG(32)
+    // TCP(udp2raw): IP头 + TCP(20) + udp2raw(12) + WG(32)
+    // UDP: IP头 + UDP(8) + WG(32)
     let overhead = match mode {
-        "ip" => 52,
-        "tcp" => 84,
-        _ => 60,
+        "ip" => ip_header_size + 32,                    // IP + WG
+        "tcp" => ip_header_size + 20 + 12 + 32,         // IP + TCP + udp2raw + WG
+        _ => ip_header_size + 8 + 32,                    // IP + UDP + WG
     };
 
     let recommended = pmtu - overhead;
