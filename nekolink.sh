@@ -50,8 +50,158 @@ function show_advanced_menu() {
     echo -e "${CYAN}请选择高级魔法：${NC}"
     echo "1. 设置全局信令端口 (Global Signal Port)"
     echo "2. 将所有隧道修改为 MTU 自动协商 (MTU Auto-Negotiation)"
-    echo "3. 返回主菜单"
-    read -p "请输入数字 [1-3]: " adv_choice
+    echo "3. 导入 wg-quick 配置文件 (WireGuard 兼容模式)"
+    echo "4. 返回主菜单"
+    read -p "请输入数字 [1-4]: " adv_choice
+}
+
+function import_wgquick_config() {
+    echo -e "\n${PINK}--- 开始导入 wg-quick 配置魔法 ---${NC}"
+    echo -e "${CYAN}此功能会将标准 WireGuard 配置文件转换为 NekoLink 兼容格式喵！${NC}"
+    echo -e "${CYAN}注意：导入后将自动开启 native_wg_compat 模式（禁用信令通道）${NC}\n"
+    
+    read -p "请输入 wg-quick 配置文件路径 (例如 /etc/wireguard/wg0.conf): " wg_conf_path
+    
+    if [ ! -f "$wg_conf_path" ]; then
+        echo -e "${PINK}喵？找不到文件: $wg_conf_path${NC}"
+        return
+    fi
+    
+    # 提取接口名称
+    default_iface=$(basename "$wg_conf_path" .conf)
+    read -p "请输入 NekoLink 接口名称 (默认: $default_iface): " iface
+    [ -z "$iface" ] && iface="$default_iface"
+    
+    # 解析 [Interface] 部分
+    local private_key=""
+    local address=""
+    local listen_port="0"
+    local mtu="1420"
+    local table="auto"
+    
+    # 解析 [Peer] 部分（支持多个 Peer）
+    declare -a peer_pubkeys
+    declare -a peer_psks
+    declare -a peer_endpoints
+    declare -a peer_allowedips
+    declare -a peer_keepalives
+    
+    local current_section=""
+    local peer_idx=-1
+    
+    while IFS='=' read -r key value || [ -n "$key" ]; do
+        # 去除首尾空格
+        key=$(echo "$key" | xargs)
+        value=$(echo "$value" | xargs)
+        
+        # 跳过空行和注释
+        [ -z "$key" ] && continue
+        [[ "$key" == \#* ]] && continue
+        
+        # 检测段落标题
+        if [[ "$key" == \[Interface\]* ]]; then
+            current_section="interface"
+            continue
+        elif [[ "$key" == \[Peer\]* ]]; then
+            current_section="peer"
+            peer_idx=$((peer_idx + 1))
+            peer_pubkeys[$peer_idx]=""
+            peer_psks[$peer_idx]=""
+            peer_endpoints[$peer_idx]=""
+            peer_allowedips[$peer_idx]=""
+            peer_keepalives[$peer_idx]=""
+            continue
+        fi
+        
+        if [ "$current_section" == "interface" ]; then
+            case "$key" in
+                PrivateKey) private_key="$value" ;;
+                Address) address="$value" ;;
+                ListenPort) listen_port="$value" ;;
+                MTU) mtu="$value" ;;
+                Table) table="$value" ;;
+            esac
+        elif [ "$current_section" == "peer" ] && [ $peer_idx -ge 0 ]; then
+            case "$key" in
+                PublicKey) peer_pubkeys[$peer_idx]="$value" ;;
+                PresharedKey) peer_psks[$peer_idx]="$value" ;;
+                Endpoint) peer_endpoints[$peer_idx]="$value" ;;
+                AllowedIPs) peer_allowedips[$peer_idx]="$value" ;;
+                PersistentKeepalive) peer_keepalives[$peer_idx]="$value" ;;
+            esac
+        fi
+    done < "$wg_conf_path"
+    
+    # 验证必要字段
+    if [ -z "$private_key" ]; then
+        echo -e "${PINK}喵呜... 配置文件中没有找到 PrivateKey！${NC}"
+        return
+    fi
+    
+    if [ -z "$address" ]; then
+        echo -e "${PINK}喵呜... 配置文件中没有找到 Address！${NC}"
+        return
+    fi
+    
+    # 判断 auto_route：Table=off 表示不导入路由
+    local auto_route="false"
+    if [ "$table" != "off" ]; then
+        auto_route="true"
+    fi
+    
+    # 构建 peers JSON 数组
+    local peers_json=""
+    for i in "${!peer_pubkeys[@]}"; do
+        local pjson="{\"public_key\": \"${peer_pubkeys[$i]}\""
+        [ -n "${peer_endpoints[$i]}" ] && pjson="$pjson, \"endpoint\": \"${peer_endpoints[$i]}\""
+        [ -n "${peer_psks[$i]}" ] && pjson="$pjson, \"preshared_key\": \"${peer_psks[$i]}\""
+        [ -n "${peer_allowedips[$i]}" ] && pjson="$pjson, \"allowed_ips\": \"${peer_allowedips[$i]}\""
+        [ -n "${peer_keepalives[$i]}" ] && pjson="$pjson, \"persistent_keepalive\": ${peer_keepalives[$i]}"
+        pjson="$pjson}"
+        
+        if [ -z "$peers_json" ]; then
+            peers_json="$pjson"
+        else
+            peers_json="$peers_json, $pjson"
+        fi
+    done
+    
+    # 生成 JSON 配置
+    local json_path="$CONFIG_DIR/$iface.json"
+    
+    cat > "$json_path" <<EOF
+{
+  "interface": "$iface",
+  "mode": "udp",
+  "ip_protocol": null,
+  "listen_port": $listen_port,
+  "auto_route": $auto_route,
+  "persistent_keepalive": null,
+  "mtu": $mtu,
+  "clamp_mss": true,
+  "local_address": "$address",
+  "psk": "NekoMagic_WG_Compat",
+  "native_wg_compat": true,
+  "private_key": "$private_key",
+  "peers": [$peers_json]
+}
+EOF
+    
+    echo -e "\n${PINK}--- 导入结果摘要 ---${NC}"
+    echo -e "${CYAN}接口名称: $iface${NC}"
+    echo -e "${CYAN}本地地址: $address${NC}"
+    echo -e "${CYAN}监听端口: $listen_port${NC}"
+    echo -e "${CYAN}MTU: $mtu${NC}"
+    echo -e "${CYAN}自动路由: $auto_route (Table=$table)${NC}"
+    echo -e "${CYAN}导入 Peer 数量: $((peer_idx + 1))${NC}"
+    echo -e "${CYAN}兼容模式: native_wg_compat=true${NC}"
+    echo -e "\n${PINK}配置已保存到: $json_path 喵！${NC}"
+    
+    read -p "是否立即重启服务以应用配置？(y/n, 默认 n): " restart_now
+    if [ "$restart_now" == "y" ]; then
+        systemctl restart nekolink
+        echo -e "${PINK}服务已重启喵！${NC}"
+    fi
 }
 
 function set_all_tunnels_auto_mtu() {
@@ -578,7 +728,8 @@ while true; do
             case $adv_choice in
                 1) set_global_signal_port ;;
                 2) set_all_tunnels_auto_mtu ;;
-                3) continue ;;
+                3) import_wgquick_config ;;
+                4) continue ;;
                 *) echo "无效选择喵！" ;;
             esac
             ;;
