@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.5] - 2026-02-02
+
+### Added
+- **接口级热重载魔法**：实现了基于 `SIGHUP` 信号的零停机配置更新，支持不重启进程的情况下更新隧道。
+- **nekolink-ctl reload**：新增专门的重载指令，通过信号机制触发表内实例的差异对比与增量更新。
+- **优雅任务调度**：引入 `CancellationToken` 与 `JoinHandle` 异步等待机制，确保旧实例资源（特别是 `udp2raw` 侧车与 `iptables` 规则）被彻底清理后再启动新实例。
+- **脚本交互升级**：`nekolink.sh` (v2.7.5) 现在集成了热重载选项，并会在修改配置后智能提示主人重载喵。
+
+### Changed
+- **架构级重构**：内部状态管理由静态 `Vec` 全面升级为动态 `HashMap` + `RwLock` 架构，满足高并发下的读写分离。
+- **信令自适应级联**：全局信令端口或 Raw IP 协议列表变更时，UDP/TCP/RawIP 三大信令管道会自动侦测并执行级联式平滑重启。
+
 ## [2.7.0] - 2026-02-02
 
 ### Fixed
