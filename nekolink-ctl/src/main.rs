@@ -305,7 +305,7 @@ async fn main() -> Result<()> {
         for config in initial_configs {
             let iface = config.interface.clone();
             let (priv_b64, pub_key) = if let Some(pk) = &config.private_key {
-                let bytes = BASE64.decode(pk.trim()).context("无法解码配置中的私钥喵")?;
+                let bytes = decode_base64(pk).context("无法解码配置中的私钥喵")?;
                 let priv_key = StaticSecret::from(<[u8; 32]>::try_from(bytes).map_err(|_| anyhow::anyhow!("私钥长度不对喵"))?);
                 let pub_key = PublicKey::from(&priv_key);
                 (pk.clone(), pub_key)
@@ -389,7 +389,7 @@ async fn main() -> Result<()> {
                         }
                         
                         let (priv_b64, pub_key) = if let Some(pk) = &config.private_key {
-                            match BASE64.decode(pk.trim()) {
+                            match decode_base64(pk) {
                                 Ok(bytes) => {
                                     if let Ok(bytes_32) = <[u8; 32]>::try_from(bytes) {
                                         let priv_key = StaticSecret::from(bytes_32);
@@ -1192,8 +1192,22 @@ async fn run_global_raw_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
 }
 
 /// 将 Base64 编码的密钥转换为 Hex 格式（UAPI 需要）喵
+fn decode_base64(s: &str) -> Result<Vec<u8>> {
+    let s = s.trim();
+    if let Ok(b) = BASE64.decode(s) {
+        return Ok(b);
+    }
+    // 如果标准解码失败，尝试智能纠正填充符（Padding）喵
+    let mut padded = s.to_string();
+    padded = padded.trim_end_matches('=').to_string();
+    while padded.len() % 4 != 0 {
+        padded.push('=');
+    }
+    BASE64.decode(&padded).context("Base64 格式无效，即便尝试补齐填充后依然无法解码喵")
+}
+
 fn base64_to_hex(b64: &str) -> String {
-    match BASE64.decode(b64.trim()) {
+    match decode_base64(b64) {
         Ok(bytes) => bytes.iter().map(|b| format!("{:02x}", b)).collect(),
         Err(_) => b64.to_string(), // 如果解码失败，保持原样喵
     }
