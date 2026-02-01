@@ -33,6 +33,43 @@ impl Default for GlobalConfig {
 static PEER_CACHE: OnceLock<Mutex<HashMap<(String, String), String>>> = OnceLock::new();
 static CONFIG_MUTEX: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 static SIDE_CARS: OnceLock<tokio::sync::Mutex<HashMap<(String, String), tokio::process::Child>>> = OnceLock::new();
+static PROBED_MTU_CACHE: OnceLock<tokio::sync::Mutex<HashMap<String, (u16, std::time::Instant)>>> = OnceLock::new();
+
+async fn get_auto_mtu(endpoint: &str, mode: &str) -> u16 {
+    let mut cache = PROBED_MTU_CACHE.get_or_init(|| tokio::sync::Mutex::new(HashMap::new())).lock().await;
+
+    if let Some((mtu, timestamp)) = cache.get(endpoint) {
+        if timestamp.elapsed() < Duration::from_secs(3600) {
+            return *mtu;
+        }
+    }
+
+    // 执行探测喵
+    let host = if endpoint.contains(':') {
+        endpoint.split(':').next().unwrap()
+    } else {
+        endpoint
+    };
+
+    let pmtu = if mode == "tcp" {
+        match perform_tcp_mtu_probe(host).await {
+            Ok(val) => val,
+            Err(_) => perform_mtu_probe(host).await.unwrap_or(1500)
+        }
+    } else {
+        perform_mtu_probe(host).await.unwrap_or(1500)
+    };
+
+    let overhead = match mode {
+        "ip" => 52,
+        "tcp" => 84,
+        _ => 60,
+    };
+
+    let recommended = pmtu - overhead;
+    cache.insert(endpoint.to_string(), (recommended, std::time::Instant::now()));
+    recommended
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct NekoConfig {
@@ -413,10 +450,13 @@ async fn run_global_udp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
 
                     let cipher = derive_cipher(&state.config.psk);
                     let msg_base = state.pub_key.as_bytes().to_vec();
-                    let current_mtu = get_interface_mtu(&state.config.interface).unwrap_or(1420);
-                    let actual_tunnel_port = get_actual_listen_port(&state.config.interface).unwrap_or(0);
-                    
                     for peer in &state.config.peers {
+                        let current_mtu = if state.config.mtu == Some(0) {
+                            get_auto_mtu(&peer.endpoint, &state.config.mode).await
+                        } else {
+                            get_interface_mtu(&state.config.interface).unwrap_or(1420)
+                        };
+
                         let addr_opt = if let Ok(mut sa) = peer.endpoint.parse::<SocketAddr>() {
                             sa.set_port(signal_port);
                             Some(sa)
@@ -427,6 +467,7 @@ async fn run_global_udp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                         };
 
                         if let Some(addr) = addr_opt {
+                            let actual_tunnel_port = get_actual_listen_port(&state.config.interface).unwrap_or(0);
                             let mut msg = msg_base.clone();
                             msg.extend_from_slice(&current_mtu.to_be_bytes());
                             msg.extend_from_slice(&actual_tunnel_port.to_be_bytes());
@@ -485,9 +526,13 @@ async fn run_global_udp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                                 // UDP 模式不使用 Phantun，直接配置 peer 喵
                                 let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0), &state.config.mode, 0, &state.config.psk).await;
                                 
-                                // 回发响应喵（UDP 模式不包含 Phantun 端口）
+                                // 回回响应喵（UDP 模式不包含 Phantun 端口）
                                 let msg_base = state.pub_key.as_bytes().to_vec();
-                                let current_mtu = get_interface_mtu(&state.config.interface).unwrap_or(1420);
+                                let current_mtu = if state.config.mtu == Some(0) {
+                                    get_auto_mtu(&addr.ip().to_string(), &state.config.mode).await
+                                } else {
+                                    get_interface_mtu(&state.config.interface).unwrap_or(1420)
+                                };
                                 let actual_tunnel_port = get_actual_listen_port(&state.config.interface).unwrap_or(0);
                                 let mut resp_msg = msg_base;
                                 resp_msg.extend_from_slice(&current_mtu.to_be_bytes());
@@ -555,12 +600,18 @@ async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                             let interface_inner = interface.clone();
                             let is_raw_ip_mode = state.config.mode == "ip";
                             let psk_inner = state.config.psk.clone();
+                            let auto_mtu_enabled = state.config.mtu == Some(0);
+                            
                             tokio::spawn(async move {
                                 println!("喵！正在发起 TCP 信令连接: {}...", addr);
                                 match time::timeout(Duration::from_secs(10), tokio::net::TcpStream::connect(addr)).await {
                                     Ok(Ok(mut stream)) => {
                                         println!("喵！TCP 信令连接已建立: {}", addr);
-                                        let current_mtu = get_interface_mtu(&interface_inner).unwrap_or(1420);
+                                        let current_mtu = if is_raw_ip_mode {
+                                            if auto_mtu_enabled { get_auto_mtu(&addr.ip().to_string(), "ip").await } else { get_interface_mtu(&interface_inner).unwrap_or(1420) }
+                                        } else {
+                                            if auto_mtu_enabled { get_auto_mtu(&addr.ip().to_string(), "tcp").await } else { get_interface_mtu(&interface_inner).unwrap_or(1420) }
+                                        };
                                         let actual_tunnel_port = get_actual_listen_port(&interface_inner).unwrap_or(0);
 
                                         let mut msg = pub_key_bytes.clone();
@@ -672,7 +723,11 @@ async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                                             
                                             // TCP 握手响应喵！直接在当前流回发
                                             let msg_base = state.pub_key.as_bytes().to_vec();
-                                            let current_mtu = get_interface_mtu(&state.config.interface).unwrap_or(1420);
+                                            let current_mtu = if state.config.mtu == Some(0) { 
+                                                get_auto_mtu(&addr.ip().to_string(), &state.config.mode).await 
+                                            } else { 
+                                                get_interface_mtu(&state.config.interface).unwrap_or(1420) 
+                                            };
                                             let actual_tunnel_port = get_actual_listen_port(&state.config.interface).unwrap_or(0);
                                             let mut resp_msg = msg_base;
                                             resp_msg.extend_from_slice(&current_mtu.to_be_bytes());
@@ -729,9 +784,12 @@ async fn run_global_raw_signaling(states: Arc<Vec<NekoState>>, proto: u8) -> Res
 
                     let cipher = derive_cipher(&state.config.psk);
                     let pub_key_bytes = state.pub_key.as_bytes().to_vec();
-                    let current_mtu = get_interface_mtu(&state.config.interface).unwrap_or(1420);
-
                     for peer in &state.config.peers {
+                        let current_mtu = if state.config.mtu == Some(0) {
+                            get_auto_mtu(&peer.endpoint, "ip").await
+                        } else {
+                            get_interface_mtu(&state.config.interface).unwrap_or(1420)
+                        };
                         let ip_opt = if let Ok(ip) = peer.endpoint.parse::<IpAddr>() {
                             Some(ip)
                         } else if let Ok(sa) = peer.endpoint.parse::<SocketAddr>() {
@@ -790,7 +848,11 @@ async fn run_global_raw_signaling(states: Arc<Vec<NekoState>>, proto: u8) -> Res
 
                                          // Raw IP 响应喵！
                                          let msg_base = state.pub_key.as_bytes().to_vec();
-                                         let current_mtu = get_interface_mtu(&state.config.interface).unwrap_or(1420);
+                                         let current_mtu = if state.config.mtu == Some(0) {
+                                             get_auto_mtu(&ip_addr.to_string(), "ip").await
+                                         } else {
+                                             get_interface_mtu(&state.config.interface).unwrap_or(1420)
+                                         };
                                          let mut resp_msg = msg_base;
                                          resp_msg.extend_from_slice(&current_mtu.to_be_bytes());
                                          
@@ -839,6 +901,9 @@ fn derive_cipher(psk: &str) -> ChaCha20Poly1305 {
 
 
 async fn configure_peer(interface: &str, peer_pub_key: &str, mut endpoint: String, keepalive: Option<u16>, peer_mtu: Option<u16>, auto_sync_mtu: bool, mode: &str, tcp_data_port: u16, psk: &str) -> Result<()> {
+    // 保存原始探测地址喵（防止 TCP 模式下被 127.0.0.1 覆盖）
+    let probe_address = endpoint.clone();
+    
     // 处理 TCP 模式下的侧车逻辑喵
     if mode == "tcp" {
         let sidecar_key = (interface.to_string(), peer_pub_key.to_string());
@@ -966,17 +1031,27 @@ async fn configure_peer(interface: &str, peer_pub_key: &str, mut endpoint: Strin
 
     if let Some(m) = peer_mtu {
         if auto_sync_mtu {
-            let _ = sync_mtu_if_needed(interface, m).await;
+            let probed_mtu = Some(get_auto_mtu(&probe_address, mode).await);
+            let _ = sync_mtu_if_needed(interface, m, probed_mtu).await;
         }
     }
     Ok(())
 }
 
-async fn sync_mtu_if_needed(interface: &str, peer_mtu: u16) -> Result<()> {
-    let current_mtu = get_interface_mtu(interface).unwrap_or(0);
-    if current_mtu != peer_mtu && peer_mtu >= 1280 {
-        println!("检测到对端 MTU 为 {}，正在同步接口 {} 的 MTU 喵...", peer_mtu, interface);
-        let _ = run_cmd(&format!("ip link set mtu {} dev {}", peer_mtu, interface));
+async fn sync_mtu_if_needed(interface: &str, peer_mtu: u16, probed_mtu: Option<u16>) -> Result<()> {
+    let current_mtu = get_interface_mtu(interface).unwrap_or(1420);
+    
+    let target_mtu = if let Some(p) = probed_mtu {
+        // 全自动协商模式喵：取我方探测值和对方建议值的最小值
+        u16::min(p, peer_mtu)
+    } else {
+        // 半自动模式喵：直接同步对方的值
+        peer_mtu
+    };
+
+    if current_mtu != target_mtu && target_mtu >= 1280 {
+        println!("接口 {} MTU 协商收敛中：[我方探测 {}] vs [对方建议 {}] -> 最终选用 {}喵！", interface, probed_mtu.unwrap_or(0), peer_mtu, target_mtu);
+        let _ = run_cmd(&format!("ip link set mtu {} dev {}", target_mtu, interface));
     }
     Ok(())
 }
@@ -1138,17 +1213,29 @@ async fn probe_mtu_cmd(endpoint: &str, mode: &str) -> Result<()> {
 
     println!("正在探测到 {} 的 PMTU 魔法喵...", host);
 
-    let pmtu = match perform_mtu_probe(host).await {
-        Ok(val) => val,
-        Err(_) => {
-            println!("探测失败了喵，可能是对端禁用了 ICMP。使用保守默认值 1500 喵。");
-            1500
+    // 针对 TCP 模式尝试使用真 TCP 探测，否则回退到 ICMP
+    let pmtu = if mode == "tcp" {
+        match perform_tcp_mtu_probe(host).await {
+            Ok(val) => {
+                println!("喵！成功通过 TCP 握手探测到路径 MTU 为 {}。", val);
+                val
+            },
+            Err(_) => {
+                println!("TCP 探测受限喵... 回退到 ICMP 二分法探测。");
+                perform_mtu_probe(host).await.unwrap_or(1500)
+            }
         }
+    } else {
+        perform_mtu_probe(host).await.unwrap_or(1500)
     };
 
+    // 精准开销分析喵：
+    // IP: 52 (IP 20 + WG 32)
+    // UDP: 60 (IP 20 + UDP 8 + WG 32)
+    // TCP (udp2raw): 84 (IP 20 + TCP 20 + udp2raw 12 + WG 32)
     let overhead = match mode {
         "ip" => 52,
-        "tcp" => 72,
+        "tcp" => 84,
         _ => 60, // udp
     };
 
@@ -1157,6 +1244,45 @@ async fn probe_mtu_cmd(endpoint: &str, mode: &str) -> Result<()> {
     println!("RECOMMENDED_MTU={}", recommended);
 
     Ok(())
+}
+
+async fn perform_tcp_mtu_probe(host: &str) -> Result<u16> {
+    use std::os::unix::io::AsRawFd;
+    
+    // 尝试连接对端的信令端口 (默认 12580)
+    let addr = format!("{}:12580", host);
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+    
+    // 设置非阻塞和超时
+    socket.set_nonblocking(true)?;
+    
+    // 异步连接
+    let addr_sock: SocketAddr = addr.parse().unwrap_or("0.0.0.0:12580".parse().unwrap());
+    let _ = socket.connect(&addr_sock.into());
+    
+    // 等待一小会儿确保路径被探测喵
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    
+    // 在 Linux 下读取 IP_MTU 选项喵
+    // libc::IP_MTU 的值是 14
+    let mut mtu: libc::c_int = 0;
+    let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    
+    let res = unsafe {
+        libc::getsockopt(
+            socket.as_raw_fd(),
+            libc::IPPROTO_IP,
+            libc::IP_MTU,
+            &mut mtu as *mut _ as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    
+    if res == 0 && mtu > 0 {
+        Ok(mtu as u16)
+    } else {
+        Err(anyhow::anyhow!("无法获取 TCP MTU"))
+    }
 }
 
 async fn perform_mtu_probe(host: &str) -> Result<u16> {
