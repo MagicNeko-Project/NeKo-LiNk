@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.0] - 2026-02-01
+
+### Added
+- **全自动 MTU 协商魔法**：当 MTU 设置为 `0` 时，两端会自动通过信令交换探测到的 PMTU。
+- **智能收敛算法**：自动选取双端探测值的最小值作为最终接口 MTU，彻底解决“木桶效应”导致的数据包分片问题。
+- **高级设置菜单**：在 `nekolink.sh` 中新增“高级设置”分级菜单，支持批量开启全自动 MTU 协商。
+- **探测缓存机制**：引入 PMTU 探测结果缓存，避免频繁探测带来的性能损耗。
+
+### Fixed
+- 修正了 `udp2raw` (FakeTCP) 模式下的精准开销计算（从 72 修正为 84 字节）。
+- 解决了 TCP 信令握手中并发任务导致的生命周期借用冲突问题。
+
 ## [2.5.1] - 2026-02-01
 
 ### Added
