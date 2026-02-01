@@ -3,6 +3,13 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v2.4.8 (2026-02-01)
+- 喵喵！**信令协议增强 + 配置向导优化**：
+    - **配置向导增强**: 新增全局信令端口设置选项（菜单选项 8）
+    - **分离输入**: 客户端配置时，服务端 IP 和信令端口分开输入，更加清晰
+    - **Phantun 端口自动协商**: TCP 模式不再需要手动指定端口，通过信令交换自动协商
+    - **信令协议扩展**: 包格式从 36 字节扩展为 38 字节，新增 Phantun 数据端口字段
+
 ## v2.4.7 (2026-02-01)
 - 喵喵！**TCP 模式极简化体验**，一键开启 Fake-TCP 隧道：
     - **服务端全自动**: 只需配置 `"mode": "tcp"` + 空 peers，`phantun-server` 会自动启动喵！
