@@ -13,7 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **优雅任务调度**：引入 `CancellationToken` 与 `JoinHandle` 异步等待机制，确保旧实例资源（特别是 `udp2raw` 侧车与 `iptables` 规则）被彻底清理后再启动新实例。
 - **脚本交互升级**：`nekolink.sh` (v2.7.5) 现在集成了热重载选项，并会在修改配置后智能提示主人重载喵。
 
-- **信令协议严苛隔离**：修复了 RawIP 模式接口在 TCP 信令管道中被误识别的问题，确保不同传输模式的信令各行其道。
+- **信令协议严苛隔离**：修复了 RawIP 模式接口在 TCP 信令管道中被误识别的问题。
+- **WireGuard 兼容模式满血复活**：修复了兼容模式下 UAPI 密钥格式不匹配及域名解析失效的问题。
 - **架构级重构**：内部状态管理由静态 `Vec` 全面升级为动态 `HashMap` + `RwLock` 架构，满足高并发下的读写分离。
 - **信令自适应级联**：全局信令端口或 Raw IP 协议列表变更时，UDP/TCP/RawIP 三大信令管道会自动侦测并执行级联式平滑重启。
 
