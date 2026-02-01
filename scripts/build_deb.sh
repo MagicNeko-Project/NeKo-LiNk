@@ -35,8 +35,10 @@ cat > "$BUILD_DIR/DEBIAN/postinst" <<EOF
 set -e
 setcap cap_net_admin,cap_net_raw+epi /usr/local/bin/nekolink-cli
 setcap cap_net_admin,cap_net_raw+epi /usr/local/bin/nekolink-ctl
-setcap cap_net_admin,cap_net_raw+epi /usr/local/bin/phantun-client
-setcap cap_net_admin,cap_net_raw+epi /usr/local/bin/phantun-server
+# udp2raw 需要 root 或 CAP_NET_RAW 权限
+if [ -f /usr/local/bin/udp2raw ]; then
+    setcap cap_net_admin,cap_net_raw+epi /usr/local/bin/udp2raw
+fi
 systemctl daemon-reload
 echo "NekoLink 安装完成喵！配置文件请放在 /etc/neko-link/ 喵。"
 exit 0
@@ -50,21 +52,60 @@ if [ ! -f "target/release/nekolink-cli" ] || [ ! -f "target/release/nekolink-ctl
     exit 1
 fi
 
-if [ ! -f "target/release/phantun-client" ] || [ ! -f "target/release/phantun-server" ]; then
-    echo "喵？找不到 Phantun 二进制文件，请先运行 cargo build --release 喵！"
-    exit 1
-fi
-
 cp target/release/nekolink-cli "$BUILD_DIR/usr/local/bin/"
 cp target/release/nekolink-ctl "$BUILD_DIR/usr/local/bin/"
-cp target/release/phantun-client "$BUILD_DIR/usr/local/bin/"
-cp target/release/phantun-server "$BUILD_DIR/usr/local/bin/"
+
+# 5. 下载或使用现有的 udp2raw 二进制
+UDP2RAW_PATH="$BUILD_DIR/usr/local/bin/udp2raw"
+if [ -f "/usr/local/bin/udp2raw" ]; then
+    echo "发现系统已安装 udp2raw，复用喵..."
+    cp /usr/local/bin/udp2raw "$UDP2RAW_PATH"
+elif [ -f "udp2raw" ]; then
+    echo "发现本地 udp2raw，复用喵..."
+    cp udp2raw "$UDP2RAW_PATH"
+else
+    echo "正在下载 udp2raw 喵..."
+    # 根据架构下载对应的二进制
+    case "$ARCH" in
+        amd64|x86_64)
+            UDP2RAW_URL="https://github.com/wangyu-/udp2raw/releases/download/20230206.0/udp2raw_binaries.tar.gz"
+            ;;
+        arm64|aarch64)
+            UDP2RAW_URL="https://github.com/wangyu-/udp2raw/releases/download/20230206.0/udp2raw_binaries.tar.gz"
+            ;;
+        *)
+            echo "喵？不支持的架构 $ARCH，请手动安装 udp2raw 喵！"
+            # 创建一个占位符脚本
+            echo '#!/bin/sh' > "$UDP2RAW_PATH"
+            echo 'echo "请手动安装 udp2raw: https://github.com/wangyu-/udp2raw"' >> "$UDP2RAW_PATH"
+            chmod +x "$UDP2RAW_PATH"
+            ;;
+    esac
+    
+    if [ -n "$UDP2RAW_URL" ]; then
+        # 下载并解压
+        TMP_TAR="/tmp/udp2raw_binaries.tar.gz"
+        curl -L -o "$TMP_TAR" "$UDP2RAW_URL" || wget -O "$TMP_TAR" "$UDP2RAW_URL"
+        TMP_DIR="/tmp/udp2raw_extract"
+        mkdir -p "$TMP_DIR"
+        tar -xzf "$TMP_TAR" -C "$TMP_DIR"
+        # 根据架构选择对应二进制
+        if [ "$ARCH" = "amd64" ] || [ "$ARCH" = "x86_64" ]; then
+            cp "$TMP_DIR/udp2raw_amd64" "$UDP2RAW_PATH"
+        elif [ "$ARCH" = "arm64" ] || [ "$ARCH" = "aarch64" ]; then
+            cp "$TMP_DIR/udp2raw_arm" "$UDP2RAW_PATH"
+        fi
+        chmod +x "$UDP2RAW_PATH"
+        rm -rf "$TMP_DIR" "$TMP_TAR"
+    fi
+fi
+
 cp nekolink.sh "$BUILD_DIR/usr/local/bin/nekolink"
 chmod +x "$BUILD_DIR/usr/local/bin/nekolink"
 cp nekolink.service "$BUILD_DIR/etc/systemd/system/"
 cp VERSION "$BUILD_DIR/usr/local/share/nekolink/"
 
-# 5. 打包 (显式输出到项目根目录喵)
+# 6. 打包 (显式输出到项目根目录喵)
 OUTPUT_FILE="NekoLink_${VERSION}_${ARCH}.deb"
 dpkg-deb --root-owner-group --build "$BUILD_DIR" "$OUTPUT_FILE"
 

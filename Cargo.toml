@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["nekolink-core", "nekolink-cli", "nekolink-ctl", "nekolink-tcp/fake-tcp", "nekolink-tcp/phantun"]
+members = ["nekolink-core", "nekolink-cli", "nekolink-ctl"]
 
 [profile.release]
 lto = true        # Enable full link-time optimization.

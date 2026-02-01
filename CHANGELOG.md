@@ -3,6 +3,13 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v2.5.0 (2026-02-01)
+- 🎉 **重大更新：从 Phantun 迁移到 udp2raw**！
+    - **更简单的集成**: udp2raw 使用 raw socket，无需 TUN 接口，避免了 IP 冲突问题
+    - **更少的依赖**: 无需 nftables 手动配置，udp2raw 使用 `-a` 参数自动管理 iptables 规则
+    - **更好的兼容性**: udp2raw 是成熟稳定的 C++ 项目，支持 FakeTCP/ICMP/UDP 多种伪装模式
+    - **自动下载**: `install.sh` 会自动下载对应架构的 udp2raw 二进制
+
 ## v2.4.8 (2026-02-01)
 - 喵喵！**信令协议增强 + 配置向导优化**：
     - **配置向导增强**: 新增全局信令端口设置选项（菜单选项 8）
