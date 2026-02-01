@@ -15,7 +15,21 @@ use socket2::{Domain, Protocol, Socket, Type};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct PeerConfig {
+    /// 对端的 Endpoint 地址（IP:Port 或纯 IP）
+    #[serde(default)]
     endpoint: String,
+    /// WireGuard 兼容模式：对端的公钥（Base64 编码）
+    #[serde(default)]
+    public_key: Option<String>,
+    /// WireGuard 兼容模式：隧道层预共享密钥（Base64 编码，与 NekoLink 的 psk 不同）
+    #[serde(default)]
+    preshared_key: Option<String>,
+    /// WireGuard 兼容模式：允许的 IP 列表（如 "10.0.0.0/24, 192.168.1.0/24"）
+    #[serde(default)]
+    allowed_ips: Option<String>,
+    /// 单独为此 Peer 设置的 Keepalive（覆盖全局设置）
+    #[serde(default)]
+    persistent_keepalive: Option<u16>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -86,6 +100,7 @@ struct NekoConfig {
     mode: String,
     ip_protocol: Option<u8>,
     local_address: String,
+    /// NekoLink 信令通道的预共享密钥（用于自动交换公钥）
     psk: String,
     peers: Vec<PeerConfig>,
     listen_port: Option<u16>,
@@ -98,6 +113,12 @@ struct NekoConfig {
     /// TCP 模式下，Phantun 的远端数据端口（默认 4567）喵
     #[serde(default = "default_tcp_data_port")]
     pub tcp_data_port: u16,
+    /// WireGuard 原生兼容模式：禁用信令通道，使用配置文件中的公钥
+    #[serde(default)]
+    pub native_wg_compat: bool,
+    /// 导入模式下的私钥（Base64 编码，可选）
+    #[serde(default)]
+    pub private_key: Option<String>,
 }
 
 fn default_tcp_data_port() -> u16 {
@@ -358,6 +379,58 @@ async fn run_instance(state: NekoState) -> Result<()> {
         }
     }
     
+    // WireGuard 兼容模式：直接从配置文件配置 Peers，不等待信令喵
+    if config.native_wg_compat {
+        println!("喵！检测到 WireGuard 原生兼容模式，正在直接配置 Peers...");
+        for peer in &config.peers {
+            if let Some(ref pub_key) = peer.public_key {
+                let allowed_ips = peer.allowed_ips.as_deref().unwrap_or("0.0.0.0/0, ::/0");
+                let keepalive = peer.persistent_keepalive.or(config.persistent_keepalive);
+                
+                // 转换公钥格式（Base64 -> Hex for UAPI）
+                let pub_key_hex = base64_to_hex(pub_key);
+                
+                let mut uapi_cmd = format!(
+                    "set=1\npublic_key={}\n",
+                    pub_key_hex
+                );
+                
+                // 配置允许的 IP
+                for ip in allowed_ips.split(',').map(|s| s.trim()) {
+                    if !ip.is_empty() {
+                        uapi_cmd.push_str(&format!("allowed_ip={}\n", ip));
+                    }
+                }
+                
+                // 配置 Endpoint
+                if !peer.endpoint.is_empty() {
+                    uapi_cmd.push_str(&format!("endpoint={}\n", peer.endpoint));
+                }
+                
+                // 配置 Keepalive
+                if let Some(ka) = keepalive {
+                    uapi_cmd.push_str(&format!("persistent_keepalive_interval={}\n", ka));
+                }
+                
+                // 配置 PresharedKey（隧道层加密，与 NekoLink 的 psk 不同）
+                if let Some(ref psk) = peer.preshared_key {
+                    let psk_hex = base64_to_hex(psk);
+                    uapi_cmd.push_str(&format!("preshared_key={}\n", psk_hex));
+                }
+                
+                uapi_cmd.push('\n');
+                
+                match send_uapi(&config.interface, &uapi_cmd).await {
+                    Ok(_) => println!("喵！成功配置 Peer: {} (Endpoint: {})", pub_key, peer.endpoint),
+                    Err(e) => eprintln!("喵呜... 配置 Peer {} 失败: {:?}", pub_key, e),
+                }
+            } else {
+                println!("喵？跳过没有公钥的 Peer (endpoint: {})", peer.endpoint);
+            }
+        }
+        println!("喵！WireGuard 兼容模式配置完成，共配置了 {} 个 Peer。", config.peers.len());
+    }
+    
     // TCP 模式：自动启动 udp2raw 组件喵（比 Phantun 更简单，无需 TUN 接口）
     let mut udp2raw_server_child: Option<tokio::process::Child> = None;
     if config.mode == "tcp" {
@@ -451,7 +524,8 @@ async fn run_global_udp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
         async move {
             loop {
                 for state in states.iter() {
-                    if state.config.mode != "udp" || state.pub_key.as_bytes() == &[0u8; 32] { continue; }
+                    // 跳过非 UDP 模式、空公钥、以及 WireGuard 兼容模式的接口喵
+                    if state.config.mode != "udp" || state.pub_key.as_bytes() == &[0u8; 32] || state.config.native_wg_compat { continue; }
                     
                     let established = get_established_peers(&state.config.interface).await;
                     if !established.is_empty() { continue; }
@@ -512,7 +586,8 @@ async fn run_global_udp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                     let nonce = Nonce::from_slice(nonce_part);
 
                     for state in states.iter() {
-                        if state.config.mode != "udp" { continue; }
+                        // 跳过非 UDP 模式和 WireGuard 兼容模式的接口喵
+                        if state.config.mode != "udp" || state.config.native_wg_compat { continue; }
                         let cipher = derive_cipher(&state.config.psk);
                         if let Ok(decrypted) = cipher.decrypt(nonce, encrypted_part) {
                             if decrypted.len() >= 36 {
@@ -580,7 +655,8 @@ async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
             loop {
                 for state in states.iter() {
                     let established = get_established_peers(&state.config.interface).await;
-                    if (state.config.mode != "tcp" && state.config.mode != "ip") || state.pub_key.as_bytes() == &[0u8; 32] {
+                    // 跳过非 TCP/IP 模式、空公钥、以及 WireGuard 兼容模式的接口喵
+                    if (state.config.mode != "tcp" && state.config.mode != "ip") || state.pub_key.as_bytes() == &[0u8; 32] || state.config.native_wg_compat {
                         continue;
                     }
                     
@@ -703,7 +779,8 @@ async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                                 let nonce = Nonce::from_slice(nonce_part);
                                 
                                 for state in states.iter() {
-                                    if state.config.mode != "tcp" && state.config.mode != "ip" { continue; }
+                                    // 跳过非 TCP/IP 模式和 WireGuard 兼容模式的接口喵
+                                    if (state.config.mode != "tcp" && state.config.mode != "ip") || state.config.native_wg_compat { continue; }
                                     let cipher = derive_cipher(&state.config.psk);
                                     if let Ok(decrypted) = cipher.decrypt(nonce, encrypted_part) {
                                         if decrypted.len() >= 36 {
@@ -787,7 +864,8 @@ async fn run_global_raw_signaling(states: Arc<Vec<NekoState>>, proto: u8) -> Res
             loop {
                 for state in states.iter() {
                     let st_proto = state.config.ip_protocol.unwrap_or(141);
-                    if state.config.mode != "ip" || st_proto != proto || state.pub_key.as_bytes() == &[0u8; 32] { continue; }
+                    // 跳过非 Raw IP 模式、协议不匹配、空公钥、以及 WireGuard 兼容模式的接口喵
+                    if state.config.mode != "ip" || st_proto != proto || state.pub_key.as_bytes() == &[0u8; 32] || state.config.native_wg_compat { continue; }
                     let established = get_established_peers(&state.config.interface).await;
                     if !established.is_empty() { continue; }
 
@@ -847,7 +925,8 @@ async fn run_global_raw_signaling(states: Arc<Vec<NekoState>>, proto: u8) -> Res
                                  let encrypted = &buf[offset+13..len];
                                  for state in states.iter() {
                                      let st_proto = state.config.ip_protocol.unwrap_or(141);
-                                     if state.config.mode != "ip" || st_proto != proto { continue; }
+                                     // 跳过非 Raw IP 模式、协议不匹配、以及 WireGuard 兼容模式的接口喵
+                                     if state.config.mode != "ip" || st_proto != proto || state.config.native_wg_compat { continue; }
                                      let cipher = derive_cipher(&state.config.psk);
                                      if let Ok(decrypted) = cipher.decrypt(nonce, encrypted) {
                                          let ip_addr = addr.as_socket().map(|s| s.ip()).unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
@@ -892,6 +971,14 @@ async fn run_global_raw_signaling(states: Arc<Vec<NekoState>>, proto: u8) -> Res
         _ = recv_task => {},
     }
     Ok(())
+}
+
+/// 将 Base64 编码的密钥转换为 Hex 格式（UAPI 需要）喵
+fn base64_to_hex(b64: &str) -> String {
+    match BASE64.decode(b64.trim()) {
+        Ok(bytes) => bytes.iter().map(|b| format!("{:02x}", b)).collect(),
+        Err(_) => b64.to_string(), // 如果解码失败，保持原样喵
+    }
 }
 
 fn derive_cipher(psk: &str) -> ChaCha20Poly1305 {
