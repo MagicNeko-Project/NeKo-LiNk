@@ -304,7 +304,15 @@ async fn main() -> Result<()> {
         let mut instances = active_instances.write().await;
         for config in initial_configs {
             let iface = config.interface.clone();
-            let (priv_b64, _, pub_key) = load_or_generate_keys(&iface)?;
+            let (priv_b64, pub_key) = if let Some(pk) = &config.private_key {
+                let bytes = BASE64.decode(pk.trim()).context("无法解码配置中的私钥喵")?;
+                let priv_key = StaticSecret::from(<[u8; 32]>::try_from(bytes).map_err(|_| anyhow::anyhow!("私钥长度不对喵"))?);
+                let pub_key = PublicKey::from(&priv_key);
+                (pk.clone(), pub_key)
+            } else {
+                let (p_b64, _, p_k) = load_or_generate_keys(&iface)?;
+                (p_b64, p_k)
+            };
             let state = NekoState { config, priv_b64, pub_key };
             let token = CancellationToken::new();
             let token_clone = token.clone();
@@ -380,7 +388,28 @@ async fn main() -> Result<()> {
                             println!("喵！检测到新接口 {}，正在启动...", iface);
                         }
                         
-                        let (priv_b64, _, pub_key) = load_or_generate_keys(&iface).unwrap_or_else(|_| (String::new(), String::new(), PublicKey::from([0u8; 32])));
+                        let (priv_b64, pub_key) = if let Some(pk) = &config.private_key {
+                            match BASE64.decode(pk.trim()) {
+                                Ok(bytes) => {
+                                    if let Ok(bytes_32) = <[u8; 32]>::try_from(bytes) {
+                                        let priv_key = StaticSecret::from(bytes_32);
+                                        let pub_key = PublicKey::from(&priv_key);
+                                        (pk.clone(), pub_key)
+                                    } else {
+                                        let (p_b64, _, p_k) = load_or_generate_keys(&iface).unwrap_or_else(|_| (String::new(), String::new(), PublicKey::from([0u8; 32])));
+                                        (p_b64, p_k)
+                                    }
+                                }
+                                Err(_) => {
+                                     let (p_b64, _, p_k) = load_or_generate_keys(&iface).unwrap_or_else(|_| (String::new(), String::new(), PublicKey::from([0u8; 32])));
+                                     (p_b64, p_k)
+                                }
+                            }
+                        } else {
+                            let (p_b64, _, p_k) = load_or_generate_keys(&iface).unwrap_or_else(|_| (String::new(), String::new(), PublicKey::from([0u8; 32])));
+                            (p_b64, p_k)
+                        };
+
                         let state = NekoState { config: config.clone(), priv_b64, pub_key };
                         let token = CancellationToken::new();
                         let token_clone = token.clone();
