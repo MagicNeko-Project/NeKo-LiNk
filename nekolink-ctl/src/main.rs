@@ -468,7 +468,7 @@ async fn run_global_udp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
 
                                 println!("喵！12580 (UDP) 握手处理成功：{} -> {}", endpoint, state.config.interface);
                                 // UDP 模式不使用 Phantun，直接配置 peer 喵
-                                let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0), &state.config.mode, 0).await;
+                                let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0), &state.config.mode, 0, &state.config.psk).await;
                                 
                                 // 回发响应喵（UDP 模式不包含 Phantun 端口）
                                 let msg_base = state.pub_key.as_bytes().to_vec();
@@ -539,6 +539,7 @@ async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                             let pub_key_bytes = pub_key_bytes.clone();
                             let interface_inner = interface.clone();
                             let is_raw_ip_mode = state.config.mode == "ip";
+                            let psk_inner = state.config.psk.clone();
                             tokio::spawn(async move {
                                 println!("喵！正在发起 TCP 信令连接: {}...", addr);
                                 match time::timeout(Duration::from_secs(10), tokio::net::TcpStream::connect(addr)).await {
@@ -584,7 +585,7 @@ async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                                                                                     endpoint = format!("{}:{}", endpoint, peer_tunnel_port);
                                                                                 }
                                                                                 println!("喵！成功接收 TCP 信令响应 (ACK)：来自 {} (隧道端口: {}, Phantun端口: {})", endpoint, peer_tunnel_port, peer_phantun_port);
-                                                                                let _ = configure_peer(&interface_inner, &peer_pub_key, endpoint, None, peer_mtu, true, "tcp", peer_phantun_port).await;
+                                                                                let _ = configure_peer(&interface_inner, &peer_pub_key, endpoint, None, peer_mtu, true, "tcp", peer_phantun_port, &psk_inner).await;
                                                                             }
                                                                         } else {
                                                                             println!("喵呜... 无法解密来自 {} 的 TCP ACK，PSK 匹配吗喵？", addr);
@@ -652,7 +653,7 @@ async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                                             println!("喵！12580 (TCP) 识别成功：{} -> {} (Phantun端口: {})", endpoint, state.config.interface, peer_phantun_port);
                                             // 使用对端的 Phantun 端口（如果协商到的话）
                                             let effective_phantun_port = if peer_phantun_port > 0 { peer_phantun_port } else { state.config.tcp_data_port };
-                                            let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0), &state.config.mode, effective_phantun_port).await;
+                                            let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0), &state.config.mode, effective_phantun_port, &state.config.psk).await;
                                             
                                             // TCP 握手响应喵！直接在当前流回发
                                             let msg_base = state.pub_key.as_bytes().to_vec();
@@ -770,7 +771,7 @@ async fn run_global_raw_signaling(states: Arc<Vec<NekoState>>, proto: u8) -> Res
                                          let ip_addr = addr.as_socket().map(|s| s.ip()).unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
                                          let peer_mtu = if decrypted.len() >= 34 { Some(u16::from_be_bytes([decrypted[32], decrypted[33]])) } else { None };
                                          println!("喵！12580 (Raw IP) 识别成功：{} -> {}", ip_addr, state.config.interface);
-                                         let _ = configure_peer(&state.config.interface, &BASE64.encode(&decrypted[..32]), ip_addr.to_string(), state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0), "ip", 0).await;
+                                         let _ = configure_peer(&state.config.interface, &BASE64.encode(&decrypted[..32]), ip_addr.to_string(), state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0), "ip", 0, &state.config.psk).await;
 
                                          // Raw IP 响应喵！
                                          let msg_base = state.pub_key.as_bytes().to_vec();
@@ -822,7 +823,7 @@ fn derive_cipher(psk: &str) -> ChaCha20Poly1305 {
 // udp2raw 使用 -a 参数自动管理 iptables 规则，无需手动配置 nftables 喵
 
 
-async fn configure_peer(interface: &str, peer_pub_key: &str, mut endpoint: String, keepalive: Option<u16>, peer_mtu: Option<u16>, auto_sync_mtu: bool, mode: &str, tcp_data_port: u16) -> Result<()> {
+async fn configure_peer(interface: &str, peer_pub_key: &str, mut endpoint: String, keepalive: Option<u16>, peer_mtu: Option<u16>, auto_sync_mtu: bool, mode: &str, tcp_data_port: u16, psk: &str) -> Result<()> {
     // 处理 TCP 模式下的侧车逻辑喵
     if mode == "tcp" {
         let sidecar_key = (interface.to_string(), peer_pub_key.to_string());
@@ -861,9 +862,8 @@ async fn configure_peer(interface: &str, peer_pub_key: &str, mut endpoint: Strin
             local_port = (OsRng.next_u32() % 10000 + 40000) as u16;
             let local_udp = format!("127.0.0.1:{}", local_port);
             
-            // 从配置中获取 PSK 前 16 字符作为 udp2raw 密码喵
-            // 注意：这里需要从全局状态获取 PSK
-            let udp2raw_key = "nekolink_udp2raw";  // 临时固定密钥，后续可从配置获取
+            // 使用 PSK 前 16 字符作为 udp2raw 密码喵（与服务端保持一致）
+            let udp2raw_key = if psk.len() >= 16 { &psk[..16] } else { psk };
             
             println!("喵！正在为队友 {} 启动 udp2raw 侧车：{} <-> {} (TCP 数据端口: {})", peer_pub_key, local_udp, remote_addr, effective_port);
             
