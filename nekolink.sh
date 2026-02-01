@@ -40,9 +40,47 @@ function show_menu() {
     echo "5. 管理密钥与公钥 (Key Management)"
     echo "6. 配置文件一键检查与修复 (Fix Configs)"
     echo "7. 查看配置文件列表"
-    echo "8. 设置全局信令端口 (Global Signal Port)"
+    echo "8. 高级设置 (Advanced Settings)"
     echo "9. 退出"
     read -p "请输入数字 [1-9]: " choice
+}
+
+function show_advanced_menu() {
+    echo -e "\n${PINK}--- 高级设置探索偏殿 ---${NC}"
+    echo -e "${CYAN}请选择高级魔法：${NC}"
+    echo "1. 设置全局信令端口 (Global Signal Port)"
+    echo "2. 将所有隧道修改为 MTU 自动协商 (MTU Auto-Negotiation)"
+    echo "3. 返回主菜单"
+    read -p "请输入数字 [1-3]: " adv_choice
+}
+
+function set_all_tunnels_auto_mtu() {
+    echo -e "\n${PINK}--- 正在批量施展全隧道自动 MTU 魔法 ---${NC}"
+    configs=("$CONFIG_DIR"/*.json)
+    if [ ! -e "${configs[0]}" ]; then
+        echo -e "${CYAN}目录里空荡荡的喵，没有发现配置文件。${NC}"
+        return
+    fi
+
+    echo -e "${CYAN}确定要将所有接口的 MTU 设为 0 (自动协商) 吗喵？${NC}"
+    read -p "输入 y 确认: " confirm
+    if [ "$confirm" != "y" ]; then
+        echo -e "${PINK}魔法中断。保持现状喵。${NC}"
+        return
+    fi
+
+    for cfg in "${configs[@]}"; do
+        ifname=$(basename "$cfg" .json)
+        if [ "$ifname" == "global" ]; then continue; fi
+        
+        echo -e "${CYAN}处理接口 [$ifname] ...${NC}"
+        tmp_cfg=$(mktemp)
+        jq '.mtu = 0' "$cfg" > "$tmp_cfg"
+        mv "$tmp_cfg" "$cfg"
+    done
+    
+    echo -e "${PINK}批量操作完成喵！所有隧道现在都已开启 MTU 自动协商魔法。(〃'▽'〃)${NC}"
+    echo -e "${CYAN}提示：重启服务后生效喵。${NC}"
 }
 
 function edit_config() {
@@ -535,7 +573,15 @@ while true; do
         5) manage_keys ;;
         6) check_and_fix_configs ;;
         7) ls -l "$CONFIG_DIR"/*.json ;;
-        8) set_global_signal_port ;;
+        8) 
+            show_advanced_menu
+            case $adv_choice in
+                1) set_global_signal_port ;;
+                2) set_all_tunnels_auto_mtu ;;
+                3) continue ;;
+                *) echo "无效选择喵！" ;;
+            esac
+            ;;
         9) exit 0 ;;
         *) echo "无效选择喵！" ;;
     esac
