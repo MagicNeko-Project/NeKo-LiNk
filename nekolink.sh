@@ -40,8 +40,9 @@ function show_menu() {
     echo "5. 管理密钥与公钥 (Key Management)"
     echo "6. 配置文件一键检查与修复 (Fix Configs)"
     echo "7. 查看配置文件列表"
-    echo "8. 退出"
-    read -p "请输入数字 [1-8]: " choice
+    echo "8. 设置全局信令端口 (Global Signal Port)"
+    echo "9. 退出"
+    read -p "请输入数字 [1-9]: " choice
 }
 
 function edit_config() {
@@ -191,14 +192,32 @@ function create_config() {
     if [ "$role_choice" == "1" ]; then
         role="server"
         echo -e "${PINK}提示：作为服务端，请确保你的信令通道和数据协议号在防火墙已放行喵！${NC}"
+        server_ip=""
+        server_signal_port=""
         endpoint=""
     else
         role="client"
-        echo -e "${PINK}提示：请务必输入服务端的公网 IP 和信令端口 (通常为 12580) 喵！${NC}"
-        read -p "请输入服务端的公网端点 ( IP:服务端信令端口, 示例 1.2.3.4:12580 ): " endpoint
-        while [ -z "$endpoint" ]; do
-            read -p "客户端必须指定对端地址喵！请重新输入: " endpoint
+        echo -e "${PINK}--- 请分别输入服务端的连接信息 ---${NC}"
+        
+        read -p "请输入服务端的公网 IP 地址 (例如 1.2.3.4): " server_ip
+        while [ -z "$server_ip" ]; do
+            read -p "客户端必须指定服务端 IP 喵！请重新输入: " server_ip
         done
+        
+        # 读取全局信令端口作为默认值
+        global_json="$CONFIG_DIR/global.json"
+        if [ -f "$global_json" ]; then
+            default_signal_port=$(jq -r '.signal_port // 12580' "$global_json")
+        else
+            default_signal_port=12580
+        fi
+        
+        read -p "请输入服务端的信令端口 (默认 $default_signal_port): " server_signal_port
+        [ -z "$server_signal_port" ] && server_signal_port=$default_signal_port
+        
+        # 组合成 endpoint
+        endpoint="${server_ip}:${server_signal_port}"
+        echo -e "${CYAN}已配置连接目标: $endpoint${NC}"
     fi
 
     echo -e "\n${CYAN}选择数据传输模式：${NC}"
@@ -215,11 +234,12 @@ function create_config() {
             ;;
         3)
             mode="tcp"
-            echo -e "${PINK}... 使用 Fake-TCP 模式喵（Phantun 会自动启动、自动配置 nftables，无需手动操作）${NC}"
+            echo -e "${PINK}... 使用 Fake-TCP 模式喵！${NC}"
+            echo -e "${CYAN}Phantun 数据端口将通过信令自动协商，无需手动设置喵。${NC}"
+            echo -e "${CYAN}WireGuard 在 Phantun 隧道内运行，完全自动化喵！${NC}"
             proto="null"
-            read -p "请输入 Phantun 数据端口 ( 默认 4567 ): " tcp_data_port
-            [ -z "$tcp_data_port" ] && tcp_data_port=4567
-            read -p "请输入 WireGuard 监听端口 ( 0 为自动协商, 默认 0 ): " listen_port
+            tcp_data_port=0  # 0 表示自动协商
+            read -p "请输入 WireGuard 监听端口 ( 0 为自动, 默认 0 ): " listen_port
             [ -z "$listen_port" ] && listen_port=0
             ;;
         *)
@@ -470,6 +490,37 @@ function check_and_fix_configs() {
     echo -e "${PINK}所有配置检查与迁移完毕喵！${NC}"
 }
 
+function set_global_signal_port() {
+    echo -e "\n${PINK}--- 全局信令端口设置魔法 ---${NC}"
+    global_json="$CONFIG_DIR/global.json"
+    
+    # 读取当前值
+    if [ -f "$global_json" ]; then
+        curr_port=$(jq -r '.signal_port // 12580' "$global_json")
+    else
+        curr_port=12580
+    fi
+    
+    echo -e "${CYAN}当前全局信令端口: $curr_port${NC}"
+    read -p "请输入新的信令端口 (直接回车保持不变): " new_port
+    
+    if [ -z "$new_port" ]; then
+        echo -e "${PINK}保持原端口不变喵！${NC}"
+        return
+    fi
+    
+    # 验证是否为数字
+    if ! [[ "$new_port" =~ ^[0-9]+$ ]]; then
+        echo -e "${CYAN}喵？输入的不是有效端口号喵！${NC}"
+        return
+    fi
+    
+    # 写入 global.json
+    echo "{\"signal_port\": $new_port}" > "$global_json"
+    echo -e "${PINK}全局信令端口已更新为: $new_port 喵！${NC}"
+    echo -e "${CYAN}提示：修改后请重启 nekolink 服务以生效喵。${NC}"
+}
+
 while true; do
     show_menu
     case $choice in
@@ -484,7 +535,8 @@ while true; do
         5) manage_keys ;;
         6) check_and_fix_configs ;;
         7) ls -l "$CONFIG_DIR"/*.json ;;
-        8) exit 0 ;;
+        8) set_global_signal_port ;;
+        9) exit 0 ;;
         *) echo "无效选择喵！" ;;
     esac
 done
