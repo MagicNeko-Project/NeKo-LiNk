@@ -3,6 +3,12 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v2.4.7 (2026-02-01)
+- 喵喵！**TCP 模式极简化体验**，一键开启 Fake-TCP 隧道：
+    - **服务端全自动**: 只需配置 `"mode": "tcp"` + 空 peers，`phantun-server` 会自动启动喵！
+    - **客户端全自动**: 配置 peers.endpoint 后，`phantun-client` 侧车会在信令握手时自动启动。
+    - **零配置负担**: 不再需要手动运行任何 Phantun 命令，一切由 `nekolink-ctl` 统一调度。
+
 ## v2.4.6 (2026-01-31)
 - 喵呜！**Phantun 联动完善修复**，解决了 v2.4.5 发现的集成问题：
     - **二进制部署**: `phantun-client` 和 `phantun-server` 现已纳入 deb 安装包，并自动设置 `CAP_NET_ADMIN` 能力。
