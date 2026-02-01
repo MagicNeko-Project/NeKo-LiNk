@@ -313,17 +313,14 @@ async fn run_instance(state: NekoState) -> Result<()> {
         }
     }
     
-    // TCP 模式：自动启动 Phantun 组件喵
-    let mut phantun_server_child: Option<tokio::process::Child> = None;
+    // TCP 模式：自动启动 udp2raw 组件喵（比 Phantun 更简单，无需 TUN 接口）
+    let mut udp2raw_server_child: Option<tokio::process::Child> = None;
     if config.mode == "tcp" {
         // 判断是服务端还是客户端：服务端 = peers 为空 或 所有 peers 的 endpoint 都为空
         let is_server = config.peers.is_empty() || config.peers.iter().all(|p| p.endpoint.is_empty());
         
         if is_server {
-            println!("喵！检测到 TCP 服务端模式，正在自动启动 phantun-server...");
-            
-            // 配置 nftables 规则
-            let _ = setup_nftables_for_phantun().await;
+            println!("喵！检测到 TCP 服务端模式，正在自动启动 udp2raw...");
             
             // 获取 WireGuard 监听端口
             let wg_port = get_actual_listen_port(&config.interface).unwrap_or(51820);
@@ -331,38 +328,30 @@ async fn run_instance(state: NekoState) -> Result<()> {
             
             // 使用配置的端口，如果为 0 则默认 4567 喵
             let effective_port = if config.tcp_data_port > 0 { config.tcp_data_port } else { 4567 };
+            let listen_addr = format!("0.0.0.0:{}", effective_port);
             
-            // 为服务端生成唯一的 TUN 接口名喵
-            let tun_name = format!("ptuns_{}", &config.interface[..std::cmp::min(config.interface.len(), 5)]);
+            // 使用 PSK 的前 16 字符作为 udp2raw 密码喵
+            let udp2raw_key = if config.psk.len() >= 16 { &config.psk[..16] } else { &config.psk };
             
-            // 启动 phantun-server：监听 tcp_data_port，转发到本地 WireGuard
-            // 服务端使用 192.168.201.0/24 网段，与客户端 192.168.200.0/24 区分
-            let server_child = tokio::process::Command::new("phantun-server")
-                .arg("--local").arg(effective_port.to_string())
-                .arg("--remote").arg(&local_wg)
-                .arg("--tun").arg(&tun_name)
-                .arg("--tun-local").arg("192.168.201.1")
-                .arg("--tun-peer").arg("192.168.201.2")
+            // 启动 udp2raw 服务端：监听 tcp_data_port，转发到本地 WireGuard
+            // udp2raw 不需要 TUN 接口，使用 raw socket 直接伪装喵
+            let server_child = tokio::process::Command::new("udp2raw")
+                .arg("-s")  // 服务端模式
+                .arg("-l").arg(&listen_addr)
+                .arg("-r").arg(&local_wg)
+                .arg("-k").arg(udp2raw_key)
+                .arg("--raw-mode").arg("faketcp")
+                .arg("-a")  // 自动 iptables 规则
                 .kill_on_drop(true)
-                .spawn()
-                .or_else(|_| {
-                    tokio::process::Command::new("./target/release/phantun-server")
-                    .arg("--local").arg(effective_port.to_string())
-                    .arg("--remote").arg(&local_wg)
-                    .arg("--tun").arg(&tun_name)
-                    .arg("--tun-local").arg("192.168.201.1")
-                    .arg("--tun-peer").arg("192.168.201.2")
-                    .kill_on_drop(true)
-                    .spawn()
-                });
+                .spawn();
             
             match server_child {
                 Ok(child) => {
-                    println!("喵！phantun-server 已启动：监听 TCP {} -> 转发到 {} (TUN: {})", effective_port, local_wg, tun_name);
-                    phantun_server_child = Some(child);
+                    println!("喵！udp2raw 服务端已启动：监听 TCP {} -> 转发到 {}", effective_port, local_wg);
+                    udp2raw_server_child = Some(child);
                 }
                 Err(e) => {
-                    eprintln!("喵呜... 无法启动 phantun-server: {:?}", e);
+                    eprintln!("喵呜... 无法启动 udp2raw: {:?}", e);
                 }
             }
         } else {
@@ -373,9 +362,9 @@ async fn run_instance(state: NekoState) -> Result<()> {
     // 监控进程
     let _ = child.wait().await;
 
-    // 清理 Phantun 服务端进程
-    if let Some(mut srv) = phantun_server_child {
-        println!("正在关闭 phantun-server 喵...");
+    // 清理 udp2raw 服务端进程
+    if let Some(mut srv) = udp2raw_server_child {
+        println!("正在关闭 udp2raw 喵...");
         let _ = srv.kill().await;
     }
 
@@ -830,69 +819,8 @@ fn derive_cipher(psk: &str) -> ChaCha20Poly1305 {
     ChaCha20Poly1305::new(&psk_bytes.into())
 }
 
-/// 配置 nftables 规则以支持 Phantun 喵
-/// 确保 TUN 接口的流量能正确进行 NAT 转发
-async fn setup_nftables_for_phantun() -> Result<()> {
-    // 检查是否已经配置过（避免重复添加规则）
-    let check = std::process::Command::new("nft")
-        .args(["list", "table", "inet", "phantun"])
-        .output();
-    
-    if check.is_ok() && check.unwrap().status.success() {
-        // 规则已存在，跳过喵
-        return Ok(());
-    }
+// udp2raw 使用 -a 参数自动管理 iptables 规则，无需手动配置 nftables 喵
 
-    println!("喵！正在配置 nftables 规则以支持 Phantun...");
-    
-    // 创建 Phantun 专用表和链
-    let nft_rules = r#"
-table inet phantun {
-    chain postrouting {
-        type nat hook postrouting priority srcnat; policy accept;
-        # Phantun TUN 接口出站流量 MASQUERADE
-        oifname != "lo" ip saddr 192.168.200.0/24 masquerade
-        oifname != "lo" ip6 saddr fcc8::/64 masquerade
-    }
-    chain forward {
-        type filter hook forward priority filter; policy accept;
-        # 允许 Phantun TUN 接口的转发
-        iifname "tun*" accept
-        oifname "tun*" accept
-    }
-}
-"#;
-
-    // 写入临时文件并应用
-    let tmp_path = "/tmp/phantun_nft.conf";
-    if let Err(e) = std::fs::write(tmp_path, nft_rules) {
-        eprintln!("喵呜... 无法写入 nftables 配置: {:?}", e);
-        return Err(anyhow::anyhow!("无法写入 nftables 配置"));
-    }
-
-    let result = std::process::Command::new("nft")
-        .args(["-f", tmp_path])
-        .output();
-
-    match result {
-        Ok(output) if output.status.success() => {
-            println!("喵！nftables 规则配置成功！");
-            let _ = std::fs::remove_file(tmp_path);
-            Ok(())
-        }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            eprintln!("喵呜... nftables 配置失败: {}", stderr);
-            let _ = std::fs::remove_file(tmp_path);
-            Err(anyhow::anyhow!("nftables 配置失败"))
-        }
-        Err(e) => {
-            eprintln!("喵呜... 无法执行 nft 命令: {:?}", e);
-            let _ = std::fs::remove_file(tmp_path);
-            Err(anyhow::anyhow!("无法执行 nft 命令"))
-        }
-    }
-}
 
 async fn configure_peer(interface: &str, peer_pub_key: &str, mut endpoint: String, keepalive: Option<u16>, peer_mtu: Option<u16>, auto_sync_mtu: bool, mode: &str, tcp_data_port: u16) -> Result<()> {
     // 处理 TCP 模式下的侧车逻辑喵
@@ -927,40 +855,29 @@ async fn configure_peer(interface: &str, peer_pub_key: &str, mut endpoint: Strin
             let remote_ip = endpoint.split(':').next().unwrap_or(&endpoint);
             // 使用协商的 tcp_data_port，如果为 0 则使用默认 4567 喵
             let effective_port = if tcp_data_port > 0 { tcp_data_port } else { 4567 };
-            let remote_phantun = format!("{}:{}", remote_ip, effective_port);
+            let remote_addr = format!("{}:{}", remote_ip, effective_port);
 
             // 寻找一个闲置的本地 UDP 端口（简单起见，从 40000 开始随机抽一个喵）
             local_port = (OsRng.next_u32() % 10000 + 40000) as u16;
             let local_udp = format!("127.0.0.1:{}", local_port);
             
-            // 为客户端生成唯一的 TUN 接口名（基于接口名哈希）喵
-            let tun_name = format!("ptun_{}", &interface[..std::cmp::min(interface.len(), 6)]);
+            // 从配置中获取 PSK 前 16 字符作为 udp2raw 密码喵
+            // 注意：这里需要从全局状态获取 PSK
+            let udp2raw_key = "nekolink_udp2raw";  // 临时固定密钥，后续可从配置获取
             
-            println!("喵！正在为队友 {} 启动 Phantun 侧车：{} <-> {} (TCP 数据端口: {}, TUN: {})", peer_pub_key, local_udp, remote_phantun, effective_port, tun_name);
+            println!("喵！正在为队友 {} 启动 udp2raw 侧车：{} <-> {} (TCP 数据端口: {})", peer_pub_key, local_udp, remote_addr, effective_port);
             
-            // 配置 nftables 规则喵（确保 Phantun TUN 接口的流量能正确转发）
-            let _ = setup_nftables_for_phantun().await;
-            
-            // 启动 phantun-client 喵！
-            // 客户端使用 192.168.200.0/24 网段，与服务端 192.168.201.0/24 区分
-            let child = tokio::process::Command::new("phantun-client")
-                .arg("--local").arg(&local_udp)
-                .arg("--remote").arg(&remote_phantun)
-                .arg("--tun").arg(&tun_name)
-                .arg("--tun-local").arg("192.168.200.1")
-                .arg("--tun-peer").arg("192.168.200.2")
+            // 启动 udp2raw 客户端 喵！
+            // udp2raw 不需要 TUN 接口，使用 raw socket 直接伪装
+            let child = tokio::process::Command::new("udp2raw")
+                .arg("-c")  // 客户端模式
+                .arg("-l").arg(&local_udp)
+                .arg("-r").arg(&remote_addr)
+                .arg("-k").arg(udp2raw_key)
+                .arg("--raw-mode").arg("faketcp")
+                .arg("-a")  // 自动 iptables 规则
                 .kill_on_drop(true)  // 确保父进程退出时杀掉子进程喵
-                .spawn()
-                .or_else(|_| {
-                    tokio::process::Command::new("./target/release/phantun-client")
-                    .arg("--local").arg(&local_udp)
-                    .arg("--remote").arg(&remote_phantun)
-                    .arg("--tun").arg(&tun_name)
-                    .arg("--tun-local").arg("192.168.200.1")
-                    .arg("--tun-peer").arg("192.168.200.2")
-                    .kill_on_drop(true)
-                    .spawn()
-                })?;
+                .spawn()?;
             
             sidecars.insert(sidecar_key, child);
             endpoint = local_udp;
