@@ -358,9 +358,15 @@ async fn run_instance(state: NekoState) -> Result<()> {
     println!("正在启用网卡 {} 喵...", config.interface);
     run_cmd(&format!("ip link set up dev {}", config.interface)).context("启用网卡失败")?;
     
-    println!("正在配置 IP 地址 {} 到 {}...", config.local_address, config.interface);
-    let _ = run_cmd(&format!("ip addr del {} dev {} 2>/dev/null", config.local_address, config.interface));
-    run_cmd(&format!("ip addr add {} dev {}", config.local_address, config.interface)).context("添加 IP 失败")?;
+    // 支持多个地址（逗号分隔），同时配置 IPv4 和 IPv6 喵
+    let addresses: Vec<&str> = config.local_address.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+    for addr in &addresses {
+        println!("正在配置 IP 地址 {} 到 {}...", addr, config.interface);
+        let _ = run_cmd(&format!("ip addr del {} dev {} 2>/dev/null", addr, config.interface));
+        if let Err(e) = run_cmd(&format!("ip addr add {} dev {}", addr, config.interface)) {
+            eprintln!("喵呜... 添加地址 {} 失败: {:?}", addr, e);
+        }
+    }
 
     println!("正在设置 MTU {} 到 {}...", mtu, config.interface);
     run_cmd(&format!("ip link set mtu {} dev {}", mtu, config.interface)).context("设置 MTU 失败")?;

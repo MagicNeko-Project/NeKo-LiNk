@@ -116,9 +116,17 @@ function import_wgquick_config() {
         if [ "$current_section" == "interface" ]; then
             case "$key" in
                 PrivateKey) private_key="$value" ;;
-                Address) address="$value" ;;
+                Address) 
+                    # 支持多个 Address，用逗号分隔合并
+                    if [ -z "$address" ]; then
+                        address="$value"
+                    else
+                        address="$address, $value"
+                    fi
+                    ;;
                 ListenPort) listen_port="$value" ;;
                 MTU) mtu="$value" ;;
+                Mtu) mtu="$value" ;;  # 兼容小写
                 Table) table="$value" ;;
             esac
         elif [ "$current_section" == "peer" ] && [ $peer_idx -ge 0 ]; then
