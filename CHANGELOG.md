@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **WireGuard 兼容模式满血复活**：修复了兼容模式下 UAPI 密钥格式不匹配及域名解析失效的问题。
 - **架构级重构**：内部状态管理由静态 `Vec` 全面升级为动态 `HashMap` + `RwLock` 架构，满足高并发下的读写分离。
 - **信令自适应级联**：全局信令端口或 Raw IP 协议列表变更时，UDP/TCP/RawIP 三大信令管道会自动侦测并执行级联式平滑重启。
+- **动态路由 (FRR/OSPF) 完美适配**：默认禁用多队列以修复 Zebra 报错，并显式开启接口 `multicast` 支持协议邻居发现喵。
 
 ## [2.7.0] - 2026-02-02
 
