@@ -12,6 +12,13 @@ use chacha20poly1305::{aead::{Aead, KeyInit}, ChaCha20Poly1305, Nonce};
 use serde::{Deserialize, Serialize};
 use x25519_dalek::{PublicKey, StaticSecret};
 use socket2::{Domain, Protocol, Socket, Type};
+use tokio_util::sync::CancellationToken;
+
+struct InstanceHandle {
+    state: NekoState,
+    token: CancellationToken,
+    task: tokio::task::JoinHandle<()>,
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct PeerConfig {
@@ -171,6 +178,21 @@ async fn main() -> Result<()> {
                 let mode = args.get(3).map(|s| s.as_str()).unwrap_or("udp");
                 return probe_mtu_cmd(endpoint, mode).await;
             }
+            "reload" => {
+                let pid_path = "/var/run/nekolink-ctl.pid";
+                if let Ok(pid_str) = fs::read_to_string(pid_path) {
+                    if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                        use nix::sys::signal::{kill, Signal};
+                        use nix::unistd::Pid;
+                        if let Ok(_) = kill(Pid::from_raw(pid), Signal::SIGHUP) {
+                            println!("喵！已向主进程 (PID: {}) 发送重载信号。", pid);
+                            return Ok(());
+                        }
+                    }
+                }
+                eprintln!("喵呜... 找不到运行中的 NekoLink 主进程，请检查服务是否已启动喵。");
+                std::process::exit(1);
+            }
             _ => {
                 eprintln!("喵？不支持的指令: '{}'。如果您想启动服务，请不要带参数喵。", args[1]);
                 std::process::exit(1);
@@ -179,107 +201,230 @@ async fn main() -> Result<()> {
     }
 
     println!("ฅ^•ﻌ•^ฅ NekoLink 控制平面启动中...");
+    
+    // 记录 PID 喵
+    let pid = std::process::id();
+    if let Err(e) = fs::write("/var/run/nekolink-ctl.pid", pid.to_string()) {
+        eprintln!("警告：无法写入 PID 文件喵: {:?}", e);
+    }
 
     let config_dir = "/etc/neko-link";
     if !std::path::Path::new(config_dir).exists() {
         fs::create_dir_all(config_dir).context("无法创建配置目录")?;
     }
 
-    let mut global_config = GlobalConfig::default();
-    let global_path = format!("{}/global.json", config_dir);
-    if fs::metadata(&global_path).is_ok() {
-        if let Ok(content) = fs::read_to_string(&global_path) {
-            if let Ok(conf) = serde_json::from_str::<GlobalConfig>(&content) {
-                global_config = conf;
-                println!("喵！成功加载全局配置：信令端口 = {}", global_config.signal_port);
-            }
-        }
-    }
-
-    let mut configs = vec![];
-    for entry in glob::glob(&format!("{}/*.json", config_dir))? {
-        let path = entry?;
-        if path.file_name().and_then(|n| n.to_str()) == Some("global.json") { continue; }
-        
-        let config_str = fs::read_to_string(&path)?;
-        let config: NekoConfig = match serde_json::from_str(&config_str) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("解析配置文件 {:?} 失败喵: {:?}", path, e);
-                continue;
-            }
-        };
-        configs.push(config);
-    }
-
-    if configs.is_empty() {
-        println!("喵？没有发现任何配置文件在 {}/。请添加 *.json 文件喵！", config_dir);
-        return Ok(());
-    }
-
-    // 预处理所有状态 (加载/生成密钥)
-    let mut states = vec![];
-    for config in configs {
-        let (priv_b64, _, pub_key) = load_or_generate_keys(&config.interface)?;
-        states.push(NekoState { config, priv_b64, pub_key });
-    }
-    let states = Arc::new(states);
-
-    // 启动全局信令管理器 (独立模块运行，互不干扰喵)
-    let signaling_states = Arc::clone(&states);
-    let signal_port = global_config.signal_port;
-    tokio::spawn(async move {
-        println!("ฅ^•ﻌ•^ฅ 全局信令中枢计划启用端口：{}", signal_port);
-        
-        println!("ฅ^•ﻌ•^ฅ 全局信令中枢：UDP 管线启动...");
-        let s1 = Arc::clone(&signaling_states);
-        tokio::spawn(async move { if let Err(e) = run_global_udp_signaling(s1, signal_port).await { eprintln!("UDP 信令管线异常退出喵: {:?}", e); } });
-
-        println!("ฅ^•ﻌ•^ฅ 全局信令中枢：TCP 管线启动...");
-        let s2 = Arc::clone(&signaling_states);
-        tokio::spawn(async move { if let Err(e) = run_global_tcp_signaling(s2, signal_port).await { eprintln!("TCP 信令管线异常退出喵: {:?}", e); } });
-
-        // 收集所有 Raw IP 使用的协议号喵
-        let mut raw_protos = std::collections::HashSet::new();
-        for s in signaling_states.iter() {
-            if s.config.mode == "ip" {
-                if let Some(p) = s.config.ip_protocol {
-                    raw_protos.insert(p);
-                } else {
-                    raw_protos.insert(141); // 默认协议号
+    let load_configs = || -> Result<(GlobalConfig, Vec<NekoConfig>)> {
+        let mut global_config = GlobalConfig::default();
+        let global_path = format!("{}/global.json", config_dir);
+        if fs::metadata(&global_path).is_ok() {
+            if let Ok(content) = fs::read_to_string(&global_path) {
+                if let Ok(conf) = serde_json::from_str::<GlobalConfig>(&content) {
+                    global_config = conf;
                 }
             }
         }
 
-        for proto in raw_protos {
-            println!("ฅ^•ﻌ•^ฅ 全局信令中枢：Raw IP (协议 {}) 管线启动...", proto);
-            let s3 = Arc::clone(&signaling_states);
-            tokio::spawn(async move { if let Err(e) = run_global_raw_signaling(s3, proto).await { eprintln!("Raw IP (协议 {}) 信令管线异常退出喵: {:?}", proto, e); } });
-        }
-    });
-
-    let mut handles = vec![];
-    for state in states.iter() {
-        let state_clone = state.clone();
-        let handle = tokio::spawn(async move {
-            loop {
-                let state_inner = state_clone.clone();
-                if let Err(e) = run_instance(state_inner).await {
-                    eprintln!("实例 {} 运行出错喵: {:?}。正在尝试重启...", state_clone.config.interface, e);
-                } else {
-                    println!("实例 {} 已退出喵。正在尝试重启...", state_clone.config.interface);
+        let mut configs = vec![];
+        for entry in glob::glob(&format!("{}/*.json", config_dir))? {
+            let path = entry?;
+            if path.file_name().and_then(|n| n.to_str()) == Some("global.json") { continue; }
+            
+            let config_str = fs::read_to_string(&path)?;
+            let config: NekoConfig = match serde_json::from_str(&config_str) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("解析配置文件 {:?} 失败喵: {:?}", path, e);
+                    continue;
                 }
-                time::sleep(Duration::from_secs(5)).await;
+            };
+            configs.push(config);
+        }
+        Ok((global_config, configs))
+    };
+
+    let (mut current_global, initial_configs) = load_configs()?;
+    println!("喵！成功加载初始配置，发现 {} 个接口喵。", initial_configs.len());
+    
+    let active_instances: Arc<tokio::sync::RwLock<HashMap<String, InstanceHandle>>> = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+    
+    // 信号监听喵
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut sighup = signal(SignalKind::hangup())?;
+    
+    // 全局取消令牌，用于信令管理器在端口变更时重启喵
+    let signaling_token = Arc::new(Mutex::new(CancellationToken::new()));
+
+    // 内部函数：启动信令管理器喵
+    let start_signaling_tasks = |global: GlobalConfig, instances: Arc<tokio::sync::RwLock<HashMap<String, InstanceHandle>>>, token: CancellationToken| {
+        println!("ฅ^•ﻌ•^ฅ 全局信令中枢计划启用端口：{}", global.signal_port);
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = token.cancelled() => {
+                    println!("ฅ^•ﻌ•^ฅ 全局信令中枢：正在因重载而停止端口 {} 的管线喵。", global.signal_port);
+                }
+                _ = async {
+                    let i1 = Arc::clone(&instances);
+                    let t1 = token.clone();
+                    tokio::spawn(async move { if let Err(e) = run_global_udp_signaling_dynamic(i1, global.signal_port, t1).await { eprintln!("UDP 信令管线异常退出喵: {:?}", e); } });
+
+                    println!("ฅ^•ﻌ•^ฅ 全局信令中枢：TCP 管线启动...");
+                    let i2 = Arc::clone(&instances);
+                    let t2 = token.clone();
+                    tokio::spawn(async move { if let Err(e) = run_global_tcp_signaling_dynamic(i2, global.signal_port, t2).await { eprintln!("TCP 信令管线异常退出喵: {:?}", e); } });
+
+                    // 收集所有 Raw IP 使用的协议号并启动喵
+                    // 注意：这里简化处理，只在信令启动时扫描一次协议号，或者可以后续动态扫描喵
+                    let raw_protos = {
+                        let lock = instances.read().await;
+                        let mut set = std::collections::HashSet::new();
+                        for inst in lock.values() {
+                            if inst.state.config.mode == "ip" {
+                                set.insert(inst.state.config.ip_protocol.unwrap_or(141));
+                            }
+                        }
+                        set
+                    };
+
+                    for proto in raw_protos {
+                        println!("ฅ^•ﻌ•^ฅ 全局信令中枢：Raw IP (协议 {}) 管线启动...", proto);
+                        let i3 = Arc::clone(&instances);
+                        let t3 = token.clone();
+                        tokio::spawn(async move { if let Err(e) = run_global_raw_signaling_dynamic(i3, proto, t3).await { eprintln!("Raw IP (协议 {}) 信令管线异常退出喵: {:?}", proto, e); } });
+                    }
+                    
+                    // 挂起保持此线程运行喵
+                    std::future::pending::<()>().await;
+                } => {}
             }
         });
-        handles.push(handle);
+    };
+
+    // 初始启动逻辑喵
+    {
+        let mut instances = active_instances.write().await;
+        for config in initial_configs {
+            let iface = config.interface.clone();
+            let (priv_b64, _, pub_key) = load_or_generate_keys(&iface)?;
+            let state = NekoState { config, priv_b64, pub_key };
+            let token = CancellationToken::new();
+            let token_clone = token.clone();
+            let state_clone = state.clone();
+            
+            let task = tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = token_clone.cancelled() => break,
+                        res = run_instance(state_clone.clone()) => {
+                            if let Err(e) = res {
+                                eprintln!("实例 {} 出错喵: {:?}。5秒后重启...", state_clone.config.interface, e);
+                            }
+                            tokio::select! {
+                                _ = token_clone.cancelled() => break,
+                                _ = time::sleep(Duration::from_secs(5)) => {}
+                            }
+                        }
+                    }
+                }
+                println!("实例 {} 已彻底停止喵。", state_clone.config.interface);
+            });
+            
+            instances.insert(iface, InstanceHandle { state, token, task });
+        }
+        
+        // 初始启动信令喵
+        let token = CancellationToken::new();
+        start_signaling_tasks(current_global.clone(), Arc::clone(&active_instances), token.clone());
+        *signaling_token.lock().unwrap() = token;
     }
 
-    for h in handles {
-        let _ = h.await;
-    }
+    println!("ฅ^•ﻌ•^ฅ NekoLink 已进入长效监听模式，支持 SIGHUP 热重载喵！");
 
-    Ok(())
+    // 服务主循环，等待热重载信号喵
+    loop {
+        sighup.recv().await;
+        println!("\nฅ^•ﻌ•^ฅ 接收到 SIGHUP 信号，正在施展热重载魔法...");
+        
+        match load_configs() {
+            Ok((new_global, new_configs)) => {
+                // 1. 检查全局信令端口是否变更喵
+                if new_global.signal_port != current_global.signal_port {
+                    println!("喵！检测到信令端口变更 {} -> {}", current_global.signal_port, new_global.signal_port);
+                    signaling_token.lock().unwrap().cancel();
+                    let new_token = CancellationToken::new();
+                    start_signaling_tasks(new_global.clone(), Arc::clone(&active_instances), new_token.clone());
+                    *signaling_token.lock().unwrap() = new_token;
+                    current_global = new_global;
+                }
+
+                // 2. 更新接口喵
+                let mut instances = active_instances.write().await;
+                let mut next_instances = HashMap::new();
+                
+                // 处理新配置和待更新配置喵
+                for config in new_configs {
+                    let iface = config.interface.clone();
+                    
+                    let should_restart = if let Some(old_h) = instances.get(&iface) {
+                        // 简单对比 JSON 序列化结果来判断是否有变化喵
+                        serde_json::to_string(&old_h.state.config).unwrap() != serde_json::to_string(&config).unwrap()
+                    } else {
+                        true // 新接口
+                    };
+
+                    if should_restart {
+                        if let Some(old_h) = instances.remove(&iface) {
+                            println!("喵！检测到配置变更，正在重启接口 {}...", iface);
+                            old_h.token.cancel();
+                            let _ = old_h.task.await; // 等待旧任务彻底结束喵
+                        } else {
+                            println!("喵！检测到新接口 {}，正在启动...", iface);
+                        }
+                        
+                        let (priv_b64, _, pub_key) = load_or_generate_keys(&iface).unwrap_or_else(|_| (String::new(), String::new(), PublicKey::from([0u8; 32])));
+                        let state = NekoState { config: config.clone(), priv_b64, pub_key };
+                        let token = CancellationToken::new();
+                        let token_clone = token.clone();
+                        let state_clone = state.clone();
+                        
+                        let task = tokio::spawn(async move {
+                            loop {
+                                tokio::select! {
+                                    _ = token_clone.cancelled() => break,
+                                    res = run_instance(state_clone.clone()) => {
+                                        if let Err(e) = res {
+                                            eprintln!("实例 {} 出错喵: {:?}。5秒后重启...", state_clone.config.interface, e);
+                                        }
+                                        tokio::select! {
+                                            _ = token_clone.cancelled() => break,
+                                            _ = time::sleep(Duration::from_secs(5)) => {}
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                        next_instances.insert(iface, InstanceHandle { state, token, task });
+                    } else {
+                        // 保持原样喵
+                        if let Some(old_h) = instances.remove(&iface) {
+                            next_instances.insert(iface, old_h);
+                        }
+                    }
+                }
+
+                // 3. 清理已删除的接口喵
+                for (iface, old_h) in instances.drain() {
+                    println!("喵！检测到接口 {} 已从配置中移除，正在停止...", iface);
+                    old_h.token.cancel();
+                }
+                
+                *instances = next_instances;
+                println!("ฅ^•ﻌ•^ฅ 热重载魔法施展完成！目前运行 {} 个接口喵。", instances.len());
+            }
+            Err(e) => {
+                eprintln!("喵呜... 热重载加载配置失败: {:?}", e);
+            }
+        }
+    }
 }
 
 async fn send_uapi(interface: &str, commands: &str) -> Result<()> {
@@ -518,18 +663,24 @@ async fn run_instance(state: NekoState) -> Result<()> {
 }
 
 
-async fn run_global_udp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16) -> Result<()> {
+async fn run_global_udp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<HashMap<String, InstanceHandle>>>, signal_port: u16, token: CancellationToken) -> Result<()> {
     // 全局绑定
     let std_socket = std::net::UdpSocket::bind(format!("0.0.0.0:{}", signal_port))?;
     std_socket.set_nonblocking(true)?;
     let socket = Arc::new(tokio::net::UdpSocket::from_std(std_socket)?);
 
     let send_task = {
-        let states = Arc::clone(&states);
+        let instances = Arc::clone(&instances);
         let socket = Arc::clone(&socket);
         async move {
             loop {
-                for state in states.iter() {
+                // 快照当前实例列表喵
+                let current_states: Vec<NekoState> = {
+                    let lock = instances.read().await;
+                    lock.values().map(|h| h.state.clone()).collect()
+                };
+
+                for state in current_states {
                     // 跳过非 UDP 模式、空公钥、以及 WireGuard 兼容模式的接口喵
                     if state.config.mode != "udp" || state.pub_key.as_bytes() == &[0u8; 32] || state.config.native_wg_compat { continue; }
                     
@@ -569,7 +720,7 @@ async fn run_global_udp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                                 if let Err(e) = socket.send_to(&pkt, addr).await {
                                     eprintln!("UDP 信令推送失败喵 ({}): {:?}", state.config.interface, e);
                                 } else {
-                                    println!("喵！已向对端 {} 主动推送 {} (UDP) 信令盒。", addr, signal_port);
+                                    // println!("喵！已向对端 {} 主动推送 {} (UDP) 信令盒。", addr, signal_port);
                                 }
                             }
                         }
@@ -581,7 +732,7 @@ async fn run_global_udp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
     };
 
     let recv_task = {
-        let states = Arc::clone(&states);
+        let instances = Arc::clone(&instances);
         let socket = Arc::clone(&socket);
         async move {
             let mut buf = [0u8; 1024];
@@ -591,7 +742,12 @@ async fn run_global_udp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                     let (nonce_part, encrypted_part) = buf[..len].split_at(12);
                     let nonce = Nonce::from_slice(nonce_part);
 
-                    for state in states.iter() {
+                    let current_states: Vec<NekoState> = {
+                        let lock = instances.read().await;
+                        lock.values().map(|h| h.state.clone()).collect()
+                    };
+
+                    for state in current_states {
                         // 跳过非 UDP 模式和 WireGuard 兼容模式的接口喵
                         if state.config.mode != "udp" || state.config.native_wg_compat { continue; }
                         let cipher = derive_cipher(&state.config.psk);
@@ -644,22 +800,28 @@ async fn run_global_udp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
     };
 
     tokio::select! {
+        _ = token.cancelled() => {},
         _ = send_task => {},
         _ = recv_task => {},
     }
     Ok(())
 }
 
-async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16) -> Result<()> {
+async fn run_global_tcp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<HashMap<String, InstanceHandle>>>, signal_port: u16, token: CancellationToken) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", signal_port)).await?;
 
-    println!("ฅ^•ﻌ•^ฅ TCP 信令管线就绪，正在监听 {} 端口，监控 {} 个接口喵。", signal_port, states.len());
+    println!("ฅ^•ﻌ•^ฅ TCP 信令管线就绪，正在监听 {} 端口喵。", signal_port);
 
     let send_task = {
-        let states = Arc::clone(&states);
+        let instances = Arc::clone(&instances);
         async move {
             loop {
-                for state in states.iter() {
+                let current_states: Vec<NekoState> = {
+                    let lock = instances.read().await;
+                    lock.values().map(|h| h.state.clone()).collect()
+                };
+
+                for state in current_states {
                     let established = get_established_peers(&state.config.interface).await;
                     // 跳过非 TCP/IP 模式、空公钥、以及 WireGuard 兼容模式的接口喵
                     if (state.config.mode != "tcp" && state.config.mode != "ip") || state.pub_key.as_bytes() == &[0u8; 32] || state.config.native_wg_compat {
@@ -694,10 +856,10 @@ async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                             let auto_mtu_enabled = state.config.mtu == Some(0);
                             
                             tokio::spawn(async move {
-                                println!("喵！正在发起 TCP 信令连接: {}...", addr);
+                                // println!("喵！正在发起 TCP 信令连接: {}...", addr);
                                 match time::timeout(Duration::from_secs(10), tokio::net::TcpStream::connect(addr)).await {
                                     Ok(Ok(mut stream)) => {
-                                        println!("喵！TCP 信令连接已建立: {}", addr);
+                                        // println!("喵！TCP 信令连接已建立: {}", addr);
                                         let current_mtu = if is_raw_ip_mode {
                                             if auto_mtu_enabled { get_auto_mtu(&addr.ip().to_string(), "ip").await } else { get_interface_mtu(&interface_inner).unwrap_or(1420) }
                                         } else {
@@ -715,7 +877,7 @@ async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                                             let mut pkt = nonce_bytes.to_vec();
                                             pkt.extend_from_slice(&ciphertext);
                                             if tokio::io::AsyncWriteExt::write_all(&mut stream, &pkt).await.is_ok() {
-                                                println!("喵！已向对端推送 12580 信令，等待服务端 Ack...");
+                                                // println!("喵！已向对端推送 12580 信令，等待服务端 Ack...");
                                                 let mut ack_buf = [0u8; 128];
                                                                 match time::timeout(Duration::from_secs(10), tokio::io::AsyncReadExt::read(&mut stream, &mut ack_buf)).await {
                                                                     Ok(Ok(n)) if n >= 12 + 32 => {
@@ -733,7 +895,6 @@ async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                                                                                     4567 // 默认端口
                                                                                 };
                                                                                 if peer_tunnel_port == 0 && !is_raw_ip_mode {
-                                                                                    println!("喵呜... 收到来自 {} 的 ACK，但隧道端口为 0，忽略喵。", addr);
                                                                                     return;
                                                                                 }
 
@@ -744,23 +905,14 @@ async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                                                                                 println!("喵！成功接收 TCP 信令响应 (ACK)：来自 {} (隧道端口: {}, Phantun端口: {})", endpoint, peer_tunnel_port, peer_phantun_port);
                                                                                 let _ = configure_peer(&interface_inner, &peer_pub_key, endpoint, None, peer_mtu, true, &mode_inner, peer_phantun_port, &psk_inner).await;
                                                                             }
-                                                                        } else {
-                                                                            println!("喵呜... 无法解密来自 {} 的 TCP ACK，PSK 匹配吗喵？", addr);
                                                                         }
                                                                     },
-                                                                    Ok(Ok(n)) => println!("喵呜... 来自 {} 的 TCP ACK 长度不足: {} 字节喵。", addr, n),
-                                                                    Ok(Err(e)) => println!("喵呜... 读取来自 {} 的 TCP ACK 出错: {:?} 喵。", addr, e),
-                                                                    Err(_) => println!("喵呜... 等待来自 {} 的 TCP ACK 超时 10 秒喵。", addr),
+                                                                    _ => {}
                                                                 }
                                             }
                                         }
                                     },
-                                    Ok(Err(e)) => {
-                                        println!("喵呜... TCP 连接对端 {} 失败: {:?} (请检查服务端 12580 是否开启喵)", addr, e);
-                                    },
-                                    Err(_) => {
-                                        println!("喵呜... TCP 连接对端 {} 超时喵。", addr);
-                                    }
+                                    _ => {}
                                 }
                             });
                         }
@@ -772,11 +924,11 @@ async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
     };
 
     let recv_task = {
-        let states = Arc::clone(&states);
+        let instances = Arc::clone(&instances);
         async move {
             loop {
                 if let Ok((mut stream, addr)) = listener.accept().await {
-                    let states = Arc::clone(&states);
+                    let instances = Arc::clone(&instances);
                     tokio::spawn(async move {
                         let mut buf = [0u8; 256];
                         if let Ok(Ok(len)) = time::timeout(Duration::from_secs(5), tokio::io::AsyncReadExt::read(&mut stream, &mut buf)).await {
@@ -784,7 +936,12 @@ async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                                 let (nonce_part, encrypted_part) = buf[..len].split_at(12);
                                 let nonce = Nonce::from_slice(nonce_part);
                                 
-                                for state in states.iter() {
+                                let current_states: Vec<NekoState> = {
+                                    let lock = instances.read().await;
+                                    lock.values().map(|h| h.state.clone()).collect()
+                                };
+
+                                for state in current_states {
                                     // 跳过非 TCP/IP 模式和 WireGuard 兼容模式的接口喵
                                     if (state.config.mode != "tcp" && state.config.mode != "ip") || state.config.native_wg_compat { continue; }
                                     let cipher = derive_cipher(&state.config.psk);
@@ -850,13 +1007,14 @@ async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
     };
 
     tokio::select! {
+        _ = token.cancelled() => {},
         _ = send_task => {},
         _ = recv_task => {},
     }
     Ok(())
 }
 
-async fn run_global_raw_signaling(states: Arc<Vec<NekoState>>, proto: u8) -> Result<()> {
+async fn run_global_raw_signaling_dynamic(instances: Arc<tokio::sync::RwLock<HashMap<String, InstanceHandle>>>, proto: u8, token: CancellationToken) -> Result<()> {
     let v4_socket = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::from(proto as i32))).ok();
     
     let v4_socket = v4_socket.map(|s| { s.set_nonblocking(true).unwrap(); Arc::new(tokio::io::unix::AsyncFd::new(s).unwrap()) });
@@ -864,11 +1022,17 @@ async fn run_global_raw_signaling(states: Arc<Vec<NekoState>>, proto: u8) -> Res
     let magic_byte: u8 = 0x99;
 
     let send_task = {
-        let states = Arc::clone(&states);
+        let instances = Arc::clone(&instances);
         let v4_socket = v4_socket.clone();
         async move {
             loop {
-                for state in states.iter() {
+                // 快照当前实例列表喵
+                let current_states: Vec<NekoState> = {
+                    let lock = instances.read().await;
+                    lock.values().map(|h| h.state.clone()).collect()
+                };
+
+                for state in current_states {
                     let st_proto = state.config.ip_protocol.unwrap_or(141);
                     // 跳过非 Raw IP 模式、协议不匹配、空公钥、以及 WireGuard 兼容模式的接口喵
                     if state.config.mode != "ip" || st_proto != proto || state.pub_key.as_bytes() == &[0u8; 32] || state.config.native_wg_compat { continue; }
@@ -917,7 +1081,7 @@ async fn run_global_raw_signaling(states: Arc<Vec<NekoState>>, proto: u8) -> Res
     };
 
     let recv_task = {
-        let states = Arc::clone(&states);
+        let instances = Arc::clone(&instances);
         let v4_socket = v4_socket.clone();
         async move {
             let mut buf = [0u8; 1024];
@@ -929,7 +1093,13 @@ async fn run_global_raw_signaling(states: Arc<Vec<NekoState>>, proto: u8) -> Res
                              if len >= offset + 1 + 12 + 32 && buf[offset] == magic_byte {
                                  let nonce = Nonce::from_slice(&buf[offset+1..offset+13]);
                                  let encrypted = &buf[offset+13..len];
-                                 for state in states.iter() {
+
+                                 let current_states: Vec<NekoState> = {
+                                     let lock = instances.read().await;
+                                     lock.values().map(|h| h.state.clone()).collect()
+                                 };
+
+                                 for state in current_states {
                                      let st_proto = state.config.ip_protocol.unwrap_or(141);
                                      // 跳过非 Raw IP 模式、协议不匹配、以及 WireGuard 兼容模式的接口喵
                                      if state.config.mode != "ip" || st_proto != proto || state.config.native_wg_compat { continue; }
@@ -939,7 +1109,7 @@ async fn run_global_raw_signaling(states: Arc<Vec<NekoState>>, proto: u8) -> Res
                                          let peer_mtu = if decrypted.len() >= 34 { Some(u16::from_be_bytes([decrypted[32], decrypted[33]])) } else { None };
                                          println!("喵！12580 (Raw IP) 识别成功：{} -> {}", ip_addr, state.config.interface);
                                          let _ = configure_peer(&state.config.interface, &BASE64.encode(&decrypted[..32]), ip_addr.to_string(), state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0), "ip", 0, &state.config.psk).await;
-
+ 
                                          // Raw IP 响应喵！
                                          let msg_base = state.pub_key.as_bytes().to_vec();
                                          let current_mtu = if state.config.mtu == Some(0) {
@@ -973,6 +1143,7 @@ async fn run_global_raw_signaling(states: Arc<Vec<NekoState>>, proto: u8) -> Res
     };
 
     tokio::select! {
+        _ = token.cancelled() => {},
         _ = send_task => {},
         _ = recv_task => {},
     }

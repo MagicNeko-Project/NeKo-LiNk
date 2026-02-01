@@ -23,7 +23,7 @@ if [ -f "/usr/local/share/nekolink/VERSION" ]; then
 elif [ -f "VERSION" ]; then
     VERSION=$(cat VERSION)
 else
-    VERSION="2.4.3-unknown"
+    VERSION="2.7.5"
 fi
 echo -e "${PINK}ฅ^•ﻌ•^ฅ 欢迎使用 NekoLink 交互式配置助手 v$VERSION！${NC}"
 echo -e "${CYAN}--- 全局信令通道 [12580] (一按我帮您) 已就绪 ---${NC}"
@@ -35,14 +35,15 @@ function show_menu() {
     echo -e "${CYAN}请选择操作：${NC}"
     echo "1. 创建新配置文件 (Node Config)"
     echo "2. 修改现有配置文件 (Edit Config)"
-    echo "3. 重启 NekoLink 服务 (Systemd Restart)"
-    echo "4. 查看运行状态 (Status)"
-    echo "5. 管理密钥与公钥 (Key Management)"
-    echo "6. 配置文件一键检查与修复 (Fix Configs)"
-    echo "7. 查看配置文件列表"
-    echo "8. 高级设置 (Advanced Settings)"
-    echo "9. 退出"
-    read -p "请输入数字 [1-9]: " choice
+    echo "3. 热重载配置 (Hot Reload)"
+    echo "4. 完全重启 NekoLink 服务 (Systemd Restart)"
+    echo "5. 查看运行状态 (Status)"
+    echo "6. 管理密钥与公钥 (Key Management)"
+    echo "7. 配置文件一键检查与修复 (Fix Configs)"
+    echo "8. 查看配置文件列表"
+    echo "9. 高级设置 (Advanced Settings)"
+    echo "10. 退出"
+    read -p "请输入数字 [1-10]: " choice
 }
 
 function show_advanced_menu() {
@@ -205,10 +206,10 @@ EOF
     echo -e "${CYAN}兼容模式: native_wg_compat=true${NC}"
     echo -e "\n${PINK}配置已保存到: $json_path 喵！${NC}"
     
-    read -p "是否立即重启服务以应用配置？(y/n, 默认 n): " restart_now
-    if [ "$restart_now" == "y" ]; then
-        systemctl restart nekolink
-        echo -e "${PINK}服务已重启喵！${NC}"
+    read -p "是否立即重载服务以应用新配置？(y/n, 默认 n): " reload_now
+    if [ "$reload_now" == "y" ]; then
+        nekolink-ctl reload
+        echo -e "${PINK}配置已重载喵！${NC}"
     fi
 }
 
@@ -367,10 +368,10 @@ function edit_config() {
     
     mv "$tmp_cfg" "$selected_cfg"
     echo -e "${PINK}配置更新成功喵！${NC}"
-    read -p "是否立即重启服务以应用新配置？(y/n, 默认 n): " restart_now
-    if [ "$restart_now" == "y" ]; then
-        systemctl restart nekolink
-        echo -e "${PINK}服务已重启喵！${NC}"
+    read -p "是否立即重载服务以应用新配置？(y/n, 默认 n): " reload_now
+    if [ "$reload_now" == "y" ]; then
+        nekolink-ctl reload
+        echo -e "${PINK}配置已重载喵！${NC}"
     fi
 }
 
@@ -722,16 +723,21 @@ while true; do
     case $choice in
         1) create_config ;;
         2) edit_config ;;
-        3) 
+        3)
+            echo -e "${PINK}正在通过 SIGHUP 施展热重载魔法...${NC}"
+            nekolink-ctl reload
+            echo -e "${PINK}热重载指令已发送喵！可以使用选项 5 查看最新状态。${NC}"
+            ;;
+        4) 
             echo -e "${PINK}正在通过 Systemd 重启 NekoLink 魔法...${NC}"
             systemctl restart nekolink
-            echo -e "${PINK}重启指令已发送喵！可以使用选项 4 查看最新状态。${NC}"
+            echo -e "${PINK}重启指令已发送喵！可以使用选项 5 查看最新状态。${NC}"
             ;;
-        4) nekolink status ;;
-        5) manage_keys ;;
-        6) check_and_fix_configs ;;
-        7) ls -l "$CONFIG_DIR"/*.json ;;
-        8) 
+        5) nekolink status ;;
+        6) manage_keys ;;
+        7) check_and_fix_configs ;;
+        8) ls -l "$CONFIG_DIR"/*.json ;;
+        9) 
             show_advanced_menu
             case $adv_choice in
                 1) set_global_signal_port ;;
@@ -741,7 +747,7 @@ while true; do
                 *) echo "无效选择喵！" ;;
             esac
             ;;
-        9) exit 0 ;;
+        10) exit 0 ;;
         *) echo "无效选择喵！" ;;
     esac
 done
