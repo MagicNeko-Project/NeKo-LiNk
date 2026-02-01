@@ -313,8 +313,56 @@ async fn run_instance(state: NekoState) -> Result<()> {
         }
     }
     
+    // TCP 模式：自动启动 Phantun 组件喵
+    let mut phantun_server_child: Option<tokio::process::Child> = None;
+    if config.mode == "tcp" {
+        // 判断是服务端还是客户端：服务端 = peers 为空 或 所有 peers 的 endpoint 都为空
+        let is_server = config.peers.is_empty() || config.peers.iter().all(|p| p.endpoint.is_empty());
+        
+        if is_server {
+            println!("喵！检测到 TCP 服务端模式，正在自动启动 phantun-server...");
+            
+            // 配置 nftables 规则
+            let _ = setup_nftables_for_phantun().await;
+            
+            // 获取 WireGuard 监听端口
+            let wg_port = get_actual_listen_port(&config.interface).unwrap_or(51820);
+            let local_wg = format!("127.0.0.1:{}", wg_port);
+            
+            // 启动 phantun-server：监听 tcp_data_port，转发到本地 WireGuard
+            let server_child = tokio::process::Command::new("phantun-server")
+                .arg("--local").arg(config.tcp_data_port.to_string())
+                .arg("--remote").arg(&local_wg)
+                .spawn()
+                .or_else(|_| {
+                    tokio::process::Command::new("./target/release/phantun-server")
+                    .arg("--local").arg(config.tcp_data_port.to_string())
+                    .arg("--remote").arg(&local_wg)
+                    .spawn()
+                });
+            
+            match server_child {
+                Ok(child) => {
+                    println!("喵！phantun-server 已启动：监听 TCP {} -> 转发到 {}", config.tcp_data_port, local_wg);
+                    phantun_server_child = Some(child);
+                }
+                Err(e) => {
+                    eprintln!("喵呜... 无法启动 phantun-server: {:?}", e);
+                }
+            }
+        } else {
+            println!("喵！检测到 TCP 客户端模式，侧车将在信令握手时自动启动喵。");
+        }
+    }
+    
     // 监控进程
     let _ = child.wait().await;
+
+    // 清理 Phantun 服务端进程
+    if let Some(mut srv) = phantun_server_child {
+        println!("正在关闭 phantun-server 喵...");
+        let _ = srv.kill().await;
+    }
 
     println!("正在清理接口 {} 喵...", config.interface);
     if config.clamp_mss {
