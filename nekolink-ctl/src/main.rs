@@ -823,8 +823,8 @@ async fn run_global_tcp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
 
                 for state in current_states {
                     let established = get_established_peers(&state.config.interface).await;
-                    // 跳过非 TCP/IP 模式、空公钥、以及 WireGuard 兼容模式的接口喵
-                    if (state.config.mode != "tcp" && state.config.mode != "ip") || state.pub_key.as_bytes() == &[0u8; 32] || state.config.native_wg_compat {
+                    // 跳过非 TCP 模式、空公钥、以及 WireGuard 兼容模式的接口喵
+                    if state.config.mode != "tcp" || state.pub_key.as_bytes() == &[0u8; 32] || state.config.native_wg_compat {
                         continue;
                     }
                     
@@ -942,8 +942,8 @@ async fn run_global_tcp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                                 };
 
                                 for state in current_states {
-                                    // 跳过非 TCP/IP 模式和 WireGuard 兼容模式的接口喵
-                                    if (state.config.mode != "tcp" && state.config.mode != "ip") || state.config.native_wg_compat { continue; }
+                                    // 跳过非 TCP 模式和 WireGuard 兼容模式的接口喵
+                                    if state.config.mode != "tcp" || state.config.native_wg_compat { continue; }
                                     let cipher = derive_cipher(&state.config.psk);
                                     if let Ok(decrypted) = cipher.decrypt(nonce, encrypted_part) {
                                         if decrypted.len() >= 36 {
