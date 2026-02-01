@@ -332,26 +332,38 @@ async fn run_instance(state: NekoState) -> Result<()> {
             
             // 使用 PSK 的前 16 字符作为 udp2raw 密码喵
             let udp2raw_key = if config.psk.len() >= 16 { &config.psk[..16] } else { &config.psk };
+
+            // 检查系统是否有 iptables 喵
+            let has_iptables = check_command_exists("iptables");
+            let mut cmd = tokio::process::Command::new("udp2raw");
+            cmd.arg("-s")  // 服务端模式
+               .arg("-l").arg(&listen_addr)
+               .arg("-r").arg(&local_wg)
+               .arg("-k").arg(udp2raw_key)
+               .arg("--raw-mode").arg("faketcp")
+               .kill_on_drop(true);
+
+            if has_iptables {
+                cmd.arg("-a"); // 如果有 iptables，继续使用自动模式喵
+            } else {
+                // 如果没有 iptables，我们手动用 nftables 挡一下喵
+                let _ = setup_udp2raw_nft_rules(effective_port).await;
+            }
             
-            // 启动 udp2raw 服务端：监听 tcp_data_port，转发到本地 WireGuard
-            // udp2raw 不需要 TUN 接口，使用 raw socket 直接伪装喵
-            let server_child = tokio::process::Command::new("udp2raw")
-                .arg("-s")  // 服务端模式
-                .arg("-l").arg(&listen_addr)
-                .arg("-r").arg(&local_wg)
-                .arg("-k").arg(udp2raw_key)
-                .arg("--raw-mode").arg("faketcp")
-                .arg("-a")  // 自动 iptables 规则
-                .kill_on_drop(true)
-                .spawn();
+            let server_child = cmd.spawn();
             
             match server_child {
                 Ok(child) => {
                     println!("喵！udp2raw 服务端已启动：监听 TCP {} -> 转发到 {}", effective_port, local_wg);
+                    if !has_iptables {
+                        println!("💡 提示：检测到系统中缺少 iptables，已为您自动配置 nftables 拦截规则喵！");
+                    }
                     udp2raw_server_child = Some(child);
                 }
                 Err(e) => {
                     eprintln!("喵呜... 无法启动 udp2raw: {:?}", e);
+                    // 如果启动失败，清理一下 nft 规则（如果加了的话）
+                    if !has_iptables { let _ = cleanup_udp2raw_nft_rules().await; }
                 }
             }
         } else {
@@ -374,6 +386,9 @@ async fn run_instance(state: NekoState) -> Result<()> {
         let _ = run_cmd(&format!("nft delete table inet {} 2>/dev/null", table_name));
     }
     let _ = run_cmd(&format!("ip link del {} 2>/dev/null", config.interface));
+    
+    // 清理 udp2raw 的 nftables 规则喵
+    let _ = cleanup_udp2raw_nft_rules().await;
 
     Ok(())
 }
@@ -867,17 +882,39 @@ async fn configure_peer(interface: &str, peer_pub_key: &str, mut endpoint: Strin
             
             println!("喵！正在为队友 {} 启动 udp2raw 侧车：{} <-> {} (TCP 数据端口: {})", peer_pub_key, local_udp, remote_addr, effective_port);
             
+            // 检查系统是否有 iptables 喵
+            let has_iptables = check_command_exists("iptables");
+            let mut cmd = tokio::process::Command::new("udp2raw");
+            cmd.arg("-c")  // 客户端模式
+               .arg("-l").arg(&local_udp)
+               .arg("-r").arg(&remote_addr)
+               .arg("-k").arg(udp2raw_key)
+               .arg("--raw-mode").arg("faketcp")
+               .kill_on_drop(true);
+
+            if has_iptables {
+                cmd.arg("-a"); // 如果有 iptables，继续使用自动模式喵
+            } else {
+                // 如果没有 iptables，手动拦截来自对端 TCP 端口的包喵
+                // 客户端需要拦截源端口为 effective_port 的包喵
+                println!("喵！检测到缺少 iptables，客户端将手动配置 nftables 拦截来自对端端口 {} 的回包喵...", effective_port);
+                let _ = std::process::Command::new("nft")
+                    .arg("add").arg("table").arg("inet").arg("nekolink_udp2raw")
+                    .status();
+                let _ = std::process::Command::new("nft")
+                    .args(&[
+                        "add", "chain", "inet", "nekolink_udp2raw", "input", "{", "type", "filter", "hook", "input", "priority", "0", ";", "policy", "accept", ";", "}"
+                    ])
+                    .status();
+                let _ = std::process::Command::new("nft")
+                    .args(&[
+                        "insert", "rule", "inet", "nekolink_udp2raw", "input", "tcp", "sport", &effective_port.to_string(), "drop"
+                    ])
+                    .status();
+            }
+
             // 启动 udp2raw 客户端 喵！
-            // udp2raw 不需要 TUN 接口，使用 raw socket 直接伪装
-            let child = tokio::process::Command::new("udp2raw")
-                .arg("-c")  // 客户端模式
-                .arg("-l").arg(&local_udp)
-                .arg("-r").arg(&remote_addr)
-                .arg("-k").arg(udp2raw_key)
-                .arg("--raw-mode").arg("faketcp")
-                .arg("-a")  // 自动 iptables 规则
-                .kill_on_drop(true)  // 确保父进程退出时杀掉子进程喵
-                .spawn()?;
+            let child = cmd.spawn()?;
             
             sidecars.insert(sidecar_key, child);
             endpoint = local_udp;
@@ -1166,6 +1203,54 @@ fn check_ping(host: &str, size: u16) -> bool {
         Ok(s) => s.success(),
         Err(_) => false,
     }
+}
+
+fn check_command_exists(cmd: &str) -> bool {
+    std::process::Command::new(cmd)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+async fn setup_udp2raw_nft_rules(port: u16) -> Result<()> {
+    println!("喵！检测到缺少 iptables，执行 nftables 备选预案：手动拦截端口 {}...", port);
+    
+    // 创建一个专用的表喵
+    let _ = std::process::Command::new("nft")
+        .arg("add").arg("table").arg("inet").arg("nekolink_udp2raw")
+        .status();
+        
+    // 创建链并添加拦截规则喵
+    // udp2raw 需要拦截目标端口的 TCP 包，防止内核回复 RST 喵
+    let status = std::process::Command::new("nft")
+        .args(&[
+            "add", "chain", "inet", "nekolink_udp2raw", "input", "{", "type", "filter", "hook", "input", "priority", "0", ";", "policy", "accept", ";", "}"
+        ])
+        .status();
+
+    if let Ok(s) = status {
+        if s.success() {
+            let _ = std::process::Command::new("nft")
+                .args(&[
+                    "insert", "rule", "inet", "nekolink_udp2raw", "input", "tcp", "dport", &port.to_string(), "drop"
+                ])
+                .status();
+            println!("喵！nftables 拦截规则已生效喵！");
+        }
+    }
+    
+    Ok(())
+}
+
+async fn cleanup_udp2raw_nft_rules() -> Result<()> {
+    println!("喵！正在清理 nftables 拦截规则...");
+    let _ = std::process::Command::new("nft")
+        .arg("delete").arg("table").arg("inet").arg("nekolink_udp2raw")
+        .status();
+    Ok(())
 }
 fn get_actual_listen_port(interface: &str) -> Option<u16> {
     // 通过 UAPI 获取实际监听端口
