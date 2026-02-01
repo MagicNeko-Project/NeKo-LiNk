@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.0] - 2026-02-02
+
+### Fixed
+- **传输模式完全隔离**：修复了 RawIP 模式错误启动 `udp2raw` 侧车的问题，现在 TCP/UDP/RawIP 三种模式完全独立互不干扰。
+- **IPv6 MTU 计算**：修正了 IPv6 隧道的 MTU 开销计算（IPv6 头 40 字节 vs IPv4 头 20 字节）。
+- **TCP 信令端口协商**：修复了 `tcp_data_port` 配置为 0 时，信令中发送 0 而非默认 4567 的问题。
+- **模式参数传递**：修复了收到 TCP 信令 ACK 后，`configure_peer` 被硬编码传入 `"tcp"` 的 bug。
+
+### Changed
+- 代码版本升级至 2.7.0，统一所有子项目版本号。
+
+---
+
 ## [2.6.0] - 2026-02-01
 
 ### Added
