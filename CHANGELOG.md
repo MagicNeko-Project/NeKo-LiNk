@@ -3,7 +3,11 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## v2.5.0 (2026-02-01)
+## v2.5.1 (2026-02-01)
+- 🐛 **修复**：解决 `udp2raw` 在缺少 `iptables` 环境（如 Debian 12）下启动失败的问题。
+- ✨ **改进**：支持自动检测 `iptables`，若缺失则自动通过 `nftables` (nft) 接管 TCP 拦截规则。
+- 🧹 **改进**：增加退出时对应的 `nftables` 规则自动清理逻辑。
+
 - 🎉 **重大更新：从 Phantun 迁移到 udp2raw**！
     - **更简单的集成**: udp2raw 使用 raw socket，无需 TUN 接口，避免了 IP 冲突问题
     - **更少的依赖**: 无需 nftables 手动配置，udp2raw 使用 `-a` 参数自动管理 iptables 规则
