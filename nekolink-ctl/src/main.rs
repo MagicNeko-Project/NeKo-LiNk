@@ -491,7 +491,9 @@ async fn run_instance(state: NekoState) -> Result<()> {
         // 等待接口创建喵，500ms 通常足够了
         time::sleep(Duration::from_millis(500)).await;
 
-        let mut uapi_cmd = format!("set=1\nprivate_key={}\n", state.priv_b64);
+        // 转换私钥格式（Base64 -> Hex for UAPI）
+        let priv_hex = base64_to_hex(&state.priv_b64);
+        let mut uapi_cmd = format!("set=1\nprivate_key={}\n", priv_hex);
         if let Some(port) = config.listen_port {
             uapi_cmd.push_str(&format!("listen_port={}\n", port));
         }
@@ -554,8 +556,18 @@ async fn run_instance(state: NekoState) -> Result<()> {
                 }
                 
                 // 配置 Endpoint
+                // 配置 Endpoint (支持域名解析喵)
                 if !peer.endpoint.is_empty() {
-                    uapi_cmd.push_str(&format!("endpoint={}\n", peer.endpoint));
+                    let resolved_endpoint = if let Ok(mut addrs) = tokio::net::lookup_host(&peer.endpoint).await {
+                        if let Some(addr) = addrs.next() {
+                            addr.to_string()
+                        } else {
+                            peer.endpoint.clone()
+                        }
+                    } else {
+                        peer.endpoint.clone()
+                    };
+                    uapi_cmd.push_str(&format!("endpoint={}\n", resolved_endpoint));
                 }
                 
                 // 配置 Keepalive
@@ -1174,6 +1186,17 @@ fn derive_cipher(psk: &str) -> ChaCha20Poly1305 {
 
 
 async fn configure_peer(interface: &str, peer_pub_key: &str, mut endpoint: String, keepalive: Option<u16>, peer_mtu: Option<u16>, auto_sync_mtu: bool, mode: &str, tcp_data_port: u16, psk: &str) -> Result<()> {
+    // 尝试解析域名端点喵
+    if !endpoint.is_empty() {
+        let resolved = if let Ok(mut addrs) = tokio::net::lookup_host(&endpoint).await {
+            addrs.next().map(|a| a.to_string())
+        } else {
+            None
+        };
+        if let Some(r) = resolved {
+            endpoint = r;
+        }
+    }
     // 保存原始探测地址喵（防止 TCP 模式下被 127.0.0.1 覆盖）
     let probe_address = endpoint.clone();
     
@@ -1278,13 +1301,16 @@ async fn configure_peer(interface: &str, peer_pub_key: &str, mut endpoint: Strin
         }
     }
 
+    // 转换公钥格式（Base64 -> Hex for UAPI）
+    let peer_pub_key_hex = base64_to_hex(peer_pub_key);
+
     // 幂等保护：先删除旧 Peer 再添加喵
-    let remove_cmd = format!("set=1\npublic_key={}\nremove=true\n\n", peer_pub_key);
+    let remove_cmd = format!("set=1\npublic_key={}\nremove=true\n\n", peer_pub_key_hex);
     let _ = send_uapi(interface, &remove_cmd).await; 
 
     let mut uapi_cmd = format!(
         "set=1\npublic_key={}\nallowed_ip=0.0.0.0/0\nallowed_ip=::/0\nendpoint={}\n",
-        peer_pub_key, endpoint
+        peer_pub_key_hex, endpoint
     );
     if let Some(ka) = keepalive {
         uapi_cmd.push_str(&format!("persistent_keepalive_interval={}\n", ka));
