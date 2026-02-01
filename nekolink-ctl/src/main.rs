@@ -329,21 +329,36 @@ async fn run_instance(state: NekoState) -> Result<()> {
             let wg_port = get_actual_listen_port(&config.interface).unwrap_or(51820);
             let local_wg = format!("127.0.0.1:{}", wg_port);
             
+            // 使用配置的端口，如果为 0 则默认 4567 喵
+            let effective_port = if config.tcp_data_port > 0 { config.tcp_data_port } else { 4567 };
+            
+            // 为服务端生成唯一的 TUN 接口名喵
+            let tun_name = format!("ptuns_{}", &config.interface[..std::cmp::min(config.interface.len(), 5)]);
+            
             // 启动 phantun-server：监听 tcp_data_port，转发到本地 WireGuard
+            // 服务端使用 192.168.201.0/24 网段，与客户端 192.168.200.0/24 区分
             let server_child = tokio::process::Command::new("phantun-server")
-                .arg("--local").arg(config.tcp_data_port.to_string())
+                .arg("--local").arg(effective_port.to_string())
                 .arg("--remote").arg(&local_wg)
+                .arg("--tun").arg(&tun_name)
+                .arg("--tun-local").arg("192.168.201.1")
+                .arg("--tun-peer").arg("192.168.201.2")
+                .kill_on_drop(true)
                 .spawn()
                 .or_else(|_| {
                     tokio::process::Command::new("./target/release/phantun-server")
-                    .arg("--local").arg(config.tcp_data_port.to_string())
+                    .arg("--local").arg(effective_port.to_string())
                     .arg("--remote").arg(&local_wg)
+                    .arg("--tun").arg(&tun_name)
+                    .arg("--tun-local").arg("192.168.201.1")
+                    .arg("--tun-peer").arg("192.168.201.2")
+                    .kill_on_drop(true)
                     .spawn()
                 });
             
             match server_child {
                 Ok(child) => {
-                    println!("喵！phantun-server 已启动：监听 TCP {} -> 转发到 {}", config.tcp_data_port, local_wg);
+                    println!("喵！phantun-server 已启动：监听 TCP {} -> 转发到 {} (TUN: {})", effective_port, local_wg, tun_name);
                     phantun_server_child = Some(child);
                 }
                 Err(e) => {
@@ -910,28 +925,40 @@ async fn configure_peer(interface: &str, peer_pub_key: &str, mut endpoint: Strin
 
             // 解析远端 IP（endpoint 格式可能是 IP:PORT 或纯 IP）
             let remote_ip = endpoint.split(':').next().unwrap_or(&endpoint);
-            // 使用配置的 tcp_data_port 作为 Phantun 数据端口喵
-            let remote_phantun = format!("{}:{}", remote_ip, tcp_data_port);
+            // 使用协商的 tcp_data_port，如果为 0 则使用默认 4567 喵
+            let effective_port = if tcp_data_port > 0 { tcp_data_port } else { 4567 };
+            let remote_phantun = format!("{}:{}", remote_ip, effective_port);
 
             // 寻找一个闲置的本地 UDP 端口（简单起见，从 40000 开始随机抽一个喵）
             local_port = (OsRng.next_u32() % 10000 + 40000) as u16;
             let local_udp = format!("127.0.0.1:{}", local_port);
             
-            println!("喵！正在为队友 {} 启动 Phantun 侧车：{} <-> {} (TCP 数据端口: {})", peer_pub_key, local_udp, remote_phantun, tcp_data_port);
+            // 为客户端生成唯一的 TUN 接口名（基于接口名哈希）喵
+            let tun_name = format!("ptun_{}", &interface[..std::cmp::min(interface.len(), 6)]);
+            
+            println!("喵！正在为队友 {} 启动 Phantun 侧车：{} <-> {} (TCP 数据端口: {}, TUN: {})", peer_pub_key, local_udp, remote_phantun, effective_port, tun_name);
             
             // 配置 nftables 规则喵（确保 Phantun TUN 接口的流量能正确转发）
             let _ = setup_nftables_for_phantun().await;
             
             // 启动 phantun-client 喵！
-            // 备注：为了方便，先尝试系统路径，再尝试本地路径喵
+            // 客户端使用 192.168.200.0/24 网段，与服务端 192.168.201.0/24 区分
             let child = tokio::process::Command::new("phantun-client")
                 .arg("--local").arg(&local_udp)
                 .arg("--remote").arg(&remote_phantun)
+                .arg("--tun").arg(&tun_name)
+                .arg("--tun-local").arg("192.168.200.1")
+                .arg("--tun-peer").arg("192.168.200.2")
+                .kill_on_drop(true)  // 确保父进程退出时杀掉子进程喵
                 .spawn()
                 .or_else(|_| {
                     tokio::process::Command::new("./target/release/phantun-client")
                     .arg("--local").arg(&local_udp)
                     .arg("--remote").arg(&remote_phantun)
+                    .arg("--tun").arg(&tun_name)
+                    .arg("--tun-local").arg("192.168.200.1")
+                    .arg("--tun-peer").arg("192.168.200.2")
+                    .kill_on_drop(true)
                     .spawn()
                 })?;
             
