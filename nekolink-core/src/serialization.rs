@@ -16,15 +16,22 @@ impl std::str::FromStr for KeyBytes {
                 }
             }
             43 | 44 => {
-                // Try to parse as base64
-                if let Ok(decoded_key) = base64::decode(s) {
-                    if decoded_key.len() == internal.len() {
-                        internal[..].copy_from_slice(&decoded_key);
-                    } else {
-                        return Err("Illegal character in key");
-                    }
+                // 尝试解析为 Base64，支持带填充或不带填充喵
+                let decoded_key = if s.len() == 43 {
+                    // 补齐填充符再尝试解码喵
+                    let padded = format!("{}", s);
+                    let mut p = padded;
+                    p.push('=');
+                    base64::decode(&p)
                 } else {
-                    return Err("Illegal character in key");
+                    base64::decode(s)
+                };
+
+                match decoded_key {
+                    Ok(decoded) if decoded.len() == 32 => {
+                        internal[..].copy_from_slice(&decoded);
+                    }
+                    _ => return Err("Illegal character in key"),
                 }
             }
             _ => return Err("Illegal key size"),
