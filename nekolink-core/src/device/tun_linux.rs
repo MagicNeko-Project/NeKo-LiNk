@@ -62,7 +62,7 @@ impl TunSocket {
         }
     }
 
-    pub fn new(name: &str) -> Result<TunSocket, Error> {
+    pub fn new(name: &str, multiqueue: bool) -> Result<TunSocket, Error> {
         // If the provided name appears to be a FD, use that.
         let provided_fd = name.parse::<i32>();
         if let Ok(fd) = provided_fd {
@@ -77,10 +77,15 @@ impl TunSocket {
             fd => fd,
         };
         let iface_name = name.as_bytes();
+        let mut flags = IFF_TUN | IFF_NO_PI;
+        if multiqueue {
+            flags |= IFF_MULTI_QUEUE;
+        }
+
         let mut ifr = ifreq {
             ifr_name: [0; IFNAMSIZ],
             ifr_ifru: IfrIfru {
-                ifru_flags: (IFF_TUN | IFF_NO_PI | IFF_MULTI_QUEUE) as _,
+                ifru_flags: flags as _,
             },
         };
 

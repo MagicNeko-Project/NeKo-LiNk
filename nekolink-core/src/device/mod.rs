@@ -222,7 +222,7 @@ impl DeviceHandle {
             } else {
                 // For for the rest create a new iface queue
                 let iface_local = Arc::new(
-                    TunSocket::new(&device.read().iface.name().unwrap())
+                    TunSocket::new(&device.read().iface.name().unwrap(), true)
                         .unwrap()
                         .set_non_blocking()
                         .unwrap(),
@@ -366,7 +366,7 @@ impl Device {
         let poll = EventPoll::<Handler>::new()?;
 
         // Create a tunnel device
-        let iface = Arc::new(TunSocket::new(name)?.set_non_blocking()?);
+        let iface = Arc::new(TunSocket::new(name, config.use_multi_queue)?.set_non_blocking()?);
         let mtu = iface.mtu()?;
 
         #[cfg(not(target_os = "linux"))]

@@ -126,6 +126,9 @@ struct NekoConfig {
     /// 导入模式下的私钥（Base64 编码，可选）
     #[serde(default)]
     pub private_key: Option<String>,
+    /// 是否开启多队列（默认关闭以提升兼容性喵）
+    #[serde(default)]
+    pub use_multi_queue: bool,
 }
 
 fn default_tcp_data_port() -> u16 {
@@ -500,6 +503,9 @@ async fn run_instance(state: NekoState) -> Result<()> {
         if let Some(proto) = config.ip_protocol {
             cmd.arg("--ip-protocol").arg(proto.to_string());
         }
+        if !config.use_multi_queue {
+            cmd.arg("--disable-multi-queue");
+        }
     }
     
     // 强制设置 MTU，默认 1420 喵
@@ -529,6 +535,14 @@ async fn run_instance(state: NekoState) -> Result<()> {
         uapi_cmd.push('\n');
 
         send_uapi(&config.interface, &uapi_cmd).await.context("配置私钥失败")?;
+    }
+
+    println!("正在设置 MTU {} 到 {}...", mtu, config.interface);
+    run_cmd(&format!("ip link set mtu {} dev {}", mtu, config.interface)).context("设置 MTU 失败")?;
+
+    println!("正在开启网卡 {} 的多播 (Multicast) 魔法喵...", config.interface);
+    if let Err(e) = run_cmd(&format!("ip link set dev {} multicast on", config.interface)) {
+        eprintln!("警告：开启多播失败喵（部分环境可能不支持）: {:?}", e);
     }
 
     println!("正在启用网卡 {} 喵...", config.interface);
