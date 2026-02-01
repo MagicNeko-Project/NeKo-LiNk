@@ -599,6 +599,7 @@ async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                             let pub_key_bytes = pub_key_bytes.clone();
                             let interface_inner = interface.clone();
                             let is_raw_ip_mode = state.config.mode == "ip";
+                            let mode_inner = state.config.mode.clone();
                             let psk_inner = state.config.psk.clone();
                             let auto_mtu_enabled = state.config.mtu == Some(0);
                             
@@ -651,7 +652,7 @@ async fn run_global_tcp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                                                                                     endpoint = format!("{}:{}", endpoint, peer_tunnel_port);
                                                                                 }
                                                                                 println!("喵！成功接收 TCP 信令响应 (ACK)：来自 {} (隧道端口: {}, Phantun端口: {})", endpoint, peer_tunnel_port, peer_phantun_port);
-                                                                                let _ = configure_peer(&interface_inner, &peer_pub_key, endpoint, None, peer_mtu, true, "tcp", peer_phantun_port, &psk_inner).await;
+                                                                                let _ = configure_peer(&interface_inner, &peer_pub_key, endpoint, None, peer_mtu, true, &mode_inner, peer_phantun_port, &psk_inner).await;
                                                                             }
                                                                         } else {
                                                                             println!("喵呜... 无法解密来自 {} 的 TCP ACK，PSK 匹配吗喵？", addr);
