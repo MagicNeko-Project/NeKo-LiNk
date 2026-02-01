@@ -86,7 +86,7 @@ function edit_config() {
         1) mode="ip" ;;
         2) mode="udp" ;;
         3) mode="tcp" 
-           echo -e "${PINK}... 使用 Fake-TCP 模式喵 (请确保设置 nftables 规则 DROP 相应端口的 RST 包，示例：nft add rule inet filter output tcp sport <端口> tcp flags rst drop)${NC}" ;;
+           echo -e "${PINK}... 使用 Fake-TCP 模式喵（Phantun 会自动启动，无需手动配置任何东西喵！）${NC}" ;;
         *) mode="$curr_mode" ;;
     esac
 
@@ -194,12 +194,8 @@ function create_config() {
         endpoint=""
     else
         role="client"
-        if [ "$mode" == "ip" ]; then
-            read -p "请输入服务端的公网 IP ( e.g. 1.2.3.4 ): " endpoint
-        else
-            echo -e "${PINK}提示：请务必输入服务端的公网 IP 和信令端口 (通常为 12580) 喵！${NC}"
-            read -p "请输入服务端的公网端点 ( IP:服务端信令端口, 示例 1.2.3.4:12580 ): " endpoint
-        fi
+        echo -e "${PINK}提示：请务必输入服务端的公网 IP 和信令端口 (通常为 12580) 喵！${NC}"
+        read -p "请输入服务端的公网端点 ( IP:服务端信令端口, 示例 1.2.3.4:12580 ): " endpoint
         while [ -z "$endpoint" ]; do
             read -p "客户端必须指定对端地址喵！请重新输入: " endpoint
         done
@@ -219,9 +215,11 @@ function create_config() {
             ;;
         3)
             mode="tcp"
-            echo -e "${PINK}... 使用 Fake-TCP 模式喵 (请确保设置 nftables 规则 DROP 相应端口 of RST 包)${NC}"
+            echo -e "${PINK}... 使用 Fake-TCP 模式喵（Phantun 会自动启动、自动配置 nftables，无需手动操作）${NC}"
             proto="null"
-            read -p "请输入伪装 TCP 监听端口 ( 0 为自动协商, 默认 0 ): " listen_port
+            read -p "请输入 Phantun 数据端口 ( 默认 4567 ): " tcp_data_port
+            [ -z "$tcp_data_port" ] && tcp_data_port=4567
+            read -p "请输入 WireGuard 监听端口 ( 0 为自动协商, 默认 0 ): " listen_port
             [ -z "$listen_port" ] && listen_port=0
             ;;
         *)
@@ -296,7 +294,25 @@ function create_config() {
     # 构建 JSON
     json_path="$CONFIG_DIR/$iface.json"
     
-    cat > "$json_path" <<EOF
+    # 构建基础 JSON
+    if [ "$mode" == "tcp" ]; then
+        cat > "$json_path" <<EOF
+{
+  "interface": "$iface",
+  "mode": "$mode",
+  "ip_protocol": $proto,
+  "listen_port": $listen_port,
+  "tcp_data_port": $tcp_data_port,
+  "auto_route": $auto_route,
+  "persistent_keepalive": $keepalive,
+  "mtu": $mtu,
+  "clamp_mss": $clamp_mss,
+  "local_address": "$local_addr",
+  "psk": "$psk",
+  "peers": [
+EOF
+    else
+        cat > "$json_path" <<EOF
 {
   "interface": "$iface",
   "mode": "$mode",
@@ -310,6 +326,7 @@ function create_config() {
   "psk": "$psk",
   "peers": [
 EOF
+    fi
 
     if [ -n "$endpoint" ]; then
         cat >> "$json_path" <<EOF
