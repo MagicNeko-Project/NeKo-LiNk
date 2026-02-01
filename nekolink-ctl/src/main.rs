@@ -411,9 +411,7 @@ async fn run_global_udp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                             let mut msg = msg_base.clone();
                             msg.extend_from_slice(&current_mtu.to_be_bytes());
                             msg.extend_from_slice(&actual_tunnel_port.to_be_bytes());
-                            // 扩展：添加 Phantun 数据端口（TCP 模式用）喵
-                            let phantun_port = state.config.tcp_data_port;
-                            msg.extend_from_slice(&phantun_port.to_be_bytes());
+                            // UDP 模式不需要 Phantun 端口喵
 
                             let mut nonce_bytes = [0u8; 12];
                             OsRng.fill_bytes(&mut nonce_bytes);
@@ -453,12 +451,7 @@ async fn run_global_udp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                                 let peer_pub_key = BASE64.encode(&decrypted[..32]);
                                 let peer_mtu = Some(u16::from_be_bytes([decrypted[32], decrypted[33]]));
                                 let peer_tunnel_port = u16::from_be_bytes([decrypted[34], decrypted[35]]);
-                                // 扩展：提取对端的 Phantun 数据端口喵
-                                let peer_phantun_port = if decrypted.len() >= 38 {
-                                    u16::from_be_bytes([decrypted[36], decrypted[37]])
-                                } else {
-                                    0
-                                };
+                                // UDP 模式不使用 Phantun 端口喵
                                 
                                 if peer_tunnel_port == 0 && state.config.mode != "ip" {
                                     continue;
@@ -469,20 +462,17 @@ async fn run_global_udp_signaling(states: Arc<Vec<NekoState>>, signal_port: u16)
                                     endpoint = format!("{}:{}", endpoint, peer_tunnel_port);
                                 }
 
-                                println!("喵！12580 (UDP) 握手处理成功：{} -> {} (Phantun端口: {})", endpoint, state.config.interface, peer_phantun_port);
-                                // 使用对端的 Phantun 端口（如果协商到的话）
-                                let effective_phantun_port = if peer_phantun_port > 0 { peer_phantun_port } else { state.config.tcp_data_port };
-                                let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0), &state.config.mode, effective_phantun_port).await;
+                                println!("喵！12580 (UDP) 握手处理成功：{} -> {}", endpoint, state.config.interface);
+                                // UDP 模式不使用 Phantun，直接配置 peer 喵
+                                let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0), &state.config.mode, 0).await;
                                 
-                                // 回发响应喵
+                                // 回发响应喵（UDP 模式不包含 Phantun 端口）
                                 let msg_base = state.pub_key.as_bytes().to_vec();
                                 let current_mtu = get_interface_mtu(&state.config.interface).unwrap_or(1420);
                                 let actual_tunnel_port = get_actual_listen_port(&state.config.interface).unwrap_or(0);
                                 let mut resp_msg = msg_base;
                                 resp_msg.extend_from_slice(&current_mtu.to_be_bytes());
                                 resp_msg.extend_from_slice(&actual_tunnel_port.to_be_bytes());
-                                // 扩展：添加 Phantun 数据端口喵
-                                resp_msg.extend_from_slice(&state.config.tcp_data_port.to_be_bytes());
                                 
                                 let mut nonce_bytes = [0u8; 12];
                                 OsRng.fill_bytes(&mut nonce_bytes);
