@@ -3,3 +3,4 @@
 .vscode/
 *.deb
 build_deb_tmp/
+Cargo.lock

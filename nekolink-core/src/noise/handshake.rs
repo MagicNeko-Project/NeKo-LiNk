@@ -521,6 +521,7 @@ impl Handshake {
             &hash,
         )?;
 
+        #[allow(deprecated)]
         ring::constant_time::verify_slices_are_equal(
             self.params.peer_static_public.as_bytes(),
             &peer_static_public_decrypted,
