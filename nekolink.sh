@@ -337,7 +337,7 @@ function edit_config() {
         *) auto_route="$curr_aroute" ;;
     esac
 
-    read -p "开启本地 SOCKS5 代理? (当前端口: $curr_s5, 输入端口号开启如 1080, 输入 n 关闭, 直接回车保持不变): " s5_c
+    read -p "开启本地 SOCKS5 服务端? (当前端口: $curr_s5, 输入端口号开启如 1080, 输入 n 关闭, 直接回车保持不变): " s5_c
     case "$s5_c" in
         n) socks5_port="null" ;;
         "") socks5_port="$curr_s5" ;;
@@ -516,7 +516,7 @@ function create_config() {
         auto_route="false"
     fi
 
-    read -p "是否开启本地 SOCKS5 代理? (输入端口号如 1080, 直接回车则不开启): " s5_port
+    read -p "是否开启本地 SOCKS5 服务端? (输入端口号如 1080, 直接回车则不开启): " s5_port
     if [ -z "$s5_port" ]; then
         socks5_port="null"
     else
