@@ -446,6 +446,8 @@ impl Device {
 
         let udp_sock4 = socket2::Socket::new(Domain::IPV4, sock_type, Some(protocol))?;
         udp_sock4.set_reuse_address(true)?;
+        let _ = udp_sock4.set_recv_buffer_size(4 * 1024 * 1024);
+        let _ = udp_sock4.set_send_buffer_size(4 * 1024 * 1024);
         udp_sock4.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port).into())?;
         udp_sock4.set_nonblocking(true)?;
 
@@ -456,6 +458,8 @@ impl Device {
 
         let udp_sock6 = socket2::Socket::new(Domain::IPV6, sock_type, Some(protocol))?;
         udp_sock6.set_reuse_address(true)?;
+        let _ = udp_sock6.set_recv_buffer_size(4 * 1024 * 1024);
+        let _ = udp_sock6.set_send_buffer_size(4 * 1024 * 1024);
         udp_sock6.bind(&SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0).into())?;
         udp_sock6.set_nonblocking(true)?;
 

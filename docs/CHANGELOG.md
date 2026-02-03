@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 
+## [3.0.3] - 2026-02-04
+
+### Fixed
+- **Performance**: 强制将 UDP 套接字的发送/接收缓冲区 (`SO_SNDBUF`/`SO_RCVBUF`) 增加至 4MB。
+- 这解决了在部分 Linux/Android 设备上因内核默认缓冲区过小导致的严重丢包和速率崩盘问题（v2.7.5 逻辑下的性能回归）。
+
 ## [3.0.2] - 2026-02-04
 
 ### Changed
