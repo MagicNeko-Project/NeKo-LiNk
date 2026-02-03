@@ -2,34 +2,49 @@
 
 ![NekoLink Banner](./banner.png)
 
+**NekoLink** 是一个高性能、隐蔽且智能的隧道系统，基于高度定制的 [WireGuard®](https://www.wireguard.com/) 协议实现。它继承了 WireGuard 的极速体验，同时引入了独特的“魔法”特性，助你轻松穿越复杂的网络环境。
+
 **NekoLink** is a high-performance, stealthy, and intelligent tunnel system based on a highly customized [WireGuard®](https://www.wireguard.com/) protocol implementation. It inherits the extreme speed of WireGuard while adding unique "magic" features to help you navigate complex network environments with ease.
 
 ---
 
-## 🌟 Core Features
+## 🌟 核心特性 / Core Features
 
-- **🚀 Custom IP Protocol (Raw IP Mode)**: Break free from UDP (Protocol 17) throttling and identification! You can communicate directly using any IP protocol number between 1 and 255. In this mode, **NekoLink is 100% UDP-free**, as even the signaling/key-exchange is performed over Raw IP. Firewalls won't even know what hit them!
-- **🎭 Fake-TCP Stealth Mode (Fake-TCP Mode)**: The ultimate penetration magic! By masquerading all traffic as legitimate TCP packets (including full handshake simulation and state management), your data flows appear like regular web browsing to network monitors.
-- **🤝 Automated Key Exchange**: No more manually copying and pasting long public keys. As long as the Pre-Shared Keys (PSK) match, NekoLink will automatically exchange WireGuard public keys via an encrypted signaling channel. In IP/TCP mode, this channel automatically reuses your transport mechanism.
-- **🎮 Interactive Config Helper (`neko-link`)**: A user-friendly wizard that guides you through server/client setup and generates JSON configurations automatically.
-- **🛡️ Routing Safety (Table=off Logic)**: By default, NekoLink does not modify the system routing table. This prevents total connectivity loss caused by aggressive `0.0.0.0/0` configurations.
-- **💤 Smart Halt & Keepalive**: For maximum stealth, signaling exchange permanently enters deep sleep once connected. Combined with native WireGuard Keepalive, the tunnel remains bulletproof and nearly invisible.
-- **🦀 Pure Rust Implementation**: From the core driver to the control plane, everything is written in Rust for memory safety and blazing-fast performance.
-- **📡 Adaptive MTU Discovery**: Automatically detects the PMTU of your network path and recommends the best MTU for the tunnel.
+### 🚀 Custom IP Protocol (Raw IP Mode)
+打破 UDP (协议号 17) 的限制与封锁！你可以使用 1 到 255 之间的任意 IP 协议号进行通信。在此模式下，**NekoLink 是 100% 无 UDP 特征的**，甚至密钥交换也通过 Raw IP 进行。防火墙根本不知道发生了什么！
+
+Break free from UDP (Protocol 17) throttling and identification! You can communicate directly using any IP protocol number between 1 and 255. In this mode, **NekoLink is 100% UDP-free**, as even the signaling/key-exchange is performed over Raw IP. Firewalls won't even know what hit them!
+
+### 🧦 Built-in SOCKS5 Proxy
+**内建 SOCKS5 代理**: 客户端自带本地 SOCKS5 服务端，支持只代理特定浏览器的流量，无需修改系统全局路由。
+[点击查看使用指南 / View SOCKS5 Guide](docs/SOCKS5_GUIDE_CN.md)
+
+### 🎭 Fake-TCP Stealth Mode
+终极渗透魔法！通过将所有流量伪装成合法的 TCP 数据包（包含完整的三次握手模拟和状态管理），你的数据流在网络监控者眼中就像普通的网页浏览一样。
+
+The ultimate penetration magic! By masquerading all traffic as legitimate TCP packets (including full handshake simulation and state management), your data flows appear like regular web browsing to network monitors.
+
+
+
+### 🤝 Automated Key Exchange
+无需手动复制粘贴冗长的公钥。只要预共享密钥 (PSK) 匹配，NekoLink 就能通过加密信令通道自动交换 WireGuard 公钥。
+
+No more manually copying and pasting long public keys. As long as the Pre-Shared Keys (PSK) match, NekoLink will automatically exchange WireGuard public keys via an encrypted signaling channel.
 
 ---
 
-## 🏗️ Architecture
+## 🏗️ 架构 / Architecture
 
-1. **nekolink-core**: The engine library with Raw IP protocol support.
-2. **nekolink-cli**: The command-line utility for encryption and decryption.
-3. **nekolink-ctl**: The intelligent control plane that manages configurations, key generation, signaling, and tunnel lifecycle.
-4. **neko-link.sh**: Your interactive guide for generating configurations.
+1.  **nekolink-core**: 核心引擎库，支持 Raw IP、UDP GRO 和高性能事件循环。
+2.  **nekolink-cli**: 用于加密解密的命令行工具。
+3.  **nekolink-ctl**: 智能控制平面，管理配置、密钥生成、信令和隧道生命周期。
+4.  **neko-link.sh**: 你的交互式配置向导。
 
 ---
 
-## 🛠️ Installation
+## 🛠️ 安装 / Installation
 
+运行项目根目录下的通用安装脚本：
 Run the universal installation script from the project root:
 
 ```bash
@@ -37,129 +52,62 @@ chmod +x install.sh
 sudo ./install.sh
 ```
 
-### ⛵ Smooth Update
-To update an existing installation without losing your configurations, use the dedicated upgrade script:
+### ⛵ 平滑升级 / Smooth Update
+
 ```bash
 chmod +x update.sh
 sudo ./update.sh
 ```
 
-> [!TIP]
-> The update script automatically handles process termination and preserves everything in `/etc/neko-link/`. It also fetches the latest code from the repository.
-
 ---
 
-## 📖 Quick Start
+## 📖 快速开始 / Quick Start
 
+### 1. 交互式设置 (推荐)
 ### 1. Interactive Setup (Recommended)
-Simply run the following command and follow the prompts:
+
+Simply run / 只需运行:
 ```bash
 nekolink
 ```
-Choose your role (Server/Client), transmission mode (IP or UDP), protocol number, and internal IP address.
 
-### 2. Manage Tunnels
-Once configured, use systemd to manage the NekoLink service:
+按照向导选择角色（服务端/客户端）、传输模式（IP/UDP/TCP）和协议号即可。
+Follow the prompts to choose your role (Server/Client), transmission mode (IP/UDP/TCP), and protocol number.
+
+### 2. 管理隧道 / Manage Tunnels
 
 ```bash
-# Start the service
+# Start / 启动
 sudo systemctl start nekolink
 
-# Stop the service
+# Stop / 停止
 sudo systemctl stop nekolink
 
-# View real-time logs
+# Logs / 查看日志
 journalctl -u nekolink -f
-
-# Enable/Disable auto-start on boot
-sudo systemctl enable/disable nekolink
 ```
 
-You can also run `nekolink-ctl` directly for foreground debugging. It will automatically scan and manage all configurations located in `/etc/neko-link/*.json` in parallel.
+---
+
+## 📜 更新日志 / Changelog
+
+详见 [docs/CHANGELOG.md](docs/CHANGELOG.md)。
+See [docs/CHANGELOG.md](docs/CHANGELOG.md) for details.
+
+
 
 ---
 
-## 📝 Configuration Reference
+## 📜 声明与致谢 / Acknowledgments
 
-Manual configurations are stored in `/etc/neko-link/*.json`.
+**特别鸣谢 / Special Thanks**:
+- **Jason A. Donenfeld**: WireGuard 协议的发明者。
+- **Cloudflare**: [BoringTun](https://github.com/cloudflare/boringtun) 开源项目的贡献者，NekoLink 的核心基于此项目。
+- **Mullvad VPN**: [GotaTun](https://github.com/mullvad/gotatun) 项目的贡献者，其优秀的性能优化思路深受启发。
 
-```json
-{
-  "interface": "nekotun0",
-  "mode": "ip",
-  "ip_protocol": 141,
-  "listen_port": null,
-  "auto_route": false,
-  "local_address": "10.0.0.1/24",
-  "psk": "Your_Secret_Key",
-  "peers": [
-    { "endpoint": "PEER_PUBLIC_IP:5678" }
-  ],
-  "signal_port": 5678
-}
-```
+## 📜 许可 / License
 
-| Parameter | Description | Recommended |
-| :--- | :--- | :--- |
-| `interface` | Virtual network interface name | Default: `nekotun0` |
-| `mode` | `ip` (Raw IP), `udp` (Standard Mode) or `tcp` (Fake-TCP). Used for both **Data and Signaling**. | Use `ip` or `tcp` to bypass UDP blocks |
-| `ip_protocol`| Protocol number for Raw IP mode | Use 143-252 for experimentation |
-| `listen_port` | WireGuard listen port (UDP mode) | Set to `null` in `ip/tcp` mode |
-| `auto_route` | Modify system routing table? | Default `false` for safety |
-| `local_address`| Tunnel internal IP (CIDR) | e.g., `10.0.0.1/24` |
-| `psk` | Pre-Shared Key for automated signaling | Must match on both ends! |
-| `peers` | Peer information. In `ip/tcp` mode, just use the **Public IP**. | e.g., `{"endpoint": "1.2.3.4"}` |
-| `persistent_keepalive` | **Activity Interval** (seconds). Keeps the NAT mapping alive. | Recommended: `25` |
-| `mtu` | **Tunnel Interface MTU**. Defaults to `1420` for optimal encapsulation. | Recommended: `1420` |
-| `signal_port` | **Signaling Port** (UDP) | Only used in `udp` mode. Ignored in `ip/tcp` mode. |
+基于 [3-Clause BSD License](./LICENSE.md) 发布。
+Released under the [3-Clause BSD License](./LICENSE.md).
 
----
-
-## ⚠️ Important Notes
-
-1. **Firewalls**: Ensure your selected `ip_protocol` and `signal_port` (UDP) are open in your server's firewall.
-2. **Permissions**: While `install.sh` sets caps, `sudo` is still recommended for network interface operations.
-
----
-
-## 🔍 How to Verify IP Mode?
-
-You can use `tcpdump` to observe traffic on your physical interface.
-
-Assuming your physical interface is `eth0` and your `ip_protocol` is `141`:
-
-```bash
-# Capture packets with the specific protocol number
-sudo tcpdump -i eth0 proto 141 -n -v
-```
-
-**What to look for:**
-- Packets with protocol `141` on the physical interface.
-- No UDP traffic (unless in `udp` mode).
-- Interface MTU set to `1420` (check with `ip link show nekotun0`).
-
----
-
-## 📜 Credits & License
-
-- **Based on Original Project**: This project is deeply customized and modified based on the original [Boringtun](https://github.com/cloudflare/boringtun) implementation by Cloudflare.
-- **License**: Inherited [3-Clause BSD License](./LICENSE.md).
-- **Trademark**: WireGuard® is a registered trademark of Jason A. Donenfeld. NekoLink is not affiliated with or endorsed by Jason A. Donenfeld.
-
----
-
----
-
-## 📜 更新日志 (CHANGELOG) ฅ^•ﻌ•^ฅ
-
-### v2.4.5 (2026-01-29)
-- **🔥 Fake-TCP 深度修复**：彻底重构 Fake-TCP 核心逻辑，修复了 Socket 类型错误、IP/TCP 头部偏移问题以及至关重要的握手响应时序 Bug，现在 Fake-TCP 已能完美闭环通讯。
-- **✨ UAPI 状态报告进化**：修复了运行状态下无法显示传输协议（UDP/TCP/IP）的问题，新增美轮美奂的中文运行报告，支持实时握手时间计算与详细流量统计。
-- **📦 配置管理优化**：引入 `global.json` 集中管理全局 `signal_port`。
-- **🧹 自动修复魔法**：`neko-link.sh` 新增配置一键修复功能，支持自动补全缺失字段、迁移旧配置并严格清理 `global.json` 冗余字段。
-- **🛡️ 防火墙提示升级**：将所有的防火墙提示从 `iptables` 更新为更现代的 `nftables`。
-- **🚀 性能与稳定性**：重构了 RawIP 动态协议信令逻辑，缩短握手重试频率，并消除了核心库中的多处编译警告。
-
----
-
-May your packets be as agile as a Neko! ฅ^•ﻌ•^ฅ
+*WireGuard® is a registered trademark of Jason A. Donenfeld. NekoLink is not affiliated with or endorsed by Jason A. Donenfeld.*
