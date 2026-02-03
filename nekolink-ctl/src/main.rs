@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 use x25519_dalek::{PublicKey, StaticSecret};
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio_util::sync::CancellationToken;
-use tokio::net::{TcpListener, TcpStream};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional};
 
 struct InstanceHandle {
     state: NekoState,
@@ -119,7 +119,7 @@ struct NekoConfig {
     pub mtu: Option<u16>,
     #[serde(default)]
     pub clamp_mss: bool,
-    /// TCP 模式下，Phantun 的远端数据端口（默认 4567）喵
+    /// TCP 模式下，辅助组件 (Sidecar) 的远端数据端口（默认 4567）喵
     #[serde(default = "default_tcp_data_port")]
     pub tcp_data_port: u16,
     /// WireGuard 原生兼容模式：禁用信令通道，使用配置文件中的公钥
@@ -652,7 +652,7 @@ async fn run_instance(state: NekoState, token: CancellationToken) -> Result<()> 
         println!("喵！WireGuard 兼容模式配置完成，共配置了 {} 个 Peer。", config.peers.len());
     }
     
-    // TCP 模式：自动启动 udp2raw 组件喵（比 Phantun 更简单，无需 TUN 接口）
+    // TCP 模式：自动启动 udp2raw 组件喵
     let mut udp2raw_server_child: Option<tokio::process::Child> = None;
     if config.mode == "tcp" {
         // 判断是服务端还是客户端：服务端 = peers 为空 或 所有 peers 的 endpoint 都为空
@@ -803,53 +803,155 @@ async fn handle_socks5(interface: &str, client: &mut TcpStream, local_ip: Option
 
     // 2. Request
     client.read_exact(&mut buf[..4]).await?;
-    if buf[1] != 0x01 { return Err(anyhow::anyhow!("Only CONNECT supported")); }
+    let cmd = buf[1];
     
-    let target_addr: String = match buf[3] {
-        0x01 => { // IPv4
-            client.read_exact(&mut buf[..4]).await?;
-            let ip = std::net::Ipv4Addr::new(buf[0], buf[1], buf[2], buf[3]);
-            client.read_exact(&mut buf[..2]).await?;
-            let port = u16::from_be_bytes([buf[0], buf[1]]);
-            format!("{}:{}", ip, port)
-        }
-        0x03 => { // Domain
-            client.read_exact(&mut buf[..1]).await?;
-            let len = buf[0] as usize;
-            client.read_exact(&mut buf[..len]).await?;
-            let domain = String::from_utf8_lossy(&buf[..len]).to_string();
-            client.read_exact(&mut buf[..2]).await?;
-            let port = u16::from_be_bytes([buf[0], buf[1]]);
-            format!("{}:{}", domain, port)
-        }
-        0x04 => { // IPv6
-             client.read_exact(&mut buf[..16]).await?;
-             let ip = std::net::Ipv6Addr::from(<[u8; 16]>::try_from(&buf[..16]).unwrap());
-             client.read_exact(&mut buf[..2]).await?;
-             let port = u16::from_be_bytes([buf[0], buf[1]]);
-             format!("[{}]:{}", ip, port)
-        }
-        _ => return Err(anyhow::anyhow!("Unsupported address type")),
-    };
+    if cmd == 0x01 { // CONNECT
+        let target_addr: String = match buf[3] {
+            0x01 => { // IPv4
+                client.read_exact(&mut buf[..4]).await?;
+                let ip = std::net::Ipv4Addr::new(buf[0], buf[1], buf[2], buf[3]);
+                client.read_exact(&mut buf[..2]).await?;
+                let port = u16::from_be_bytes([buf[0], buf[1]]);
+                format!("{}:{}", ip, port)
+            }
+            0x03 => { // Domain
+                client.read_exact(&mut buf[..1]).await?;
+                let len = buf[0] as usize;
+                client.read_exact(&mut buf[..len]).await?;
+                let domain = String::from_utf8_lossy(&buf[..len]).to_string();
+                client.read_exact(&mut buf[..2]).await?;
+                let port = u16::from_be_bytes([buf[0], buf[1]]);
+                format!("{}:{}", domain, port)
+            }
+            0x04 => { // IPv6
+                 client.read_exact(&mut buf[..16]).await?;
+                 let ip = std::net::Ipv6Addr::from(<[u8; 16]>::try_from(&buf[..16]).unwrap());
+                 client.read_exact(&mut buf[..2]).await?;
+                 let port = u16::from_be_bytes([buf[0], buf[1]]);
+                 format!("[{}]:{}", ip, port)
+            }
+            _ => return Err(anyhow::anyhow!("Unsupported address type")),
+        };
 
-    // 3. Connect to target through interface
-    let mut target_stream = match connect_via_interface(interface, &target_addr, local_ip).await {
-        Ok(s) => {
-            // SOCKS5 响应: 成功
-            client.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await?;
-            s
-        }
-        Err(_e) => {
-            // SOCKS5 响应: 失败
-            let _ = client.write_all(&[0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
-            return Err(anyhow::anyhow!("Connect failed to {}: {:?}", target_addr, _e));
-        }
-    };
+        // 3. Connect to target through interface
+        let mut target_stream = match connect_via_interface(interface, &target_addr, local_ip).await {
+            Ok(s) => {
+                // SOCKS5 响应: 成功
+                client.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await?;
+                s
+            }
+            Err(_e) => {
+                // SOCKS5 响应: 失败
+                let _ = client.write_all(&[0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
+                return Err(anyhow::anyhow!("Connect failed to {}: {:?}", target_addr, _e));
+            }
+        };
 
-    // 4. Relay
-    let _ = tokio::io::copy_bidirectional(client, &mut target_stream).await;
+        // 4. Relay
+        let _ = copy_bidirectional(client, &mut target_stream).await;
+    } else if cmd == 0x03 { // UDP ASSOCIATE
+        // 绑定一个用于中转的 UDP 端口喵
+        let relay_socket = UdpSocket::bind("127.0.0.1:0").await?;
+        let relay_port = relay_socket.local_addr()?.port();
+        
+        // 解析客户端可能提供的源地址（通常忽略，但由于协议要求需要读取喵）
+        let _source_addr: String = match buf[3] {
+            0x01 => { client.read_exact(&mut buf[..6]).await?; "ipv4".into() }
+            0x03 => { client.read_exact(&mut buf[..1]).await?; let len = buf[0] as usize; client.read_exact(&mut buf[..len+2]).await?; "domain".into() }
+            0x04 => { client.read_exact(&mut buf[..18]).await?; "ipv6".into() }
+            _ => return Err(anyhow::anyhow!("Unsupported address type for UDP Associate")),
+        };
+
+        // 响应客户端：服务端监听的 UDP 端口喵
+        client.write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, (relay_port >> 8) as u8, (relay_port & 0xFF) as u8]).await?;
+
+        // 开启 UDP 中转逻辑喵
+        let tunnel_socket = connect_via_interface_udp(interface, local_ip).await?;
+        let mut client_relay_buf = [0u8; 2048];
+        let mut tunnel_relay_buf = [0u8; 2048];
+        let mut client_udp_addr: Option<SocketAddr> = None;
+
+        loop {
+            tokio::select! {
+                // TCP 连接关闭信号喵
+                n = client.read(&mut buf) => {
+                    if n.is_err() || n.unwrap() == 0 { break; }
+                }
+                // 从客户端接收 UDP 数据并剥离头发往隧道喵
+                Ok((n, addr)) = relay_socket.recv_from(&mut client_relay_buf) => {
+                    if client_udp_addr.is_none() { client_udp_addr = Some(addr); }
+                    if Some(addr) == client_udp_addr {
+                        if let Ok((header_len, target_addr)) = parse_socks5_udp_header(&client_relay_buf[..n]) {
+                            let _ = tunnel_socket.send_to(&client_relay_buf[header_len..n], target_addr).await;
+                        }
+                    }
+                }
+                // 从隧道接收 UDP 数据并封装头发回客户端喵
+                Ok((n, addr)) = tunnel_socket.recv_from(&mut tunnel_relay_buf) => {
+                    if let Some(c_addr) = client_udp_addr {
+                        let mut resp = Vec::with_capacity(n + 32);
+                        append_socks5_udp_header(&mut resp, addr);
+                        resp.extend_from_slice(&tunnel_relay_buf[..n]);
+                        let _ = relay_socket.send_to(&resp, c_addr).await;
+                    }
+                }
+            }
+        }
+    } else {
+        return Err(anyhow::anyhow!("Only CONNECT and UDP ASSOCIATE supported"));
+    }
     
     Ok(())
+}
+
+fn parse_socks5_udp_header(buf: &[u8]) -> Result<(usize, SocketAddr)> {
+    if buf.len() < 4 { return Err(anyhow::anyhow!("UDP header too short")); }
+    if buf[2] != 0x00 { return Err(anyhow::anyhow!("Fragments not supported")); }
+    
+    let atyp = buf[3];
+    match atyp {
+        0x01 => { // IPv4
+            if buf.len() < 10 { return Err(anyhow::anyhow!("UDP header too short for IPv4")); }
+            let ip = std::net::Ipv4Addr::new(buf[4], buf[5], buf[6], buf[7]);
+            let port = u16::from_be_bytes([buf[8], buf[9]]);
+            Ok((10, SocketAddr::new(IpAddr::V4(ip), port)))
+        }
+        0x03 => { // Domain
+            let len = buf[4] as usize;
+            if buf.len() < 5 + len + 2 { return Err(anyhow::anyhow!("UDP header too short for Domain")); }
+            let domain = String::from_utf8_lossy(&buf[5..5+len]).to_string();
+            let port = u16::from_be_bytes([buf[5+len], buf[5+len+1]]);
+            // 同步解析 DNS 喵
+            use std::net::ToSocketAddrs;
+            let addr = format!("{}:{}", domain, port).to_socket_addrs()?.next().ok_or(anyhow::anyhow!("DNS resolve failed"))?;
+            Ok((5 + len + 2, addr))
+        }
+        0x04 => { // IPv6
+            if buf.len() < 22 { return Err(anyhow::anyhow!("UDP header too short for IPv6")); }
+            let mut ip_bytes = [0u8; 16];
+            ip_bytes.copy_from_slice(&buf[4..20]);
+            let ip = std::net::Ipv6Addr::from(ip_bytes);
+            let port = u16::from_be_bytes([buf[20], buf[21]]);
+            Ok((22, SocketAddr::new(IpAddr::V6(ip), port)))
+        }
+        _ => Err(anyhow::anyhow!("Unsupported address type in UDP header")),
+    }
+}
+
+fn append_socks5_udp_header(buf: &mut Vec<u8>, addr: SocketAddr) {
+    buf.extend_from_slice(&[0x00, 0x00, 0x00]); // RSV + FRAG
+    match addr {
+        SocketAddr::V4(v4) => {
+            buf.push(0x01); // ATYP IPv4
+            buf.extend_from_slice(&v4.ip().octets());
+            buf.extend_from_slice(&v4.port().to_be_bytes());
+        }
+        SocketAddr::V6(v6) => {
+            buf.push(0x04); // ATYP IPv6
+            buf.extend_from_slice(&v6.ip().octets());
+            buf.extend_from_slice(&v6.port().to_be_bytes());
+        }
+    }
 }
 
 async fn connect_via_interface(interface: &str, target: &str, local_ip: Option<IpAddr>) -> Result<TcpStream> {
@@ -892,6 +994,23 @@ async fn connect_via_interface(interface: &str, target: &str, local_ip: Option<I
         return Err(e.into());
     }
     Ok(stream)
+}
+
+async fn connect_via_interface_udp(interface: &str, local_ip: Option<IpAddr>) -> Result<UdpSocket> {
+    let domain = if local_ip.map_or(true, |ip| ip.is_ipv4()) { Domain::IPV4 } else { Domain::IPV6 };
+    let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
+    
+    // Bind to device (SO_BINDTODEVICE)
+    socket.bind_device(Some(interface.as_bytes()))?;
+    
+    // 如果指定了本地 IP，则进行显式绑定喵
+    if let Some(lip) = local_ip {
+        let bind_addr: SocketAddr = SocketAddr::new(lip, 0);
+        let _ = socket.bind(&bind_addr.into());
+    }
+
+    socket.set_nonblocking(true)?;
+    Ok(UdpSocket::from_std(socket.into())?)
 }
 
 
@@ -1120,8 +1239,8 @@ async fn run_global_tcp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                                                                                 let peer_pub_key = BASE64.encode(&decrypted[..32]);
                                                                                 let peer_mtu = Some(u16::from_be_bytes([decrypted[32], decrypted[33]]));
                                                                                 let peer_tunnel_port = u16::from_be_bytes([decrypted[34], decrypted[35]]);
-                                                                                // 扩展：提取对端的 Phantun 数据端口喵
-                                                                                let peer_phantun_port = if decrypted.len() >= 38 {
+                                                                                // 扩展：提取对端的 Sidecar 数据端口喵
+                                                                                let peer_sidecar_port = if decrypted.len() >= 38 {
                                                                                     u16::from_be_bytes([decrypted[36], decrypted[37]])
                                                                                 } else {
                                                                                     4567 // 默认端口
@@ -1134,8 +1253,8 @@ async fn run_global_tcp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                                                                                 if peer_tunnel_port > 0 {
                                                                                     endpoint = format!("{}:{}", endpoint, peer_tunnel_port);
                                                                                 }
-                                                                                println!("喵！成功接收 TCP 信令响应 (ACK)：来自 {} (隧道端口: {}, Phantun端口: {})", endpoint, peer_tunnel_port, peer_phantun_port);
-                                                                                let _ = configure_peer(&interface_inner, &peer_pub_key, endpoint, None, peer_mtu, true, &mode_inner, peer_phantun_port, &psk_inner).await;
+                                                                                println!("喵！成功接收 TCP 信令响应 (ACK)：来自 {} (隧道端口: {}, Sidecar端口: {})", endpoint, peer_tunnel_port, peer_sidecar_port);
+                                                                                let _ = configure_peer(&interface_inner, &peer_pub_key, endpoint, None, peer_mtu, true, &mode_inner, peer_sidecar_port, &psk_inner).await;
                                                                             }
                                                                         }
                                                                     },
@@ -1182,8 +1301,8 @@ async fn run_global_tcp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                                             let peer_pub_key = BASE64.encode(&decrypted[..32]);
                                             let peer_mtu = Some(u16::from_be_bytes([decrypted[32], decrypted[33]]));
                                             let peer_tunnel_port = u16::from_be_bytes([decrypted[34], decrypted[35]]);
-                                            // 扩展：提取对端的 Phantun 数据端口喵
-                                            let peer_phantun_port = if decrypted.len() >= 38 {
+                                            // 扩展：提取对端的 Sidecar 数据端口喵
+                                            let peer_sidecar_port = if decrypted.len() >= 38 {
                                                 u16::from_be_bytes([decrypted[36], decrypted[37]])
                                             } else {
                                                 0
@@ -1197,10 +1316,10 @@ async fn run_global_tcp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                                                 endpoint = format!("{}:{}", endpoint, peer_tunnel_port);
                                             }
 
-                                            println!("喵！12580 (TCP) 识别成功：{} -> {} (Phantun端口: {})", endpoint, state.config.interface, peer_phantun_port);
-                                            // 使用对端的 Phantun 端口（如果协商到的话）
-                                            let effective_phantun_port = if peer_phantun_port > 0 { peer_phantun_port } else { state.config.tcp_data_port };
-                                            let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0), &state.config.mode, effective_phantun_port, &state.config.psk).await;
+                                            println!("喵！12580 (TCP) 识别成功：{} -> {} (Sidecar端口: {})", endpoint, state.config.interface, peer_sidecar_port);
+                                            // 使用对端的 Sidecar 端口（如果协商到的话）
+                                            let effective_sidecar_port = if peer_sidecar_port > 0 { peer_sidecar_port } else { state.config.tcp_data_port };
+                                            let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0), &state.config.mode, effective_sidecar_port, &state.config.psk).await;
                                             
                                             // TCP 握手响应喵！直接在当前流回发
                                             let msg_base = state.pub_key.as_bytes().to_vec();
