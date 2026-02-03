@@ -1,0 +1,21 @@
+[package]
+name = "nekolink-android"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+jni = "0.21"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1.0"
+base64 = "0.21"
+blake2 = "0.10"
+chacha20poly1305 = "0.10"
+rand = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# Android specific logging
+android_logger = "0.13"
+log = "0.4"
