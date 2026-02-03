@@ -208,8 +208,12 @@ async fn main() -> Result<()> {
         }
     }
 
-    println!("ฅ^•ﻌ•^ฅ NekoLink 控制平面启动中...");
+    println!("ฅ^•ﻌ•^ctl NekoLink 控制平面启动中...");
     
+    // 初始化日志系统喵
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
     // 记录 PID 喵
     let pid = std::process::id();
     if let Err(e) = fs::write("/var/run/nekolink-ctl.pid", pid.to_string()) {
@@ -706,8 +710,16 @@ async fn run_instance(state: NekoState, token: CancellationToken) -> Result<()> 
         let iface = config.interface.clone();
         let s5_token = CancellationToken::new();
         let s5_token_clone = s5_token.clone();
+        
+        // 尝试解析本地隧道 IP 用于绑定喵 (Source IP Binding)
+        let local_ip = config.local_address.split('/').next().and_then(|s| s.parse::<IpAddr>().ok());
+        
         let task = tokio::spawn(async move {
-            run_socks5_server(iface, s5_port, s5_token_clone).await
+            if let Err(e) = run_socks5_server(iface.clone(), s5_port, s5_token_clone, local_ip).await {
+                eprintln!("ฅ^•ﻌ•^ctl SOCKS5 服务 ({}) 启动失败喵: {:?}", iface, e);
+                return Err(e);
+            }
+            Ok(())
         });
         socks5_task = Some((task, s5_token));
     }
@@ -748,29 +760,32 @@ async fn run_instance(state: NekoState, token: CancellationToken) -> Result<()> 
     Ok(())
 }
 
-async fn run_socks5_server(interface: String, port: u16, token: CancellationToken) -> Result<()> {
+async fn run_socks5_server(interface: String, port: u16, token: CancellationToken, local_ip: Option<IpAddr>) -> Result<()> {
     let listener = TcpListener::bind(format!("127.0.0.1:{}", port)).await?;
-    println!("ฅ^•ﻌ•^ฅ SOCKS5 代理已启动，正在监听 127.0.0.1:{} -> {} 喵。", port, interface);
+    println!("ฅ^•ﻌ•^ctl SOCKS5 代理已就绪：127.0.0.1:{} -> {} (本地绑定: {:?}) 喵。", port, interface, local_ip);
 
     loop {
         tokio::select! {
             _ = token.cancelled() => break,
             accept_res = listener.accept() => {
-                if let Ok((mut client_stream, _)) = accept_res {
+                if let Ok((mut client_stream, peer_addr)) = accept_res {
                     let iface = interface.clone();
+                    let l_ip = local_ip;
                     tokio::spawn(async move {
-                        if let Err(_e) = handle_socks5(&iface, &mut client_stream).await {
-                             // SOCKS5 错误通常是客户端关闭连接，这里静默处理喵
+                        if let Err(e) = handle_socks5(&iface, &mut client_stream, l_ip).await {
+                             // 静默处理普通连接断开，仅在 debug 时输出喵
+                             tracing::debug!("SOCKS5 处理异常 (来自 {}): {:?} 喵", peer_addr, e);
                         }
                     });
                 }
             }
         }
     }
+    println!("ฅ^•ﻌ•^ctl SOCKS5 代理 ({}) 已关闭喵。", interface);
     Ok(())
 }
 
-async fn handle_socks5(interface: &str, client: &mut TcpStream) -> Result<()> {
+async fn handle_socks5(interface: &str, client: &mut TcpStream, local_ip: Option<IpAddr>) -> Result<()> {
     let mut buf = [0u8; 512];
     
     // 1. Handshake
@@ -812,7 +827,7 @@ async fn handle_socks5(interface: &str, client: &mut TcpStream) -> Result<()> {
     };
 
     // 3. Connect to target through interface
-    let mut target_stream = match connect_via_interface(interface, &target_addr).await {
+    let mut target_stream = match connect_via_interface(interface, &target_addr, local_ip).await {
         Ok(s) => {
             // SOCKS5 响应: 成功
             client.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await?;
@@ -821,7 +836,7 @@ async fn handle_socks5(interface: &str, client: &mut TcpStream) -> Result<()> {
         Err(_e) => {
             // SOCKS5 响应: 失败
             let _ = client.write_all(&[0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
-            return Err(anyhow::anyhow!("Connect failed"));
+            return Err(anyhow::anyhow!("Connect failed to {}: {:?}", target_addr, _e));
         }
     };
 
@@ -831,16 +846,29 @@ async fn handle_socks5(interface: &str, client: &mut TcpStream) -> Result<()> {
     Ok(())
 }
 
-async fn connect_via_interface(interface: &str, target: &str) -> Result<TcpStream> {
+async fn connect_via_interface(interface: &str, target: &str, local_ip: Option<IpAddr>) -> Result<TcpStream> {
     use std::net::ToSocketAddrs;
 
-    let addr = target.to_socket_addrs()?.next().ok_or(anyhow::anyhow!("DNS resolve failed"))?;
+    // TODO: 使用信令中枢进行异步 DNS 解析，目前先用同步阻塞凑合一下喵
+    let addr = target.to_socket_addrs()?.next().ok_or(anyhow::anyhow!("DNS 解析失败"))?;
     
     let domain = if addr.is_ipv4() { Domain::IPV4 } else { Domain::IPV6 };
     let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
     
     // Bind to device (SO_BINDTODEVICE)
     socket.bind_device(Some(interface.as_bytes()))?;
+    
+    // 如果指定了本地 IP，则进行显式绑定喵 (这有助于在 RawIP 等特殊模式下正确选路)
+    if let Some(lip) = local_ip {
+        // 仅在地址族匹配时绑定喵
+        if (lip.is_ipv4() && addr.is_ipv4()) || (lip.is_ipv6() && addr.is_ipv6()) {
+            let bind_addr: SocketAddr = SocketAddr::new(lip, 0);
+            if let Err(e) = socket.bind(&bind_addr.into()) {
+                tracing::warn!("显式绑定源 IP {} 失败 (可能是接口未完全准备好): {:?}", lip, e);
+            }
+        }
+    }
+
     socket.set_nonblocking(true)?;
     
     match socket.connect(&addr.into()) {
