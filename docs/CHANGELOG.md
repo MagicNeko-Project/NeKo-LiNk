@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 
+## [3.0.2] - 2026-02-04
+
+### Changed
+- **Revert**: Reverted codebase to stable v2.7.5 logic to resolve performance regression (asymmetric upload/download).
+- **Version**: Bumped version to 3.0.2 to prevent auto-downgrade.
+
 ## [2.7.5] - 2026-02-02
 
 ### Added
