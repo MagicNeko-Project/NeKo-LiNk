@@ -1,0 +1,855 @@
+Initialized native services in: /home/icecat/.gradle/native
+Initialized jansi services in: /home/icecat/.gradle/native
+The client will now receive all logging from the daemon (pid: 810038). The daemon log file: /home/icecat/.gradle/daemon/9.1.0/daemon-810038.out.log
+Starting 3rd build in daemon [uptime: 8 mins 23.552 secs, performance: 99%, GC rate: 0.00/s, heap usage: 1% of 1.5 GiB]
+Using 4 worker leases.
+Configuration on demand is an incubating feature.
+Now considering [/home/icecat/XXXXXXX/wireguard-android] as hierarchies to watch
+Watching the file system is configured to be enabled if available
+File system watching is active
+Starting Build
+Settings evaluated using settings file '/home/icecat/XXXXXXX/wireguard-android/settings.gradle.kts'.
+Using local directory build cache for the root build (location = /home/icecat/.gradle/caches/build-cache-1, remove unused entries = after 7 days).
+Projects loaded. Root project using build file '/home/icecat/XXXXXXX/wireguard-android/build.gradle.kts'.
+Included projects: [root project 'wireguard-android', project ':tunnel', project ':ui']
+
+> Configure project :
+Evaluating root project 'wireguard-android' using build file '/home/icecat/XXXXXXX/wireguard-android/build.gradle.kts'.
+Resolved plugin [id: 'com.android.application', version: '8.13.2', apply: false]
+Resolved plugin [id: 'com.android.library', version: '8.13.2', apply: false]
+Resolved plugin [id: 'org.jetbrains.kotlin.android', version: '2.3.0', apply: false]
+Resolved plugin [id: 'org.jetbrains.kotlin.kapt', version: '2.3.0', apply: false]
+
+> Configure project :tunnel
+Evaluating project ':tunnel' using build file '/home/icecat/XXXXXXX/wireguard-android/tunnel/build.gradle.kts'.
+Resolved plugin [id: 'com.android.library', version: '8.13.2']
+Resolved plugin [id: 'org.gradle.maven-publish']
+Resolved plugin [id: 'org.gradle.signing']
+Using default execution profile
+C/C++: android.ndkVersion from module build.gradle is [27.0.12077973]
+C/C++: android.ndkPath from module build.gradle is not set
+C/C++: ndk.dir in local.properties is /home/icecat/XXXXXXX/android-sdk/ndk/27.0.12077973
+C/C++: Not considering ANDROID_NDK_HOME because support was removed after deprecation period.
+C/C++: sdkFolder is /home/icecat/XXXXXXX/android-sdk
+C/C++: Checking whether deleting ndk.dir and setting android.ndkVersion to [27.0.12077973] would result in the same NDK
+C/C++: ndk.dir delete check : android.ndkVersion from module build.gradle is [27.0.12077973]
+C/C++: ndk.dir delete check : android.ndkPath from module build.gradle is not set
+C/C++: ndk.dir delete check : ndk.dir in local.properties is not set
+C/C++: ndk.dir delete check : Not considering ANDROID_NDK_HOME because support was removed after deprecation period.
+C/C++: ndk.dir delete check : sdkFolder is /home/icecat/XXXXXXX/android-sdk
+C/C++: ndk.dir delete check : Deleting ndk.dir and setting android.ndkVersion to [27.0.12077973] would result in the same NDK.
+WARNING: [CXX5106] NDK was located by using ndk.dir property. This method is deprecated and will be removed in a future release. Please delete ndk.dir from local.properties and set android.ndkVersion to [27.0.12077973] in all native modules in the project. https://developer.android.com/r/studio-ui/ndk-dir
+[CXX5106] NDK was located by using ndk.dir property. This method is deprecated and will be removed in a future release. Please delete ndk.dir from local.properties and set android.ndkVersion to [27.0.12077973] in all native modules in the project. https://developer.android.com/r/studio-ui/ndk-dir
+C/C++: android.ndkVersion from module build.gradle is [27.0.12077973]
+C/C++: android.ndkPath from module build.gradle is not set
+C/C++: ndk.dir in local.properties is /home/icecat/XXXXXXX/android-sdk/ndk/27.0.12077973
+C/C++: Not considering ANDROID_NDK_HOME because support was removed after deprecation period.
+C/C++: sdkFolder is /home/icecat/XXXXXXX/android-sdk
+C/C++: Checking whether deleting ndk.dir and setting android.ndkVersion to [27.0.12077973] would result in the same NDK
+C/C++: ndk.dir delete check : android.ndkVersion from module build.gradle is [27.0.12077973]
+C/C++: ndk.dir delete check : android.ndkPath from module build.gradle is not set
+C/C++: ndk.dir delete check : ndk.dir in local.properties is not set
+C/C++: ndk.dir delete check : Not considering ANDROID_NDK_HOME because support was removed after deprecation period.
+C/C++: ndk.dir delete check : sdkFolder is /home/icecat/XXXXXXX/android-sdk
+C/C++: ndk.dir delete check : Deleting ndk.dir and setting android.ndkVersion to [27.0.12077973] would result in the same NDK.
+WARNING: [CXX5106] NDK was located by using ndk.dir property. This method is deprecated and will be removed in a future release. Please delete ndk.dir from local.properties and set android.ndkVersion to [27.0.12077973] in all native modules in the project. https://developer.android.com/r/studio-ui/ndk-dir
+[CXX5106] NDK was located by using ndk.dir property. This method is deprecated and will be removed in a future release. Please delete ndk.dir from local.properties and set android.ndkVersion to [27.0.12077973] in all native modules in the project. https://developer.android.com/r/studio-ui/ndk-dir
+C/C++: android.ndkVersion from module build.gradle is [27.0.12077973]
+C/C++: android.ndkPath from module build.gradle is not set
+C/C++: ndk.dir in local.properties is /home/icecat/XXXXXXX/android-sdk/ndk/27.0.12077973
+C/C++: Not considering ANDROID_NDK_HOME because support was removed after deprecation period.
+C/C++: sdkFolder is /home/icecat/XXXXXXX/android-sdk
+C/C++: Checking whether deleting ndk.dir and setting android.ndkVersion to [27.0.12077973] would result in the same NDK
+C/C++: ndk.dir delete check : android.ndkVersion from module build.gradle is [27.0.12077973]
+C/C++: ndk.dir delete check : android.ndkPath from module build.gradle is not set
+C/C++: ndk.dir delete check : ndk.dir in local.properties is not set
+C/C++: ndk.dir delete check : Not considering ANDROID_NDK_HOME because support was removed after deprecation period.
+C/C++: ndk.dir delete check : sdkFolder is /home/icecat/XXXXXXX/android-sdk
+C/C++: ndk.dir delete check : Deleting ndk.dir and setting android.ndkVersion to [27.0.12077973] would result in the same NDK.
+WARNING: [CXX5106] NDK was located by using ndk.dir property. This method is deprecated and will be removed in a future release. Please delete ndk.dir from local.properties and set android.ndkVersion to [27.0.12077973] in all native modules in the project. https://developer.android.com/r/studio-ui/ndk-dir
+[CXX5106] NDK was located by using ndk.dir property. This method is deprecated and will be removed in a future release. Please delete ndk.dir from local.properties and set android.ndkVersion to [27.0.12077973] in all native modules in the project. https://developer.android.com/r/studio-ui/ndk-dir
+C/C++: android.ndkVersion from module build.gradle is [27.0.12077973]
+C/C++: android.ndkPath from module build.gradle is not set
+C/C++: ndk.dir in local.properties is /home/icecat/XXXXXXX/android-sdk/ndk/27.0.12077973
+C/C++: Not considering ANDROID_NDK_HOME because support was removed after deprecation period.
+C/C++: sdkFolder is /home/icecat/XXXXXXX/android-sdk
+C/C++: Checking whether deleting ndk.dir and setting android.ndkVersion to [27.0.12077973] would result in the same NDK
+C/C++: ndk.dir delete check : android.ndkVersion from module build.gradle is [27.0.12077973]
+C/C++: ndk.dir delete check : android.ndkPath from module build.gradle is not set
+C/C++: ndk.dir delete check : ndk.dir in local.properties is not set
+C/C++: ndk.dir delete check : Not considering ANDROID_NDK_HOME because support was removed after deprecation period.
+C/C++: ndk.dir delete check : sdkFolder is /home/icecat/XXXXXXX/android-sdk
+C/C++: ndk.dir delete check : Deleting ndk.dir and setting android.ndkVersion to [27.0.12077973] would result in the same NDK.
+WARNING: [CXX5106] NDK was located by using ndk.dir property. This method is deprecated and will be removed in a future release. Please delete ndk.dir from local.properties and set android.ndkVersion to [27.0.12077973] in all native modules in the project. https://developer.android.com/r/studio-ui/ndk-dir
+[CXX5106] NDK was located by using ndk.dir property. This method is deprecated and will be removed in a future release. Please delete ndk.dir from local.properties and set android.ndkVersion to [27.0.12077973] in all native modules in the project. https://developer.android.com/r/studio-ui/ndk-dir
+C/C++: android.ndkVersion from module build.gradle is [27.0.12077973]
+C/C++: android.ndkPath from module build.gradle is not set
+C/C++: ndk.dir in local.properties is /home/icecat/XXXXXXX/android-sdk/ndk/27.0.12077973
+C/C++: Not considering ANDROID_NDK_HOME because support was removed after deprecation period.
+C/C++: sdkFolder is /home/icecat/XXXXXXX/android-sdk
+C/C++: Checking whether deleting ndk.dir and setting android.ndkVersion to [27.0.12077973] would result in the same NDK
+C/C++: ndk.dir delete check : android.ndkVersion from module build.gradle is [27.0.12077973]
+C/C++: ndk.dir delete check : android.ndkPath from module build.gradle is not set
+C/C++: ndk.dir delete check : ndk.dir in local.properties is not set
+C/C++: ndk.dir delete check : Not considering ANDROID_NDK_HOME because support was removed after deprecation period.
+C/C++: ndk.dir delete check : sdkFolder is /home/icecat/XXXXXXX/android-sdk
+C/C++: ndk.dir delete check : Deleting ndk.dir and setting android.ndkVersion to [27.0.12077973] would result in the same NDK.
+WARNING: [CXX5106] NDK was located by using ndk.dir property. This method is deprecated and will be removed in a future release. Please delete ndk.dir from local.properties and set android.ndkVersion to [27.0.12077973] in all native modules in the project. https://developer.android.com/r/studio-ui/ndk-dir
+[CXX5106] NDK was located by using ndk.dir property. This method is deprecated and will be removed in a future release. Please delete ndk.dir from local.properties and set android.ndkVersion to [27.0.12077973] in all native modules in the project. https://developer.android.com/r/studio-ui/ndk-dir
+C/C++: android.ndkVersion from module build.gradle is [27.0.12077973]
+C/C++: android.ndkPath from module build.gradle is not set
+C/C++: ndk.dir in local.properties is /home/icecat/XXXXXXX/android-sdk/ndk/27.0.12077973
+C/C++: Not considering ANDROID_NDK_HOME because support was removed after deprecation period.
+C/C++: sdkFolder is /home/icecat/XXXXXXX/android-sdk
+C/C++: Checking whether deleting ndk.dir and setting android.ndkVersion to [27.0.12077973] would result in the same NDK
+C/C++: ndk.dir delete check : android.ndkVersion from module build.gradle is [27.0.12077973]
+C/C++: ndk.dir delete check : android.ndkPath from module build.gradle is not set
+C/C++: ndk.dir delete check : ndk.dir in local.properties is not set
+C/C++: ndk.dir delete check : Not considering ANDROID_NDK_HOME because support was removed after deprecation period.
+C/C++: ndk.dir delete check : sdkFolder is /home/icecat/XXXXXXX/android-sdk
+C/C++: ndk.dir delete check : Deleting ndk.dir and setting android.ndkVersion to [27.0.12077973] would result in the same NDK.
+WARNING: [CXX5106] NDK was located by using ndk.dir property. This method is deprecated and will be removed in a future release. Please delete ndk.dir from local.properties and set android.ndkVersion to [27.0.12077973] in all native modules in the project. https://developer.android.com/r/studio-ui/ndk-dir
+[CXX5106] NDK was located by using ndk.dir property. This method is deprecated and will be removed in a future release. Please delete ndk.dir from local.properties and set android.ndkVersion to [27.0.12077973] in all native modules in the project. https://developer.android.com/r/studio-ui/ndk-dir
+C/C++: android.ndkVersion from module build.gradle is [27.0.12077973]
+C/C++: android.ndkPath from module build.gradle is not set
+C/C++: ndk.dir in local.properties is /home/icecat/XXXXXXX/android-sdk/ndk/27.0.12077973
+C/C++: Not considering ANDROID_NDK_HOME because support was removed after deprecation period.
+C/C++: sdkFolder is /home/icecat/XXXXXXX/android-sdk
+C/C++: Checking whether deleting ndk.dir and setting android.ndkVersion to [27.0.12077973] would result in the same NDK
+C/C++: ndk.dir delete check : android.ndkVersion from module build.gradle is [27.0.12077973]
+C/C++: ndk.dir delete check : android.ndkPath from module build.gradle is not set
+C/C++: ndk.dir delete check : ndk.dir in local.properties is not set
+C/C++: ndk.dir delete check : Not considering ANDROID_NDK_HOME because support was removed after deprecation period.
+C/C++: ndk.dir delete check : sdkFolder is /home/icecat/XXXXXXX/android-sdk
+C/C++: ndk.dir delete check : Deleting ndk.dir and setting android.ndkVersion to [27.0.12077973] would result in the same NDK.
+WARNING: [CXX5106] NDK was located by using ndk.dir property. This method is deprecated and will be removed in a future release. Please delete ndk.dir from local.properties and set android.ndkVersion to [27.0.12077973] in all native modules in the project. https://developer.android.com/r/studio-ui/ndk-dir
+[CXX5106] NDK was located by using ndk.dir property. This method is deprecated and will be removed in a future release. Please delete ndk.dir from local.properties and set android.ndkVersion to [27.0.12077973] in all native modules in the project. https://developer.android.com/r/studio-ui/ndk-dir
+C/C++: android.ndkVersion from module build.gradle is [27.0.12077973]
+C/C++: android.ndkPath from module build.gradle is not set
+C/C++: ndk.dir in local.properties is /home/icecat/XXXXXXX/android-sdk/ndk/27.0.12077973
+C/C++: Not considering ANDROID_NDK_HOME because support was removed after deprecation period.
+C/C++: sdkFolder is /home/icecat/XXXXXXX/android-sdk
+C/C++: Checking whether deleting ndk.dir and setting android.ndkVersion to [27.0.12077973] would result in the same NDK
+C/C++: ndk.dir delete check : android.ndkVersion from module build.gradle is [27.0.12077973]
+C/C++: ndk.dir delete check : android.ndkPath from module build.gradle is not set
+C/C++: ndk.dir delete check : ndk.dir in local.properties is not set
+C/C++: ndk.dir delete check : Not considering ANDROID_NDK_HOME because support was removed after deprecation period.
+C/C++: ndk.dir delete check : sdkFolder is /home/icecat/XXXXXXX/android-sdk
+C/C++: ndk.dir delete check : Deleting ndk.dir and setting android.ndkVersion to [27.0.12077973] would result in the same NDK.
+WARNING: [CXX5106] NDK was located by using ndk.dir property. This method is deprecated and will be removed in a future release. Please delete ndk.dir from local.properties and set android.ndkVersion to [27.0.12077973] in all native modules in the project. https://developer.android.com/r/studio-ui/ndk-dir
+[CXX5106] NDK was located by using ndk.dir property. This method is deprecated and will be removed in a future release. Please delete ndk.dir from local.properties and set android.ndkVersion to [27.0.12077973] in all native modules in the project. https://developer.android.com/r/studio-ui/ndk-dir
+C/C++: android.ndkVersion from module build.gradle is [27.0.12077973]
+C/C++: android.ndkPath from module build.gradle is not set
+C/C++: ndk.dir in local.properties is /home/icecat/XXXXXXX/android-sdk/ndk/27.0.12077973
+C/C++: Not considering ANDROID_NDK_HOME because support was removed after deprecation period.
+C/C++: sdkFolder is /home/icecat/XXXXXXX/android-sdk
+C/C++: Checking whether deleting ndk.dir and setting android.ndkVersion to [27.0.12077973] would result in the same NDK
+C/C++: ndk.dir delete check : android.ndkVersion from module build.gradle is [27.0.12077973]
+C/C++: ndk.dir delete check : android.ndkPath from module build.gradle is not set
+C/C++: ndk.dir delete check : ndk.dir in local.properties is not set
+C/C++: ndk.dir delete check : Not considering ANDROID_NDK_HOME because support was removed after deprecation period.
+C/C++: ndk.dir delete check : sdkFolder is /home/icecat/XXXXXXX/android-sdk
+C/C++: ndk.dir delete check : Deleting ndk.dir and setting android.ndkVersion to [27.0.12077973] would result in the same NDK.
+WARNING: [CXX5106] NDK was located by using ndk.dir property. This method is deprecated and will be removed in a future release. Please delete ndk.dir from local.properties and set android.ndkVersion to [27.0.12077973] in all native modules in the project. https://developer.android.com/r/studio-ui/ndk-dir
+[CXX5106] NDK was located by using ndk.dir property. This method is deprecated and will be removed in a future release. Please delete ndk.dir from local.properties and set android.ndkVersion to [27.0.12077973] in all native modules in the project. https://developer.android.com/r/studio-ui/ndk-dir
+C/C++: android.ndkVersion from module build.gradle is [27.0.12077973]
+C/C++: android.ndkPath from module build.gradle is not set
+C/C++: ndk.dir in local.properties is /home/icecat/XXXXXXX/android-sdk/ndk/27.0.12077973
+C/C++: Not considering ANDROID_NDK_HOME because support was removed after deprecation period.
+C/C++: sdkFolder is /home/icecat/XXXXXXX/android-sdk
+C/C++: Checking whether deleting ndk.dir and setting android.ndkVersion to [27.0.12077973] would result in the same NDK
+C/C++: ndk.dir delete check : android.ndkVersion from module build.gradle is [27.0.12077973]
+C/C++: ndk.dir delete check : android.ndkPath from module build.gradle is not set
+C/C++: ndk.dir delete check : ndk.dir in local.properties is not set
+C/C++: ndk.dir delete check : Not considering ANDROID_NDK_HOME because support was removed after deprecation period.
+C/C++: ndk.dir delete check : sdkFolder is /home/icecat/XXXXXXX/android-sdk
+C/C++: ndk.dir delete check : Deleting ndk.dir and setting android.ndkVersion to [27.0.12077973] would result in the same NDK.
+WARNING: [CXX5106] NDK was located by using ndk.dir property. This method is deprecated and will be removed in a future release. Please delete ndk.dir from local.properties and set android.ndkVersion to [27.0.12077973] in all native modules in the project. https://developer.android.com/r/studio-ui/ndk-dir
+[CXX5106] NDK was located by using ndk.dir property. This method is deprecated and will be removed in a future release. Please delete ndk.dir from local.properties and set android.ndkVersion to [27.0.12077973] in all native modules in the project. https://developer.android.com/r/studio-ui/ndk-dir
+C/C++: android.ndkVersion from module build.gradle is [27.0.12077973]
+C/C++: android.ndkPath from module build.gradle is not set
+C/C++: ndk.dir in local.properties is /home/icecat/XXXXXXX/android-sdk/ndk/27.0.12077973
+C/C++: Not considering ANDROID_NDK_HOME because support was removed after deprecation period.
+C/C++: sdkFolder is /home/icecat/XXXXXXX/android-sdk
+C/C++: Checking whether deleting ndk.dir and setting android.ndkVersion to [27.0.12077973] would result in the same NDK
+C/C++: ndk.dir delete check : android.ndkVersion from module build.gradle is [27.0.12077973]
+C/C++: ndk.dir delete check : android.ndkPath from module build.gradle is not set
+C/C++: ndk.dir delete check : ndk.dir in local.properties is not set
+C/C++: ndk.dir delete check : Not considering ANDROID_NDK_HOME because support was removed after deprecation period.
+C/C++: ndk.dir delete check : sdkFolder is /home/icecat/XXXXXXX/android-sdk
+C/C++: ndk.dir delete check : Deleting ndk.dir and setting android.ndkVersion to [27.0.12077973] would result in the same NDK.
+WARNING: [CXX5106] NDK was located by using ndk.dir property. This method is deprecated and will be removed in a future release. Please delete ndk.dir from local.properties and set android.ndkVersion to [27.0.12077973] in all native modules in the project. https://developer.android.com/r/studio-ui/ndk-dir
+[CXX5106] NDK was located by using ndk.dir property. This method is deprecated and will be removed in a future release. Please delete ndk.dir from local.properties and set android.ndkVersion to [27.0.12077973] in all native modules in the project. https://developer.android.com/r/studio-ui/ndk-dir
+C/C++: android.ndkVersion from module build.gradle is [27.0.12077973]
+C/C++: android.ndkPath from module build.gradle is not set
+C/C++: ndk.dir in local.properties is /home/icecat/XXXXXXX/android-sdk/ndk/27.0.12077973
+C/C++: Not considering ANDROID_NDK_HOME because support was removed after deprecation period.
+C/C++: sdkFolder is /home/icecat/XXXXXXX/android-sdk
+C/C++: Checking whether deleting ndk.dir and setting android.ndkVersion to [27.0.12077973] would result in the same NDK
+C/C++: ndk.dir delete check : android.ndkVersion from module build.gradle is [27.0.12077973]
+C/C++: ndk.dir delete check : android.ndkPath from module build.gradle is not set
+C/C++: ndk.dir delete check : ndk.dir in local.properties is not set
+C/C++: ndk.dir delete check : Not considering ANDROID_NDK_HOME because support was removed after deprecation period.
+C/C++: ndk.dir delete check : sdkFolder is /home/icecat/XXXXXXX/android-sdk
+C/C++: ndk.dir delete check : Deleting ndk.dir and setting android.ndkVersion to [27.0.12077973] would result in the same NDK.
+WARNING: [CXX5106] NDK was located by using ndk.dir property. This method is deprecated and will be removed in a future release. Please delete ndk.dir from local.properties and set android.ndkVersion to [27.0.12077973] in all native modules in the project. https://developer.android.com/r/studio-ui/ndk-dir
+[CXX5106] NDK was located by using ndk.dir property. This method is deprecated and will be removed in a future release. Please delete ndk.dir from local.properties and set android.ndkVersion to [27.0.12077973] in all native modules in the project. https://developer.android.com/r/studio-ui/ndk-dir
+C/C++: android.ndkVersion from module build.gradle is [27.0.12077973]
+C/C++: android.ndkPath from module build.gradle is not set
+C/C++: ndk.dir in local.properties is /home/icecat/XXXXXXX/android-sdk/ndk/27.0.12077973
+C/C++: Not considering ANDROID_NDK_HOME because support was removed after deprecation period.
+C/C++: sdkFolder is /home/icecat/XXXXXXX/android-sdk
+C/C++: Checking whether deleting ndk.dir and setting android.ndkVersion to [27.0.12077973] would result in the same NDK
+C/C++: ndk.dir delete check : android.ndkVersion from module build.gradle is [27.0.12077973]
+C/C++: ndk.dir delete check : android.ndkPath from module build.gradle is not set
+C/C++: ndk.dir delete check : ndk.dir in local.properties is not set
+C/C++: ndk.dir delete check : Not considering ANDROID_NDK_HOME because support was removed after deprecation period.
+C/C++: ndk.dir delete check : sdkFolder is /home/icecat/XXXXXXX/android-sdk
+C/C++: ndk.dir delete check : Deleting ndk.dir and setting android.ndkVersion to [27.0.12077973] would result in the same NDK.
+WARNING: [CXX5106] NDK was located by using ndk.dir property. This method is deprecated and will be removed in a future release. Please delete ndk.dir from local.properties and set android.ndkVersion to [27.0.12077973] in all native modules in the project. https://developer.android.com/r/studio-ui/ndk-dir
+[CXX5106] NDK was located by using ndk.dir property. This method is deprecated and will be removed in a future release. Please delete ndk.dir from local.properties and set android.ndkVersion to [27.0.12077973] in all native modules in the project. https://developer.android.com/r/studio-ui/ndk-dir
+
+> Configure project :ui
+Evaluating project ':ui' using build file '/home/icecat/XXXXXXX/wireguard-android/ui/build.gradle.kts'.
+Resolved plugin [id: 'com.android.application', version: '8.13.2']
+Resolved plugin [id: 'org.jetbrains.kotlin.android', version: '2.3.0']
+Resolved plugin [id: 'org.jetbrains.kotlin.kapt', version: '2.3.0']
+Using default execution profile
+Build e9dc5984-5c3f-4fe8-bd4e-adc4a47556cb is started
+Using Kotlin Gradle Plugin gradle813 variant
+Task name matched 'assembleDebug'
+Selected primary task 'assembleDebug' from project :
+Adding -Xuse-inline-scopes-numbers Kotlin compiler flag for task :ui:compileDebugKotlin
+All projects evaluated.
+Tasks to be executed: [task ':tunnel:preBuild', task ':tunnel:preDebugBuild', task ':tunnel:checkDebugAarMetadata', task ':tunnel:configureCMakeDebug[arm64-v8a]', task ':tunnel:buildCMakeDebug[arm64-v8a][libwg-go.so,libwg-quick.so,etc]', task ':tunnel:configureCMakeDebug[armeabi-v7a]', task ':tunnel:buildCMakeDebug[armeabi-v7a][libwg-go.so,libwg-quick.so,etc]', task ':tunnel:configureCMakeDebug[x86]', task ':tunnel:buildCMakeDebug[x86][libwg-go.so,libwg-quick.so,etc]', task ':tunnel:configureCMakeDebug[x86_64]', task ':tunnel:buildCMakeDebug[x86_64][libwg-go.so,libwg-quick.so,etc]', task ':tunnel:mergeDebugJniLibFolders', task ':tunnel:mergeDebugNativeLibs', task ':tunnel:stripDebugDebugSymbols', task ':tunnel:copyDebugJniLibsProjectAndLocalJars', task ':tunnel:extractDebugAnnotations', task ':tunnel:generateDebugEmptyResourceFiles', task ':tunnel:generateDebugAssets', task ':tunnel:mergeDebugAssets', task ':tunnel:javaPreCompileDebug', task ':tunnel:compileDebugJavaWithJavac', task ':tunnel:mergeDebugGeneratedProguardFiles', task ':tunnel:mergeDebugConsumerProguardFiles', task ':tunnel:prepareDebugArtProfile', task ':tunnel:prepareLintJarForPublish', task ':tunnel:processDebugManifest', task ':tunnel:processDebugJavaRes', task ':tunnel:mergeDebugJavaResource', task ':tunnel:syncDebugLibJars', task ':tunnel:writeDebugAarMetadata', task ':tunnel:bundleDebugAar', task ':tunnel:assembleDebug', task ':ui:preBuild', task ':ui:preDebugBuild', task ':ui:mergeDebugNativeDebugMetadata', task ':tunnel:bundleLibCompileToJarDebug', task ':ui:checkKotlinGradlePluginConfigurationErrors', task ':ui:dataBindingMergeDependencyArtifactsDebug', task ':tunnel:extractDebugSupportedLocales', task ':ui:extractDebugSupportedLocales', task ':ui:generateDebugLocaleConfig', task ':ui:generateDebugResources', task ':ui:mergeDebugResources', task ':ui:packageDebugResources', task ':ui:processDebugNavigationResources', task ':ui:parseDebugLocalResources', task ':ui:dataBindingGenBaseClassesDebug', task ':ui:dataBindingTriggerDebug', task ':ui:generateDebugBuildConfig', task ':ui:extractDeepLinksDebug', task ':ui:processDebugMainManifest', task ':ui:generateDebugManifestClass', task ':ui:generateDebugRFile', task ':ui:kaptGenerateStubsDebugKotlin', task ':ui:kaptDebugKotlin', task ':ui:compileDebugKotlin', task ':ui:javaPreCompileDebug', task ':ui:compileDebugJavaWithJavac', task ':ui:generateDebugAssets', task ':ui:mergeDebugAssets', task ':ui:compressDebugAssets', task ':ui:l8DexDesugarLibDebug', task ':tunnel:bundleLibRuntimeToJarDebug', task ':ui:desugarDebugFileDependencies', task ':ui:checkDebugAarMetadata', task ':ui:compileDebugNavigationResources', task ':ui:mapDebugSourceSetPaths', task ':ui:createDebugCompatibleScreenManifests', task ':ui:processDebugManifest', task ':ui:processDebugManifestForPackage', task ':ui:processDebugResources', task ':ui:dexBuilderDebug', task ':ui:mergeDebugGlobalSynthetics', task ':ui:processDebugJavaRes', task ':ui:mergeDebugJavaResource', task ':ui:checkDebugDuplicateClasses', task ':ui:mergeExtDexDebug', task ':tunnel:bundleLibRuntimeToDirDebug', task ':ui:mergeLibDexDebug', task ':ui:mergeProjectDexDebug', task ':tunnel:copyDebugJniLibsProjectOnly', task ':ui:mergeDebugJniLibFolders', task ':ui:mergeDebugNativeLibs', task ':ui:stripDebugDebugSymbols', task ':ui:validateSigningDebug', task ':ui:writeDebugAppMetadata', task ':ui:writeDebugSigningConfigVersions', task ':ui:packageDebug', task ':ui:createDebugApkListingFileRedirect', task ':ui:assembleDebug']
+Tasks that were excluded: []
+work action Parameters of IdentityTransform (Thread[#195,Execution worker,5,main]) started.
+Resolve mutations for :tunnel:preBuild (Thread[#196,Execution worker Thread 2,5,main]) started.
+work action Parameters of DexingNoClasspathTransform (Thread[#195,Execution worker,5,main]) started.
+:tunnel:preBuild (Thread[#194,included builds,5,main]) started.
+
+> Task :tunnel:preBuild UP-TO-DATE
+Skipping task ':tunnel:preBuild' as it has no actions.
+Resolve mutations for :tunnel:preDebugBuild (Thread[#196,Execution worker Thread 2,5,main]) started.
+:tunnel:preDebugBuild (Thread[#196,Execution worker Thread 2,5,main]) started.
+
+> Task :tunnel:preDebugBuild UP-TO-DATE
+Skipping task ':tunnel:preDebugBuild' as it has no actions.
+Resolve mutations for :tunnel:checkDebugAarMetadata (Thread[#196,Execution worker Thread 2,5,main]) started.
+:tunnel:checkDebugAarMetadata (Thread[#196,Execution worker Thread 2,5,main]) started.
+work action Parameters of DexingOutputSplitTransform (Thread[#194,included builds,5,main]) started.
+work action Parameters of ClassesDirToClassesTransform (Thread[#194,included builds,5,main]) started.
+work action Parameters of DexingOutputSplitTransform (Thread[#194,included builds,5,main]) started.
+Resolve mutations for :ui:preBuild (Thread[#194,included builds,5,main]) started.
+:ui:preBuild (Thread[#194,included builds,5,main]) started.
+
+> Task :ui:preBuild UP-TO-DATE
+Skipping task ':ui:preBuild' as it has no actions.
+Resolve mutations for :ui:preDebugBuild (Thread[#194,included builds,5,main]) started.
+:ui:preDebugBuild (Thread[#194,included builds,5,main]) started.
+
+> Task :ui:preDebugBuild UP-TO-DATE
+Skipping task ':ui:preDebugBuild' as it has no actions.
+Resolve mutations for :ui:mergeDebugNativeDebugMetadata (Thread[#194,included builds,5,main]) started.
+:ui:mergeDebugNativeDebugMetadata (Thread[#194,included builds,5,main]) started.
+
+> Task :ui:mergeDebugNativeDebugMetadata NO-SOURCE
+Skipping task ':ui:mergeDebugNativeDebugMetadata' as it has no source files and no previous output files.
+Resolve mutations for :ui:checkKotlinGradlePluginConfigurationErrors (Thread[#194,included builds,5,main]) started.
+:ui:checkKotlinGradlePluginConfigurationErrors (Thread[#197,Execution worker Thread 3,5,main]) started.
+
+> Task :ui:checkKotlinGradlePluginConfigurationErrors SKIPPED
+Skipping task ':ui:checkKotlinGradlePluginConfigurationErrors' as task onlyIf 'errorDiagnostics are present' is false.
+Resolve mutations for :ui:dataBindingMergeDependencyArtifactsDebug (Thread[#197,Execution worker Thread 3,5,main]) started.
+:ui:dataBindingMergeDependencyArtifactsDebug (Thread[#197,Execution worker Thread 3,5,main]) started.
+
+> Task :tunnel:checkDebugAarMetadata UP-TO-DATE
+Caching disabled for task ':tunnel:checkDebugAarMetadata' because:
+  Caching has been disabled for the task
+Skipping task ':tunnel:checkDebugAarMetadata' as it is up-to-date.
+Resolve mutations for :tunnel:configureCMakeDebug[arm64-v8a] (Thread[#194,included builds,5,main]) started.
+:tunnel:configureCMakeDebug[arm64-v8a] (Thread[#194,included builds,5,main]) started.
+
+> Task :ui:dataBindingMergeDependencyArtifactsDebug UP-TO-DATE
+Caching disabled for task ':ui:dataBindingMergeDependencyArtifactsDebug' because:
+  Caching has been disabled for the task
+Skipping task ':ui:dataBindingMergeDependencyArtifactsDebug' as it is up-to-date.
+Resolve mutations for :ui:extractDebugSupportedLocales (Thread[#197,Execution worker Thread 3,5,main]) started.
+:ui:extractDebugSupportedLocales (Thread[#197,Execution worker Thread 3,5,main]) started.
+
+> Task :ui:extractDebugSupportedLocales
+Build cache key for task ':ui:extractDebugSupportedLocales' is b7c59b04bc212327335245a5eb823434
+Task ':ui:extractDebugSupportedLocales' is not up-to-date because:
+  No history is available.
+Stored cache entry for task ':ui:extractDebugSupportedLocales' with cache key b7c59b04bc212327335245a5eb823434
+Resolve mutations for :ui:generateDebugResources (Thread[#195,Execution worker,5,main]) started.
+:ui:generateDebugResources (Thread[#195,Execution worker,5,main]) started.
+
+> Task :ui:generateDebugResources
+Build cache key for task ':ui:generateDebugResources' is 3b54efbd9f39d747a9110d2f122ad81e
+Task ':ui:generateDebugResources' is not up-to-date because:
+  No history is available.
+Stored cache entry for task ':ui:generateDebugResources' with cache key 3b54efbd9f39d747a9110d2f122ad81e
+Resolve mutations for :ui:dataBindingTriggerDebug (Thread[#195,Execution worker,5,main]) started.
+:ui:dataBindingTriggerDebug (Thread[#195,Execution worker,5,main]) started.
+
+> Task :ui:dataBindingTriggerDebug
+Caching disabled for task ':ui:dataBindingTriggerDebug' because:
+  Caching has been disabled for the task
+Task ':ui:dataBindingTriggerDebug' is not up-to-date because:
+  No history is available.
+Resolve mutations for :ui:generateDebugBuildConfig (Thread[#197,Execution worker Thread 3,5,main]) started.
+:ui:generateDebugBuildConfig (Thread[#195,Execution worker,5,main]) started.
+
+> Task :ui:generateDebugBuildConfig
+Build cache key for task ':ui:generateDebugBuildConfig' is 9276cfef6c94d33349395728ad65c33e
+Task ':ui:generateDebugBuildConfig' is not up-to-date because:
+  No history is available.
+Stored cache entry for task ':ui:generateDebugBuildConfig' with cache key 9276cfef6c94d33349395728ad65c33e
+Resolve mutations for :ui:extractDeepLinksDebug (Thread[#197,Execution worker Thread 3,5,main]) started.
+:ui:extractDeepLinksDebug (Thread[#196,Execution worker Thread 2,5,main]) started.
+
+> Task :ui:extractDeepLinksDebug
+Build cache key for task ':ui:extractDeepLinksDebug' is 3abcf3e9d8f6c0ba6baef632f8695928
+Task ':ui:extractDeepLinksDebug' is not up-to-date because:
+  No history is available.
+Stored cache entry for task ':ui:extractDeepLinksDebug' with cache key 3abcf3e9d8f6c0ba6baef632f8695928
+Resolve mutations for :ui:javaPreCompileDebug (Thread[#196,Execution worker Thread 2,5,main]) started.
+:ui:javaPreCompileDebug (Thread[#196,Execution worker Thread 2,5,main]) started.
+
+> Task :tunnel:configureCMakeDebug[arm64-v8a] FAILED
+Caching disabled for task ':tunnel:configureCMakeDebug[arm64-v8a]' because:
+  Caching has been disabled for the task
+Task ':tunnel:configureCMakeDebug[arm64-v8a]' is not up-to-date because:
+  Task.upToDateWhen is false.
+C/C++: /home/icecat/XXXXXXX/wireguard-android/tunnel/tools/CMakeLists.txt debug|arm64-v8a : Start JSON generation. Platform version: 24 min SDK version: arm64-v8a
+C/C++: /home/icecat/XXXXXXX/wireguard-android/tunnel/tools/CMakeLists.txt debug|arm64-v8a : rebuilding JSON /home/icecat/XXXXXXX/wireguard-android/tunnel/.cxx/Debug/1h703k40/arm64-v8a/android_gradle_build.json due to:
+C/C++: /home/icecat/XXXXXXX/wireguard-android/tunnel/tools/CMakeLists.txt debug|arm64-v8a : - no fingerprint file, will remove stale configuration folder
+C/C++: /home/icecat/XXXXXXX/wireguard-android/tunnel/tools/CMakeLists.txt debug|arm64-v8a : removing stale contents from '/home/icecat/XXXXXXX/wireguard-android/tunnel/.cxx/Debug/1h703k40/arm64-v8a'
+C/C++: /home/icecat/XXXXXXX/wireguard-android/tunnel/tools/CMakeLists.txt debug|arm64-v8a : created folder '/home/icecat/XXXXXXX/wireguard-android/tunnel/.cxx/Debug/1h703k40/arm64-v8a'
+C/C++: /home/icecat/XXXXXXX/wireguard-android/tunnel/tools/CMakeLists.txt debug|arm64-v8a : executing cmake /home/icecat/XXXXXXX/android-sdk/cmake/3.22.1/bin/cmake \
+  -H/home/icecat/XXXXXXX/wireguard-android/tunnel/tools \
+  -DCMAKE_SYSTEM_NAME=Android \
+  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+  -DCMAKE_SYSTEM_VERSION=24 \
+  -DANDROID_PLATFORM=android-24 \
+  -DANDROID_ABI=arm64-v8a \
+  -DCMAKE_ANDROID_ARCH_ABI=arm64-v8a \
+  -DANDROID_NDK=/home/icecat/XXXXXXX/android-sdk/ndk/27.0.12077973 \
+  -DCMAKE_ANDROID_NDK=/home/icecat/XXXXXXX/android-sdk/ndk/27.0.12077973 \
+  -DCMAKE_TOOLCHAIN_FILE=/home/icecat/XXXXXXX/android-sdk/ndk/27.0.12077973/build/cmake/android.toolchain.cmake \
+  -DCMAKE_MAKE_PROGRAM=/home/icecat/XXXXXXX/android-sdk/cmake/3.22.1/bin/ninja \
+  -DCMAKE_LIBRARY_OUTPUT_DIRECTORY=/home/icecat/XXXXXXX/wireguard-android/tunnel/build/intermediates/cxx/Debug/1h703k40/obj/arm64-v8a \
+  -DCMAKE_RUNTIME_OUTPUT_DIRECTORY=/home/icecat/XXXXXXX/wireguard-android/tunnel/build/intermediates/cxx/Debug/1h703k40/obj/arm64-v8a \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -B/home/icecat/XXXXXXX/wireguard-android/tunnel/.cxx/Debug/1h703k40/arm64-v8a \
+  -GNinja \
+  -DGRADLE_USER_HOME=/home/icecat/.gradle \
+  -DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON \
+  -DANDROID_PACKAGE_NAME=com.wireguard.android.debug
+
+C/C++: /home/icecat/XXXXXXX/wireguard-android/tunnel/tools/CMakeLists.txt debug|arm64-v8a : /home/icecat/XXXXXXX/android-sdk/cmake/3.22.1/bin/cmake \
+  -H/home/icecat/XXXXXXX/wireguard-android/tunnel/tools \
+  -DCMAKE_SYSTEM_NAME=Android \
+  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+  -DCMAKE_SYSTEM_VERSION=24 \
+  -DANDROID_PLATFORM=android-24 \
+  -DANDROID_ABI=arm64-v8a \
+  -DCMAKE_ANDROID_ARCH_ABI=arm64-v8a \
+  -DANDROID_NDK=/home/icecat/XXXXXXX/android-sdk/ndk/27.0.12077973 \
+  -DCMAKE_ANDROID_NDK=/home/icecat/XXXXXXX/android-sdk/ndk/27.0.12077973 \
+  -DCMAKE_TOOLCHAIN_FILE=/home/icecat/XXXXXXX/android-sdk/ndk/27.0.12077973/build/cmake/android.toolchain.cmake \
+  -DCMAKE_MAKE_PROGRAM=/home/icecat/XXXXXXX/android-sdk/cmake/3.22.1/bin/ninja \
+  -DCMAKE_LIBRARY_OUTPUT_DIRECTORY=/home/icecat/XXXXXXX/wireguard-android/tunnel/build/intermediates/cxx/Debug/1h703k40/obj/arm64-v8a \
+  -DCMAKE_RUNTIME_OUTPUT_DIRECTORY=/home/icecat/XXXXXXX/wireguard-android/tunnel/build/intermediates/cxx/Debug/1h703k40/obj/arm64-v8a \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -B/home/icecat/XXXXXXX/wireguard-android/tunnel/.cxx/Debug/1h703k40/arm64-v8a \
+  -GNinja \
+  -DGRADLE_USER_HOME=/home/icecat/.gradle \
+  -DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON \
+  -DANDROID_PACKAGE_NAME=com.wireguard.android.debug
+
+Starting process 'command '/home/icecat/XXXXXXX/android-sdk/cmake/3.22.1/bin/cmake''. Working directory: /home/icecat/XXXXXXX/wireguard-android/tunnel Command: /home/icecat/XXXXXXX/android-sdk/cmake/3.22.1/bin/cmake -H/home/icecat/XXXXXXX/wireguard-android/tunnel/tools -DCMAKE_SYSTEM_NAME=Android -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_SYSTEM_VERSION=24 -DANDROID_PLATFORM=android-24 -DANDROID_ABI=arm64-v8a -DCMAKE_ANDROID_ARCH_ABI=arm64-v8a -DANDROID_NDK=/home/icecat/XXXXXXX/android-sdk/ndk/27.0.12077973 -DCMAKE_ANDROID_NDK=/home/icecat/XXXXXXX/android-sdk/ndk/27.0.12077973 -DCMAKE_TOOLCHAIN_FILE=/home/icecat/XXXXXXX/android-sdk/ndk/27.0.12077973/build/cmake/android.toolchain.cmake -DCMAKE_MAKE_PROGRAM=/home/icecat/XXXXXXX/android-sdk/cmake/3.22.1/bin/ninja -DCMAKE_LIBRARY_OUTPUT_DIRECTORY=/home/icecat/XXXXXXX/wireguard-android/tunnel/build/intermediates/cxx/Debug/1h703k40/obj/arm64-v8a -DCMAKE_RUNTIME_OUTPUT_DIRECTORY=/home/icecat/XXXXXXX/wireguard-android/tunnel/build/intermediates/cxx/Debug/1h703k40/obj/arm64-v8a -DCMAKE_BUILD_TYPE=Debug -B/home/icecat/XXXXXXX/wireguard-android/tunnel/.cxx/Debug/1h703k40/arm64-v8a -GNinja -DGRADLE_USER_HOME=/home/icecat/.gradle -DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON -DANDROID_PACKAGE_NAME=com.wireguard.android.debug
+Successfully started process 'command '/home/icecat/XXXXXXX/android-sdk/cmake/3.22.1/bin/cmake''
+C/C++: CMake Error at CMakeLists.txt:11 (add_executable):
+C/C++:   Cannot find source file:
+C/C++:     wireguard-tools/src/wg-quick/android.c
+C/C++:   Tried extensions .c .C .c++ .cc .cpp .cxx .cu .mpp .m .M .mm .ixx .cppm .h
+C/C++:   .hh .h++ .hm .hpp .hxx .in .txx .f .F .for .f77 .f90 .f95 .f03 .hip .ispc
+C/C++: CMake Error at CMakeLists.txt:11 (add_executable):
+C/C++:   No SOURCES given to target: libwg-quick.so
+C/C++: CMake Generate step failed.  Build files cannot be regenerated correctly.
+C/C++: /home/icecat/XXXXXXX/wireguard-android/tunnel/tools/CMakeLists.txt debug|arm64-v8a : Received process result: 1
+C/C++: /home/icecat/XXXXXXX/wireguard-android/tunnel/tools/CMakeLists.txt debug|arm64-v8a : JSON generation completed with problem. Exception: com.android.ide.common.process.ProcessException: -- The C compiler identification is Clang 18.0.1
+-- The CXX compiler identification is Clang 18.0.1
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: /home/icecat/XXXXXXX/android-sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/clang - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /home/icecat/XXXXXXX/android-sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Configuring done
+
+C++ build system [configure] failed while executing:
+    /home/icecat/XXXXXXX/android-sdk/cmake/3.22.1/bin/cmake \
+      -H/home/icecat/XXXXXXX/wireguard-android/tunnel/tools \
+      -DCMAKE_SYSTEM_NAME=Android \
+      -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+      -DCMAKE_SYSTEM_VERSION=24 \
+      -DANDROID_PLATFORM=android-24 \
+      -DANDROID_ABI=arm64-v8a \
+      -DCMAKE_ANDROID_ARCH_ABI=arm64-v8a \
+      -DANDROID_NDK=/home/icecat/XXXXXXX/android-sdk/ndk/27.0.12077973 \
+      -DCMAKE_ANDROID_NDK=/home/icecat/XXXXXXX/android-sdk/ndk/27.0.12077973 \
+      -DCMAKE_TOOLCHAIN_FILE=/home/icecat/XXXXXXX/android-sdk/ndk/27.0.12077973/build/cmake/android.toolchain.cmake \
+      -DCMAKE_MAKE_PROGRAM=/home/icecat/XXXXXXX/android-sdk/cmake/3.22.1/bin/ninja \
+      -DCMAKE_LIBRARY_OUTPUT_DIRECTORY=/home/icecat/XXXXXXX/wireguard-android/tunnel/build/intermediates/cxx/Debug/1h703k40/obj/arm64-v8a \
+      -DCMAKE_RUNTIME_OUTPUT_DIRECTORY=/home/icecat/XXXXXXX/wireguard-android/tunnel/build/intermediates/cxx/Debug/1h703k40/obj/arm64-v8a \
+      -DCMAKE_BUILD_TYPE=Debug \
+      -B/home/icecat/XXXXXXX/wireguard-android/tunnel/.cxx/Debug/1h703k40/arm64-v8a \
+      -GNinja \
+      -DGRADLE_USER_HOME=/home/icecat/.gradle \
+      -DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON \
+      -DANDROID_PACKAGE_NAME=com.wireguard.android.debug
+  from /home/icecat/XXXXXXX/wireguard-android/tunnel
+CMake Error at CMakeLists.txt:11 (add_executable):
+  Cannot find source file:
+
+    wireguard-tools/src/wg-quick/android.c
+
+  Tried extensions .c .C .c++ .cc .cpp .cxx .cu .mpp .m .M .mm .ixx .cppm .h
+  .hh .h++ .hm .hpp .hxx .in .txx .f .F .for .f77 .f90 .f95 .f03 .hip .ispc
+
+
+CMake Error at CMakeLists.txt:11 (add_executable):
+  No SOURCES given to target: libwg-quick.so
+
+
+CMake Generate step failed.  Build files cannot be regenerated correctly.
+C/C++: /home/icecat/XXXXXXX/wireguard-android/tunnel/tools/CMakeLists.txt debug|arm64-v8a : Writing build model to /home/icecat/XXXXXXX/wireguard-android/tunnel/build/intermediates/cxx/Debug/1h703k40/logs/arm64-v8a/build_model.json
+
+> Task :ui:javaPreCompileDebug
+Downloading https://dl.google.com/dl/android/maven2/androidx/databinding/databinding-compiler/8.13.2/databinding-compiler-8.13.2.pom to /home/icecat/.gradle/.tmp/gradle_download15428184407414297548bin
+Resource missing. [HTTP GET: https://dl.google.com/dl/android/maven2/com/google/auto/auto-common/1.2.1/auto-common-1.2.1.pom]
+Resource missing. [HTTP HEAD: https://dl.google.com/dl/android/maven2/com/google/code/gson/gson/2.11.0/gson-2.11.0.pom]
+Resource missing. [HTTP HEAD: https://dl.google.com/dl/android/maven2/com/google/guava/guava/33.3.1-jre/guava-33.3.1-jre.pom]
+Resource missing. [HTTP HEAD: https://dl.google.com/dl/android/maven2/com/googlecode/juniversalchardet/juniversalchardet/1.0.3/juniversalchardet-1.0.3.pom]
+Downloading https://repo.maven.apache.org/maven2/com/google/auto/auto-common/1.2.1/auto-common-1.2.1.pom to /home/icecat/.gradle/.tmp/gradle_download8738037657521525330bin
+Resource missing. [HTTP HEAD: https://dl.google.com/dl/android/maven2/org/sonatype/oss/oss-parent/7/oss-parent-7.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/com/google/code/gson/gson/2.11.0/gson-2.11.0.pom, /home/icecat/.gradle/caches/modules-2/files-2.1/com.google.code.gson/gson/2.11.0/55796dd7cc329027df79e96c4e6631e3c02c93c5/gson-2.11.0.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/com/googlecode/juniversalchardet/juniversalchardet/1.0.3/juniversalchardet-1.0.3.pom, /home/icecat/.gradle/caches/modules-2/files-2.1/com.googlecode.juniversalchardet/juniversalchardet/1.0.3/be6da8320adedafc712d645ddaaad00357b55408/juniversalchardet-1.0.3.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/com/google/guava/guava/33.3.1-jre/guava-33.3.1-jre.pom, /home/icecat/.gradle/caches/modules-2/files-2.1/com.google.guava/guava/33.3.1-jre/5a5628b34628748abcb73144a909ddbea2265ed9/guava-33.3.1-jre.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/org/sonatype/oss/oss-parent/7/oss-parent-7.pom, /home/icecat/.gradle/caches/modules-2/files-2.1/org.sonatype.oss/oss-parent/7/46b8a785b60a2767095b8611613b58577e96d4c9/oss-parent-7.pom]
+Resource missing. [HTTP HEAD: https://dl.google.com/dl/android/maven2/com/squareup/javapoet/1.10.0/javapoet-1.10.0.pom]
+Resource missing. [HTTP HEAD: https://dl.google.com/dl/android/maven2/com/google/guava/guava-parent/33.3.1-jre/guava-parent-33.3.1-jre.pom]
+Resource missing. [HTTP HEAD: https://dl.google.com/dl/android/maven2/commons-io/commons-io/2.16.1/commons-io-2.16.1.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/com/squareup/javapoet/1.10.0/javapoet-1.10.0.pom, /home/icecat/.gradle/caches/modules-2/files-2.1/com.squareup/javapoet/1.10.0/111612d623e9d2047798f13324fcb29966f080e3/javapoet-1.10.0.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/com/google/guava/guava-parent/33.3.1-jre/guava-parent-33.3.1-jre.pom, /home/icecat/.gradle/caches/modules-2/files-2.1/com.google.guava/guava-parent/33.3.1-jre/94729a0ed1dc35f623edd13afa6c1c2fe9a15d7c/guava-parent-33.3.1-jre.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/commons-io/commons-io/2.16.1/commons-io-2.16.1.pom, /home/icecat/.gradle/caches/modules-2/files-2.1/commons-io/commons-io/2.16.1/553d6f69e338060a231755afe0ebf99d14b45da6/commons-io-2.16.1.pom]
+Resource missing. [HTTP HEAD: https://dl.google.com/dl/android/maven2/com/google/code/gson/gson-parent/2.11.0/gson-parent-2.11.0.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/com/google/guava/guava/33.3.1-jre/guava-33.3.1-jre.module, /home/icecat/.gradle/caches/modules-2/files-2.1/com.google.guava/guava/33.3.1-jre/c99293bbf166d01849489fc6f94a101f79072aa7/guava-33.3.1-jre.module]
+Resource missing. [HTTP HEAD: https://dl.google.com/dl/android/maven2/org/glassfish/jaxb/jaxb-runtime/2.3.2/jaxb-runtime-2.3.2.pom]
+Resource missing. [HTTP HEAD: https://dl.google.com/dl/android/maven2/org/apache/commons/commons-parent/69/commons-parent-69.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/com/google/code/gson/gson-parent/2.11.0/gson-parent-2.11.0.pom, /home/icecat/.gradle/caches/modules-2/files-2.1/com.google.code.gson/gson-parent/2.11.0/b32d3bc5c89c852efe4c176df6c3fdeccbe150ef/gson-parent-2.11.0.pom]
+Resource missing. [HTTP HEAD: https://dl.google.com/dl/android/maven2/org/jetbrains/kotlin/kotlin-stdlib-jdk8/2.2.0/kotlin-stdlib-jdk8-2.2.0.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/org/glassfish/jaxb/jaxb-runtime/2.3.2/jaxb-runtime-2.3.2.pom, /home/icecat/.gradle/caches/modules-2/files-2.1/org.glassfish.jaxb/jaxb-runtime/2.3.2/f46a0f023205138c366f0b0c9316f8663bb32a4f/jaxb-runtime-2.3.2.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/org/apache/commons/commons-parent/69/commons-parent-69.pom, /home/icecat/.gradle/caches/modules-2/files-2.1/org.apache.commons/commons-parent/69/6ebeacd37818d945d96c06b44af10e050d2ef7c4/commons-parent-69.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-stdlib-jdk8/2.2.0/kotlin-stdlib-jdk8-2.2.0.pom, /home/icecat/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib-jdk8/2.2.0/f0fea31370aac23f2ca84741858ab77b209f4a3/kotlin-stdlib-jdk8-2.2.0.pom]
+Resource missing. [HTTP HEAD: https://dl.google.com/dl/android/maven2/org/apache/apache/31/apache-31.pom]
+Resource missing. [HTTP HEAD: https://dl.google.com/dl/android/maven2/com/sun/xml/bind/mvn/jaxb-runtime-parent/2.3.2/jaxb-runtime-parent-2.3.2.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/org/apache/apache/31/apache-31.pom, /home/icecat/.gradle/caches/modules-2/files-2.1/org.apache/apache/31/9009cbdad2b69835f2df9265794c8ab50cf4dce1/apache-31.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/com/sun/xml/bind/mvn/jaxb-runtime-parent/2.3.2/jaxb-runtime-parent-2.3.2.pom, /home/icecat/.gradle/caches/modules-2/files-2.1/com.sun.xml.bind.mvn/jaxb-runtime-parent/2.3.2/b9916bbbf37042807a649a2a7fcb6b97e193c28a/jaxb-runtime-parent-2.3.2.pom]
+Resource missing. [HTTP HEAD: https://dl.google.com/dl/android/maven2/org/junit/junit-bom/5.10.2/junit-bom-5.10.2.pom]
+Resource missing. [HTTP HEAD: https://dl.google.com/dl/android/maven2/com/sun/xml/bind/mvn/jaxb-parent/2.3.2/jaxb-parent-2.3.2.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/org/junit/junit-bom/5.10.2/junit-bom-5.10.2.pom, /home/icecat/.gradle/caches/modules-2/files-2.1/org.junit/junit-bom/5.10.2/b25ed98a5bd08cdda60e569cf22822a760e76019/junit-bom-5.10.2.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/com/sun/xml/bind/mvn/jaxb-parent/2.3.2/jaxb-parent-2.3.2.pom, /home/icecat/.gradle/caches/modules-2/files-2.1/com.sun.xml.bind.mvn/jaxb-parent/2.3.2/5d96ada92105844d8a2eedfb63bf782a712cc0a/jaxb-parent-2.3.2.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/org/junit/junit-bom/5.10.2/junit-bom-5.10.2.module, /home/icecat/.gradle/caches/modules-2/files-2.1/org.junit/junit-bom/5.10.2/ce536748a853ae6ac09e7815fce0678a96cff778/junit-bom-5.10.2.module]
+Resource missing. [HTTP HEAD: https://dl.google.com/dl/android/maven2/com/sun/xml/bind/jaxb-bom-ext/2.3.2/jaxb-bom-ext-2.3.2.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/com/sun/xml/bind/jaxb-bom-ext/2.3.2/jaxb-bom-ext-2.3.2.pom, /home/icecat/.gradle/caches/modules-2/files-2.1/com.sun.xml.bind/jaxb-bom-ext/2.3.2/7a92d12e31a67bae498f840c8f7c334a4fee0fbb/jaxb-bom-ext-2.3.2.pom]
+Resource missing. [HTTP HEAD: https://dl.google.com/dl/android/maven2/org/glassfish/jaxb/jaxb-bom/2.3.2/jaxb-bom-2.3.2.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/org/glassfish/jaxb/jaxb-bom/2.3.2/jaxb-bom-2.3.2.pom, /home/icecat/.gradle/caches/modules-2/files-2.1/org.glassfish.jaxb/jaxb-bom/2.3.2/c7cd28b5d3871feba8cebf6d4587043fb0d6fd0a/jaxb-bom-2.3.2.pom]
+Resource missing. [HTTP HEAD: https://dl.google.com/dl/android/maven2/org/eclipse/ee4j/project/1.0.5/project-1.0.5.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/org/eclipse/ee4j/project/1.0.5/project-1.0.5.pom, /home/icecat/.gradle/caches/modules-2/files-2.1/org.eclipse.ee4j/project/1.0.5/d391c5ed15d8fb1dadba9c5d1017006d56c50332/project-1.0.5.pom]
+Resource missing. [HTTP HEAD: https://dl.google.com/dl/android/maven2/com/google/errorprone/error_prone_annotations/2.27.0/error_prone_annotations-2.27.0.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/com/google/errorprone/error_prone_annotations/2.27.0/error_prone_annotations-2.27.0.pom, /home/icecat/.gradle/caches/modules-2/files-2.1/com.google.errorprone/error_prone_annotations/2.27.0/85103026aa50b0e4efafee8f486e3ecd9ebfde31/error_prone_annotations-2.27.0.pom]
+Resource missing. [HTTP HEAD: https://dl.google.com/dl/android/maven2/com/google/errorprone/error_prone_parent/2.27.0/error_prone_parent-2.27.0.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/com/google/errorprone/error_prone_parent/2.27.0/error_prone_parent-2.27.0.pom, /home/icecat/.gradle/caches/modules-2/files-2.1/com.google.errorprone/error_prone_parent/2.27.0/336f77abf2668b10cae4ab136ea0c8258875de00/error_prone_parent-2.27.0.pom]
+Resource missing. [HTTP GET: https://dl.google.com/dl/android/maven2/com/google/errorprone/error_prone_annotations/2.28.0/error_prone_annotations-2.28.0.pom]
+Downloading https://repo.maven.apache.org/maven2/com/google/errorprone/error_prone_annotations/2.28.0/error_prone_annotations-2.28.0.pom to /home/icecat/.gradle/.tmp/gradle_download13823915320867720247bin
+Resource missing. [HTTP GET: https://dl.google.com/dl/android/maven2/com/google/errorprone/error_prone_parent/2.28.0/error_prone_parent-2.28.0.pom]
+Downloading https://repo.maven.apache.org/maven2/com/google/errorprone/error_prone_parent/2.28.0/error_prone_parent-2.28.0.pom to /home/icecat/.gradle/.tmp/gradle_download1734839431314571972bin
+Resource missing. [HTTP HEAD: https://dl.google.com/dl/android/maven2/org/checkerframework/checker-qual/3.43.0/checker-qual-3.43.0.pom]
+Resource missing. [HTTP HEAD: https://dl.google.com/dl/android/maven2/com/google/guava/listenablefuture/9999.0-empty-to-avoid-conflict-with-guava/listenablefuture-9999.0-empty-to-avoid-conflict-with-guava.pom]
+Resource missing. [HTTP HEAD: https://dl.google.com/dl/android/maven2/com/google/guava/failureaccess/1.0.2/failureaccess-1.0.2.pom]
+Resource missing. [HTTP HEAD: https://dl.google.com/dl/android/maven2/com/google/code/findbugs/jsr305/3.0.2/jsr305-3.0.2.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/org/checkerframework/checker-qual/3.43.0/checker-qual-3.43.0.pom, /home/icecat/.gradle/caches/modules-2/files-2.1/org.checkerframework/checker-qual/3.43.0/48ad8955d64547b84ef581361c29c030e56430cb/checker-qual-3.43.0.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/com/google/code/findbugs/jsr305/3.0.2/jsr305-3.0.2.pom, /home/icecat/.gradle/caches/modules-2/files-2.1/com.google.code.findbugs/jsr305/3.0.2/8d93cdf4d84d7e1de736df607945c6df0730a10f/jsr305-3.0.2.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/com/google/guava/listenablefuture/9999.0-empty-to-avoid-conflict-with-guava/listenablefuture-9999.0-empty-to-avoid-conflict-with-guava.pom, /home/icecat/.gradle/caches/modules-2/files-2.1/com.google.guava/listenablefuture/9999.0-empty-to-avoid-conflict-with-guava/1b77ba79f9b2b7dfd4e15ea7bb0d568d5eb9cb8d/listenablefuture-9999.0-empty-to-avoid-conflict-with-guava.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/com/google/guava/failureaccess/1.0.2/failureaccess-1.0.2.pom, /home/icecat/.gradle/caches/modules-2/files-2.1/com.google.guava/failureaccess/1.0.2/2df7ebe307b885a222be352d3bffd5fcf0428ad4/failureaccess-1.0.2.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/org/checkerframework/checker-qual/3.43.0/checker-qual-3.43.0.module, /home/icecat/.gradle/caches/modules-2/files-2.1/org.checkerframework/checker-qual/3.43.0/3020cf05cf20a5f6e2137e59291be76cd1252b83/checker-qual-3.43.0.module]
+Resource missing. [HTTP HEAD: https://dl.google.com/dl/android/maven2/com/google/j2objc/j2objc-annotations/3.0.0/j2objc-annotations-3.0.0.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/com/google/j2objc/j2objc-annotations/3.0.0/j2objc-annotations-3.0.0.pom, /home/icecat/.gradle/caches/modules-2/files-2.1/com.google.j2objc/j2objc-annotations/3.0.0/45cbaa9d129a696907d1e5bc56c707b6a0043181/j2objc-annotations-3.0.0.pom]
+Resource missing. [HTTP HEAD: https://dl.google.com/dl/android/maven2/jakarta/xml/bind/jakarta.xml.bind-api/2.3.2/jakarta.xml.bind-api-2.3.2.pom]
+Resource missing. [HTTP HEAD: https://dl.google.com/dl/android/maven2/org/glassfish/jaxb/txw2/2.3.2/txw2-2.3.2.pom]
+Resource missing. [HTTP HEAD: https://dl.google.com/dl/android/maven2/org/jvnet/staxex/stax-ex/1.8.1/stax-ex-1.8.1.pom]
+Resource missing. [HTTP HEAD: https://dl.google.com/dl/android/maven2/com/sun/istack/istack-commons-runtime/3.0.8/istack-commons-runtime-3.0.8.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/org/glassfish/jaxb/txw2/2.3.2/txw2-2.3.2.pom, /home/icecat/.gradle/caches/modules-2/files-2.1/org.glassfish.jaxb/txw2/2.3.2/22d24b523eb02a955e8bfa7af6572207a3490482/txw2-2.3.2.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/jakarta/xml/bind/jakarta.xml.bind-api/2.3.2/jakarta.xml.bind-api-2.3.2.pom, /home/icecat/.gradle/caches/modules-2/files-2.1/jakarta.xml.bind/jakarta.xml.bind-api/2.3.2/6142021e7186bf29f5f7639b968cfe250ce086dd/jakarta.xml.bind-api-2.3.2.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/com/sun/istack/istack-commons-runtime/3.0.8/istack-commons-runtime-3.0.8.pom, /home/icecat/.gradle/caches/modules-2/files-2.1/com.sun.istack/istack-commons-runtime/3.0.8/fd5dfcff9a1f1e7e4371c6a998b74ee0e52bdc4a/istack-commons-runtime-3.0.8.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/org/jvnet/staxex/stax-ex/1.8.1/stax-ex-1.8.1.pom, /home/icecat/.gradle/caches/modules-2/files-2.1/org.jvnet.staxex/stax-ex/1.8.1/93132b1ebaf1c419ad3d2216924af39c68f43b51/stax-ex-1.8.1.pom]
+Resource missing. [HTTP HEAD: https://dl.google.com/dl/android/maven2/com/sun/xml/bind/mvn/jaxb-txw-parent/2.3.2/jaxb-txw-parent-2.3.2.pom]
+Resource missing. [HTTP HEAD: https://dl.google.com/dl/android/maven2/jakarta/xml/bind/jakarta.xml.bind-api-parent/2.3.2/jakarta.xml.bind-api-parent-2.3.2.pom]
+Resource missing. [HTTP HEAD: https://dl.google.com/dl/android/maven2/com/sun/istack/istack-commons/3.0.8/istack-commons-3.0.8.pom]
+Resource missing. [HTTP HEAD: https://dl.google.com/dl/android/maven2/com/sun/xml/fastinfoset/FastInfoset/1.2.16/FastInfoset-1.2.16.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/com/sun/xml/bind/mvn/jaxb-txw-parent/2.3.2/jaxb-txw-parent-2.3.2.pom, /home/icecat/.gradle/caches/modules-2/files-2.1/com.sun.xml.bind.mvn/jaxb-txw-parent/2.3.2/1f872b3cb7c49c35501651aab063659a9775f06a/jaxb-txw-parent-2.3.2.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/jakarta/xml/bind/jakarta.xml.bind-api-parent/2.3.2/jakarta.xml.bind-api-parent-2.3.2.pom, /home/icecat/.gradle/caches/modules-2/files-2.1/jakarta.xml.bind/jakarta.xml.bind-api-parent/2.3.2/7be72e8345e33f747d5d813e313abd8df25f259e/jakarta.xml.bind-api-parent-2.3.2.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/com/sun/istack/istack-commons/3.0.8/istack-commons-3.0.8.pom, /home/icecat/.gradle/caches/modules-2/files-2.1/com.sun.istack/istack-commons/3.0.8/3835dae3b9e529039b70bce883a1c7438713c295/istack-commons-3.0.8.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/com/sun/xml/fastinfoset/FastInfoset/1.2.16/FastInfoset-1.2.16.pom, /home/icecat/.gradle/caches/modules-2/files-2.1/com.sun.xml.fastinfoset/FastInfoset/1.2.16/e4d2eed02e0e0a9f4c892e6d43bdf3dfdc1fa2ee/FastInfoset-1.2.16.pom]
+Resource missing. [HTTP HEAD: https://dl.google.com/dl/android/maven2/jakarta/activation/jakarta.activation-api/1.2.1/jakarta.activation-api-1.2.1.pom]
+Resource missing. [HTTP HEAD: https://dl.google.com/dl/android/maven2/com/sun/xml/fastinfoset/fastinfoset-project/1.2.16/fastinfoset-project-1.2.16.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/jakarta/activation/jakarta.activation-api/1.2.1/jakarta.activation-api-1.2.1.pom, /home/icecat/.gradle/caches/modules-2/files-2.1/jakarta.activation/jakarta.activation-api/1.2.1/b9c1b2502949970360efe8d75ec5268d87d38a82/jakarta.activation-api-1.2.1.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/com/sun/xml/fastinfoset/fastinfoset-project/1.2.16/fastinfoset-project-1.2.16.pom, /home/icecat/.gradle/caches/modules-2/files-2.1/com.sun.xml.fastinfoset/fastinfoset-project/1.2.16/86113f7ee9a5d995429bf75294b57b31f0a17d29/fastinfoset-project-1.2.16.pom]
+Resource missing. [HTTP HEAD: https://dl.google.com/dl/android/maven2/com/sun/activation/all/1.2.1/all-1.2.1.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/com/sun/activation/all/1.2.1/all-1.2.1.pom, /home/icecat/.gradle/caches/modules-2/files-2.1/com.sun.activation/all/1.2.1/efca912f55f71e63ab2eb82552519b66dd123f98/all-1.2.1.pom]
+Resource missing. [HTTP HEAD: https://dl.google.com/dl/android/maven2/org/eclipse/ee4j/project/1.0.2/project-1.0.2.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/org/eclipse/ee4j/project/1.0.2/project-1.0.2.pom, /home/icecat/.gradle/caches/modules-2/files-2.1/org.eclipse.ee4j/project/1.0.2/5730bedee1faaeeb62b0afc4ed1c4571f87a8eb4/project-1.0.2.pom]
+Resource missing. [HTTP HEAD: https://dl.google.com/dl/android/maven2/org/jetbrains/kotlin/kotlin-stdlib/2.2.0/kotlin-stdlib-2.2.0.pom]
+Resource missing. [HTTP HEAD: https://dl.google.com/dl/android/maven2/org/jetbrains/kotlin/kotlin-stdlib-jdk7/2.2.0/kotlin-stdlib-jdk7-2.2.0.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-stdlib/2.2.0/kotlin-stdlib-2.2.0.pom, /home/icecat/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.0/ba1da2859c5c9d367694b535f03be65257c8531d/kotlin-stdlib-2.2.0.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-stdlib-jdk7/2.2.0/kotlin-stdlib-jdk7-2.2.0.pom, /home/icecat/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib-jdk7/2.2.0/a18d5d4d624bf6eff6549d66d05e70f06595d704/kotlin-stdlib-jdk7-2.2.0.pom]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-stdlib/2.2.0/kotlin-stdlib-2.2.0.module, /home/icecat/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.0/b2217a315630c39fed230de2c0d45a92ef16cde9/kotlin-stdlib-2.2.0.module]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/com/google/code/gson/gson/2.11.0/gson-2.11.0.jar, /home/icecat/.gradle/caches/modules-2/files-2.1/com.google.code.gson/gson/2.11.0/527175ca6d81050b53bdd4c457a6d6e017626b0e/gson-2.11.0.jar]
+Downloading https://repo.maven.apache.org/maven2/com/google/auto/auto-common/1.2.1/auto-common-1.2.1.jar to /home/icecat/.gradle/.tmp/gradle_download4656554534466946876bin
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/com/google/guava/guava/33.3.1-jre/guava-33.3.1-jre.jar, /home/icecat/.gradle/caches/modules-2/files-2.1/com.google.guava/guava/33.3.1-jre/852f8b363da0111e819460021ca693cacca3e8db/guava-33.3.1-jre.jar]
+Downloading https://dl.google.com/dl/android/maven2/androidx/databinding/databinding-compiler/8.13.2/databinding-compiler-8.13.2.jar to /home/icecat/.gradle/.tmp/gradle_download14985589324549504422bin
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/com/googlecode/juniversalchardet/juniversalchardet/1.0.3/juniversalchardet-1.0.3.jar, /home/icecat/.gradle/caches/modules-2/files-2.1/com.googlecode.juniversalchardet/juniversalchardet/1.0.3/cd49678784c46aa8789c060538e0154013bb421b/juniversalchardet-1.0.3.jar]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/com/squareup/javapoet/1.10.0/javapoet-1.10.0.jar, /home/icecat/.gradle/caches/modules-2/files-2.1/com.squareup/javapoet/1.10.0/712c178d35185d8261295913c9f2a7d6867a6007/javapoet-1.10.0.jar]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/commons-io/commons-io/2.16.1/commons-io-2.16.1.jar, /home/icecat/.gradle/caches/modules-2/files-2.1/commons-io/commons-io/2.16.1/377d592e740dc77124e0901291dbfaa6810a200e/commons-io-2.16.1.jar]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/org/glassfish/jaxb/jaxb-runtime/2.3.2/jaxb-runtime-2.3.2.jar, /home/icecat/.gradle/caches/modules-2/files-2.1/org.glassfish.jaxb/jaxb-runtime/2.3.2/5528bc882ea499a09d720b42af11785c4fc6be2a/jaxb-runtime-2.3.2.jar]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-stdlib-jdk7/2.2.0/kotlin-stdlib-jdk7-2.2.0.jar, /home/icecat/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib-jdk7/2.2.0/bfd42edfc4f88de5a02131108ab800fb32d53d03/kotlin-stdlib-jdk7-2.2.0.jar]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-stdlib/2.2.0/kotlin-stdlib-2.2.0.jar, /home/icecat/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib/2.2.0/fdfc65fbc42fda253a26f61dac3c0aca335fae96/kotlin-stdlib-2.2.0.jar]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-stdlib-jdk8/2.2.0/kotlin-stdlib-jdk8-2.2.0.jar, /home/icecat/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-stdlib-jdk8/2.2.0/ed572b04cd66acce7837ad753e4fe64d9c536025/kotlin-stdlib-jdk8-2.2.0.jar]
+Downloading https://repo.maven.apache.org/maven2/com/google/errorprone/error_prone_annotations/2.28.0/error_prone_annotations-2.28.0.jar to /home/icecat/.gradle/.tmp/gradle_download11668363633273391097bin
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/com/google/guava/failureaccess/1.0.2/failureaccess-1.0.2.jar, /home/icecat/.gradle/caches/modules-2/files-2.1/com.google.guava/failureaccess/1.0.2/c4a06a64e650562f30b7bf9aaec1bfed43aca12b/failureaccess-1.0.2.jar]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/com/google/guava/listenablefuture/9999.0-empty-to-avoid-conflict-with-guava/listenablefuture-9999.0-empty-to-avoid-conflict-with-guava.jar, /home/icecat/.gradle/caches/modules-2/files-2.1/com.google.guava/listenablefuture/9999.0-empty-to-avoid-conflict-with-guava/b421526c5f297295adef1c886e5246c39d4ac629/listenablefuture-9999.0-empty-to-avoid-conflict-with-guava.jar]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/com/google/code/findbugs/jsr305/3.0.2/jsr305-3.0.2.jar, /home/icecat/.gradle/caches/modules-2/files-2.1/com.google.code.findbugs/jsr305/3.0.2/25ea2e8b0c338a877313bd4672d3fe056ea78f0d/jsr305-3.0.2.jar]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/com/google/j2objc/j2objc-annotations/3.0.0/j2objc-annotations-3.0.0.jar, /home/icecat/.gradle/caches/modules-2/files-2.1/com.google.j2objc/j2objc-annotations/3.0.0/7399e65dd7e9ff3404f4535b2f017093bdb134c7/j2objc-annotations-3.0.0.jar]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/org/checkerframework/checker-qual/3.43.0/checker-qual-3.43.0.jar, /home/icecat/.gradle/caches/modules-2/files-2.1/org.checkerframework/checker-qual/3.43.0/9425eee39e56b116d2b998b7c2cebcbd11a3c98b/checker-qual-3.43.0.jar]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/org/jvnet/staxex/stax-ex/1.8.1/stax-ex-1.8.1.jar, /home/icecat/.gradle/caches/modules-2/files-2.1/org.jvnet.staxex/stax-ex/1.8.1/78011e483a21102fb4858f3e8f269a677e50aa23/stax-ex-1.8.1.jar]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/jakarta/xml/bind/jakarta.xml.bind-api/2.3.2/jakarta.xml.bind-api-2.3.2.jar, /home/icecat/.gradle/caches/modules-2/files-2.1/jakarta.xml.bind/jakarta.xml.bind-api/2.3.2/8d49996a4338670764d7ca4b85a1c4ccf7fe665d/jakarta.xml.bind-api-2.3.2.jar]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/org/glassfish/jaxb/txw2/2.3.2/txw2-2.3.2.jar, /home/icecat/.gradle/caches/modules-2/files-2.1/org.glassfish.jaxb/txw2/2.3.2/ce5be7da2e442c25ec14c766cb60cb802741727b/txw2-2.3.2.jar]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/com/sun/istack/istack-commons-runtime/3.0.8/istack-commons-runtime-3.0.8.jar, /home/icecat/.gradle/caches/modules-2/files-2.1/com.sun.istack/istack-commons-runtime/3.0.8/d6a97364045aa6b99bf2d3c566a3f98599c2d296/istack-commons-runtime-3.0.8.jar]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/com/sun/xml/fastinfoset/FastInfoset/1.2.16/FastInfoset-1.2.16.jar, /home/icecat/.gradle/caches/modules-2/files-2.1/com.sun.xml.fastinfoset/FastInfoset/1.2.16/4eb6a0adad553bf759ffe86927df6f3b848c8bea/FastInfoset-1.2.16.jar]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/jakarta/activation/jakarta.activation-api/1.2.1/jakarta.activation-api-1.2.1.jar, /home/icecat/.gradle/caches/modules-2/files-2.1/jakarta.activation/jakarta.activation-api/1.2.1/562a587face36ec7eff2db7f2fc95425c6602bc1/jakarta.activation-api-1.2.1.jar]
+Found locally available resource with matching checksum: [https://repo.maven.apache.org/maven2/org/jetbrains/annotations/13.0/annotations-13.0.jar, /home/icecat/.gradle/caches/modules-2/files-2.1/org.jetbrains/annotations/13.0/919f0dfe192fb4e063e7dacadee7f8bb9a2672a9/annotations-13.0.jar]
+Build cache key for task ':ui:javaPreCompileDebug' is 106383ff6aced2c6c079f0a26aa02471
+Task ':ui:javaPreCompileDebug' is not up-to-date because:
+  No history is available.
+Stored cache entry for task ':ui:javaPreCompileDebug' with cache key 106383ff6aced2c6c079f0a26aa02471
+Build e9dc5984-5c3f-4fe8-bd4e-adc4a47556cb is closed
+
+[Incubating] Problems report is available at: file:///home/icecat/XXXXXXX/wireguard-android/build/reports/problems/problems-report.html
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':tunnel:configureCMakeDebug[arm64-v8a]'.
+> [CXX1429] error when building with cmake using /home/icecat/XXXXXXX/wireguard-android/tunnel/tools/CMakeLists.txt: -- The C compiler identification is Clang 18.0.1
+  -- The CXX compiler identification is Clang 18.0.1
+  -- Detecting C compiler ABI info
+  -- Detecting C compiler ABI info - done
+  -- Check for working C compiler: /home/icecat/XXXXXXX/android-sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/clang - skipped
+  -- Detecting C compile features
+  -- Detecting C compile features - done
+  -- Detecting CXX compiler ABI info
+  -- Detecting CXX compiler ABI info - done
+  -- Check for working CXX compiler: /home/icecat/XXXXXXX/android-sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++ - skipped
+  -- Detecting CXX compile features
+  -- Detecting CXX compile features - done
+  -- Configuring done
+  
+  C++ build system [configure] failed while executing:
+      /home/icecat/XXXXXXX/android-sdk/cmake/3.22.1/bin/cmake \
+        -H/home/icecat/XXXXXXX/wireguard-android/tunnel/tools \
+        -DCMAKE_SYSTEM_NAME=Android \
+        -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+        -DCMAKE_SYSTEM_VERSION=24 \
+        -DANDROID_PLATFORM=android-24 \
+        -DANDROID_ABI=arm64-v8a \
+        -DCMAKE_ANDROID_ARCH_ABI=arm64-v8a \
+        -DANDROID_NDK=/home/icecat/XXXXXXX/android-sdk/ndk/27.0.12077973 \
+        -DCMAKE_ANDROID_NDK=/home/icecat/XXXXXXX/android-sdk/ndk/27.0.12077973 \
+        -DCMAKE_TOOLCHAIN_FILE=/home/icecat/XXXXXXX/android-sdk/ndk/27.0.12077973/build/cmake/android.toolchain.cmake \
+        -DCMAKE_MAKE_PROGRAM=/home/icecat/XXXXXXX/android-sdk/cmake/3.22.1/bin/ninja \
+        -DCMAKE_LIBRARY_OUTPUT_DIRECTORY=/home/icecat/XXXXXXX/wireguard-android/tunnel/build/intermediates/cxx/Debug/1h703k40/obj/arm64-v8a \
+        -DCMAKE_RUNTIME_OUTPUT_DIRECTORY=/home/icecat/XXXXXXX/wireguard-android/tunnel/build/intermediates/cxx/Debug/1h703k40/obj/arm64-v8a \
+        -DCMAKE_BUILD_TYPE=Debug \
+        -B/home/icecat/XXXXXXX/wireguard-android/tunnel/.cxx/Debug/1h703k40/arm64-v8a \
+        -GNinja \
+        -DGRADLE_USER_HOME=/home/icecat/.gradle \
+        -DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON \
+        -DANDROID_PACKAGE_NAME=com.wireguard.android.debug
+    from /home/icecat/XXXXXXX/wireguard-android/tunnel
+  CMake Error at CMakeLists.txt:11 (add_executable):
+    Cannot find source file:
+  
+      wireguard-tools/src/wg-quick/android.c
+  
+    Tried extensions .c .C .c++ .cc .cpp .cxx .cu .mpp .m .M .mm .ixx .cppm .h
+    .hh .h++ .hm .hpp .hxx .in .txx .f .F .for .f77 .f90 .f95 .f03 .hip .ispc
+  
+  
+  CMake Error at CMakeLists.txt:11 (add_executable):
+    No SOURCES given to target: libwg-quick.so
+  
+  
+  CMake Generate step failed.  Build files cannot be regenerated correctly. : com.android.ide.common.process.ProcessException: -- The C compiler identification is Clang 18.0.1
+  -- The CXX compiler identification is Clang 18.0.1
+  -- Detecting C compiler ABI info
+  -- Detecting C compiler ABI info - done
+  -- Check for working C compiler: /home/icecat/XXXXXXX/android-sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/clang - skipped
+  -- Detecting C compile features
+  -- Detecting C compile features - done
+  -- Detecting CXX compiler ABI info
+  -- Detecting CXX compiler ABI info - done
+  -- Check for working CXX compiler: /home/icecat/XXXXXXX/android-sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++ - skipped
+  -- Detecting CXX compile features
+  -- Detecting CXX compile features - done
+  -- Configuring done
+  
+  C++ build system [configure] failed while executing:
+      /home/icecat/XXXXXXX/android-sdk/cmake/3.22.1/bin/cmake \
+        -H/home/icecat/XXXXXXX/wireguard-android/tunnel/tools \
+        -DCMAKE_SYSTEM_NAME=Android \
+        -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+        -DCMAKE_SYSTEM_VERSION=24 \
+        -DANDROID_PLATFORM=android-24 \
+        -DANDROID_ABI=arm64-v8a \
+        -DCMAKE_ANDROID_ARCH_ABI=arm64-v8a \
+        -DANDROID_NDK=/home/icecat/XXXXXXX/android-sdk/ndk/27.0.12077973 \
+        -DCMAKE_ANDROID_NDK=/home/icecat/XXXXXXX/android-sdk/ndk/27.0.12077973 \
+        -DCMAKE_TOOLCHAIN_FILE=/home/icecat/XXXXXXX/android-sdk/ndk/27.0.12077973/build/cmake/android.toolchain.cmake \
+        -DCMAKE_MAKE_PROGRAM=/home/icecat/XXXXXXX/android-sdk/cmake/3.22.1/bin/ninja \
+        -DCMAKE_LIBRARY_OUTPUT_DIRECTORY=/home/icecat/XXXXXXX/wireguard-android/tunnel/build/intermediates/cxx/Debug/1h703k40/obj/arm64-v8a \
+        -DCMAKE_RUNTIME_OUTPUT_DIRECTORY=/home/icecat/XXXXXXX/wireguard-android/tunnel/build/intermediates/cxx/Debug/1h703k40/obj/arm64-v8a \
+        -DCMAKE_BUILD_TYPE=Debug \
+        -B/home/icecat/XXXXXXX/wireguard-android/tunnel/.cxx/Debug/1h703k40/arm64-v8a \
+        -GNinja \
+        -DGRADLE_USER_HOME=/home/icecat/.gradle \
+        -DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON \
+        -DANDROID_PACKAGE_NAME=com.wireguard.android.debug
+    from /home/icecat/XXXXXXX/wireguard-android/tunnel
+  CMake Error at CMakeLists.txt:11 (add_executable):
+    Cannot find source file:
+  
+      wireguard-tools/src/wg-quick/android.c
+  
+    Tried extensions .c .C .c++ .cc .cpp .cxx .cu .mpp .m .M .mm .ixx .cppm .h
+    .hh .h++ .hm .hpp .hxx .in .txx .f .F .for .f77 .f90 .f95 .f03 .hip .ispc
+  
+  
+  CMake Error at CMakeLists.txt:11 (add_executable):
+    No SOURCES given to target: libwg-quick.so
+  
+  
+  CMake Generate step failed.  Build files cannot be regenerated correctly.
+  	at com.android.build.gradle.internal.cxx.process.ExecuteProcessKt.execute(ExecuteProcess.kt:288)
+  	at com.android.build.gradle.internal.cxx.process.ExecuteProcessKt$executeProcess$1.invoke(ExecuteProcess.kt:108)
+  	at com.android.build.gradle.internal.cxx.process.ExecuteProcessKt$executeProcess$1.invoke(ExecuteProcess.kt:106)
+  	at com.android.build.gradle.internal.cxx.timing.TimingEnvironmentKt.time(TimingEnvironment.kt:32)
+  	at com.android.build.gradle.internal.cxx.process.ExecuteProcessKt.executeProcess(ExecuteProcess.kt:106)
+  	at com.android.build.gradle.internal.cxx.process.ExecuteProcessKt.executeProcess$default(ExecuteProcess.kt:85)
+  	at com.android.build.gradle.tasks.CmakeQueryMetadataGenerator.executeProcess(CmakeFileApiMetadataGenerator.kt:59)
+  	at com.android.build.gradle.tasks.ExternalNativeJsonGenerator$configureOneAbi$1$1$3.invoke(ExternalNativeJsonGenerator.kt:247)
+  	at com.android.build.gradle.tasks.ExternalNativeJsonGenerator$configureOneAbi$1$1$3.invoke(ExternalNativeJsonGenerator.kt:247)
+  	at com.android.build.gradle.internal.cxx.timing.TimingEnvironmentKt.time(TimingEnvironment.kt:32)
+  	at com.android.build.gradle.tasks.ExternalNativeJsonGenerator.configureOneAbi(ExternalNativeJsonGenerator.kt:247)
+  	at com.android.build.gradle.tasks.ExternalNativeJsonGenerator.configure(ExternalNativeJsonGenerator.kt:113)
+  	at com.android.build.gradle.tasks.ExternalNativeBuildJsonTask.doTaskAction(ExternalNativeBuildJsonTask.kt:89)
+  	at com.android.build.gradle.internal.tasks.UnsafeOutputsTask$taskAction$$inlined$recordTaskAction$1.invoke(BaseTask.kt:78)
+  	at com.android.build.gradle.internal.tasks.Blocks.recordSpan(Blocks.java:51)
+  	at com.android.build.gradle.internal.tasks.UnsafeOutputsTask.taskAction(UnsafeOutputsTask.kt:81)
+  	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
+  	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+  	at org.gradle.internal.reflect.JavaMethod.invoke(JavaMethod.java:125)
+  	at org.gradle.api.internal.project.taskfactory.StandardTaskAction.doExecute(StandardTaskAction.java:58)
+  	at org.gradle.api.internal.project.taskfactory.StandardTaskAction.execute(StandardTaskAction.java:51)
+  	at org.gradle.api.internal.project.taskfactory.StandardTaskAction.execute(StandardTaskAction.java:29)
+  	at org.gradle.api.internal.tasks.execution.TaskExecution$3.run(TaskExecution.java:252)
+  	at org.gradle.internal.operations.DefaultBuildOperationRunner$1.execute(DefaultBuildOperationRunner.java:29)
+  	at org.gradle.internal.operations.DefaultBuildOperationRunner$1.execute(DefaultBuildOperationRunner.java:26)
+  	at org.gradle.internal.operations.DefaultBuildOperationRunner$2.execute(DefaultBuildOperationRunner.java:66)
+  	at org.gradle.internal.operations.DefaultBuildOperationRunner$2.execute(DefaultBuildOperationRunner.java:59)
+  	at org.gradle.internal.operations.DefaultBuildOperationRunner.execute(DefaultBuildOperationRunner.java:166)
+  	at org.gradle.internal.operations.DefaultBuildOperationRunner.execute(DefaultBuildOperationRunner.java:59)
+  	at org.gradle.internal.operations.DefaultBuildOperationRunner.run(DefaultBuildOperationRunner.java:47)
+  	at org.gradle.api.internal.tasks.execution.TaskExecution.executeAction(TaskExecution.java:237)
+  	at org.gradle.api.internal.tasks.execution.TaskExecution.executeActions(TaskExecution.java:220)
+  	at org.gradle.api.internal.tasks.execution.TaskExecution.executeWithPreviousOutputFiles(TaskExecution.java:203)
+  	at org.gradle.api.internal.tasks.execution.TaskExecution.execute(TaskExecution.java:170)
+  	at org.gradle.internal.execution.steps.ExecuteStep.executeInternal(ExecuteStep.java:105)
+  	at org.gradle.internal.execution.steps.ExecuteStep.access$000(ExecuteStep.java:44)
+  	at org.gradle.internal.execution.steps.ExecuteStep$1.call(ExecuteStep.java:59)
+  	at org.gradle.internal.execution.steps.ExecuteStep$1.call(ExecuteStep.java:56)
+  	at org.gradle.internal.operations.DefaultBuildOperationRunner$CallableBuildOperationWorker.execute(DefaultBuildOperationRunner.java:209)
+  	at org.gradle.internal.operations.DefaultBuildOperationRunner$CallableBuildOperationWorker.execute(DefaultBuildOperationRunner.java:204)
+  	at org.gradle.internal.operations.DefaultBuildOperationRunner$2.execute(DefaultBuildOperationRunner.java:66)
+  	at org.gradle.internal.operations.DefaultBuildOperationRunner$2.execute(DefaultBuildOperationRunner.java:59)
+  	at org.gradle.internal.operations.DefaultBuildOperationRunner.execute(DefaultBuildOperationRunner.java:166)
+  	at org.gradle.internal.operations.DefaultBuildOperationRunner.execute(DefaultBuildOperationRunner.java:59)
+  	at org.gradle.internal.operations.DefaultBuildOperationRunner.call(DefaultBuildOperationRunner.java:53)
+  	at org.gradle.internal.execution.steps.ExecuteStep.execute(ExecuteStep.java:56)
+  	at org.gradle.internal.execution.steps.ExecuteStep.execute(ExecuteStep.java:44)
+  	at org.gradle.internal.execution.steps.CancelExecutionStep.execute(CancelExecutionStep.java:42)
+  	at org.gradle.internal.execution.steps.TimeoutStep.executeWithoutTimeout(TimeoutStep.java:75)
+  	at org.gradle.internal.execution.steps.TimeoutStep.execute(TimeoutStep.java:55)
+  	at org.gradle.internal.execution.steps.PreCreateOutputParentsStep.execute(PreCreateOutputParentsStep.java:50)
+  	at org.gradle.internal.execution.steps.PreCreateOutputParentsStep.execute(PreCreateOutputParentsStep.java:28)
+  	at org.gradle.internal.execution.steps.RemovePreviousOutputsStep.execute(RemovePreviousOutputsStep.java:68)
+  	at org.gradle.internal.execution.steps.RemovePreviousOutputsStep.execute(RemovePreviousOutputsStep.java:38)
+  	at org.gradle.internal.execution.steps.BroadcastChangingOutputsStep.execute(BroadcastChangingOutputsStep.java:61)
+  	at org.gradle.internal.execution.steps.BroadcastChangingOutputsStep.execute(BroadcastChangingOutputsStep.java:26)
+  	at org.gradle.internal.execution.steps.CaptureOutputsAfterExecutionStep.execute(CaptureOutputsAfterExecutionStep.java:69)
+  	at org.gradle.internal.execution.steps.CaptureOutputsAfterExecutionStep.execute(CaptureOutputsAfterExecutionStep.java:46)
+  	at org.gradle.internal.execution.steps.ResolveInputChangesStep.execute(ResolveInputChangesStep.java:39)
+  	at org.gradle.internal.execution.steps.ResolveInputChangesStep.execute(ResolveInputChangesStep.java:28)
+  	at org.gradle.internal.execution.steps.BuildCacheStep.executeWithoutCache(BuildCacheStep.java:189)
+  	at org.gradle.internal.execution.steps.BuildCacheStep.lambda$execute$1(BuildCacheStep.java:75)
+  	at org.gradle.internal.Either$Right.fold(Either.java:176)
+  	at org.gradle.internal.execution.caching.CachingState.fold(CachingState.java:62)
+  	at org.gradle.internal.execution.steps.BuildCacheStep.execute(BuildCacheStep.java:73)
+  	at org.gradle.internal.execution.steps.BuildCacheStep.execute(BuildCacheStep.java:48)
+  	at org.gradle.internal.execution.steps.StoreExecutionStateStep.execute(StoreExecutionStateStep.java:46)
+  	at org.gradle.internal.execution.steps.StoreExecutionStateStep.execute(StoreExecutionStateStep.java:35)
+  	at org.gradle.internal.execution.steps.SkipUpToDateStep.executeBecause(SkipUpToDateStep.java:75)
+  	at org.gradle.internal.execution.steps.SkipUpToDateStep.lambda$execute$2(SkipUpToDateStep.java:53)
+  	at java.base/java.util.Optional.orElseGet(Optional.java:364)
+  	at org.gradle.internal.execution.steps.SkipUpToDateStep.execute(SkipUpToDateStep.java:53)
+  	at org.gradle.internal.execution.steps.SkipUpToDateStep.execute(SkipUpToDateStep.java:35)
+  	at org.gradle.internal.execution.steps.legacy.MarkSnapshottingInputsFinishedStep.execute(MarkSnapshottingInputsFinishedStep.java:37)
+  	at org.gradle.internal.execution.steps.legacy.MarkSnapshottingInputsFinishedStep.execute(MarkSnapshottingInputsFinishedStep.java:27)
+  	at org.gradle.internal.execution.steps.ResolveIncrementalCachingStateStep.executeDelegate(ResolveIncrementalCachingStateStep.java:49)
+  	at org.gradle.internal.execution.steps.ResolveIncrementalCachingStateStep.executeDelegate(ResolveIncrementalCachingStateStep.java:27)
+  	at org.gradle.internal.execution.steps.AbstractResolveCachingStateStep.execute(AbstractResolveCachingStateStep.java:71)
+  	at org.gradle.internal.execution.steps.AbstractResolveCachingStateStep.execute(AbstractResolveCachingStateStep.java:39)
+  	at org.gradle.internal.execution.steps.ResolveChangesStep.execute(ResolveChangesStep.java:64)
+  	at org.gradle.internal.execution.steps.ResolveChangesStep.execute(ResolveChangesStep.java:35)
+  	at org.gradle.internal.execution.steps.ValidateStep.execute(ValidateStep.java:62)
+  	at org.gradle.internal.execution.steps.ValidateStep.execute(ValidateStep.java:40)
+  	at org.gradle.internal.execution.steps.AbstractCaptureStateBeforeExecutionStep.execute(AbstractCaptureStateBeforeExecutionStep.java:76)
+  	at org.gradle.internal.execution.steps.AbstractCaptureStateBeforeExecutionStep.execute(AbstractCaptureStateBeforeExecutionStep.java:45)
+  	at org.gradle.internal.execution.steps.AbstractSkipEmptyWorkStep.executeWithNonEmptySources(AbstractSkipEmptyWorkStep.java:136)
+  	at org.gradle.internal.execution.steps.AbstractSkipEmptyWorkStep.execute(AbstractSkipEmptyWorkStep.java:61)
+  	at org.gradle.internal.execution.steps.AbstractSkipEmptyWorkStep.execute(AbstractSkipEmptyWorkStep.java:38)
+  	at org.gradle.internal.execution.steps.legacy.MarkSnapshottingInputsStartedStep.execute(MarkSnapshottingInputsStartedStep.java:38)
+  	at org.gradle.internal.execution.steps.LoadPreviousExecutionStateStep.execute(LoadPreviousExecutionStateStep.java:36)
+  	at org.gradle.internal.execution.steps.LoadPreviousExecutionStateStep.execute(LoadPreviousExecutionStateStep.java:23)
+  	at org.gradle.internal.execution.steps.HandleStaleOutputsStep.execute(HandleStaleOutputsStep.java:75)
+  	at org.gradle.internal.execution.steps.HandleStaleOutputsStep.execute(HandleStaleOutputsStep.java:41)
+  	at org.gradle.internal.execution.steps.AssignMutableWorkspaceStep.lambda$execute$0(AssignMutableWorkspaceStep.java:35)
+  	at org.gradle.api.internal.tasks.execution.TaskExecution$4.withWorkspace(TaskExecution.java:297)
+  	at org.gradle.internal.execution.steps.AssignMutableWorkspaceStep.execute(AssignMutableWorkspaceStep.java:31)
+  	at org.gradle.internal.execution.steps.AssignMutableWorkspaceStep.execute(AssignMutableWorkspaceStep.java:22)
+  	at org.gradle.internal.execution.steps.ChoosePipelineStep.execute(ChoosePipelineStep.java:40)
+  	at org.gradle.internal.execution.steps.ChoosePipelineStep.execute(ChoosePipelineStep.java:23)
+  	at org.gradle.internal.execution.steps.ExecuteWorkBuildOperationFiringStep.lambda$execute$2(ExecuteWorkBuildOperationFiringStep.java:67)
+  	at java.base/java.util.Optional.orElseGet(Optional.java:364)
+  	at org.gradle.internal.execution.steps.ExecuteWorkBuildOperationFiringStep.execute(ExecuteWorkBuildOperationFiringStep.java:67)
+  	at org.gradle.internal.execution.steps.ExecuteWorkBuildOperationFiringStep.execute(ExecuteWorkBuildOperationFiringStep.java:39)
+  	at org.gradle.internal.execution.steps.IdentityCacheStep.execute(IdentityCacheStep.java:46)
+  	at org.gradle.internal.execution.steps.IdentityCacheStep.execute(IdentityCacheStep.java:34)
+  	at org.gradle.internal.execution.steps.IdentifyStep.execute(IdentifyStep.java:47)
+  	at org.gradle.internal.execution.steps.IdentifyStep.execute(IdentifyStep.java:34)
+  	at org.gradle.internal.execution.impl.DefaultExecutionEngine$1.execute(DefaultExecutionEngine.java:64)
+  	at org.gradle.api.internal.tasks.execution.ExecuteActionsTaskExecuter.executeIfValid(ExecuteActionsTaskExecuter.java:132)
+  	at org.gradle.api.internal.tasks.execution.ExecuteActionsTaskExecuter.execute(ExecuteActionsTaskExecuter.java:121)
+  	at org.gradle.api.internal.tasks.execution.ProblemsTaskPathTrackingTaskExecuter.execute(ProblemsTaskPathTrackingTaskExecuter.java:41)
+  	at org.gradle.api.internal.tasks.execution.FinalizePropertiesTaskExecuter.execute(FinalizePropertiesTaskExecuter.java:46)
+  	at org.gradle.api.internal.tasks.execution.ResolveTaskExecutionModeExecuter.execute(ResolveTaskExecutionModeExecuter.java:51)
+  	at org.gradle.api.internal.tasks.execution.SkipTaskWithNoActionsExecuter.execute(SkipTaskWithNoActionsExecuter.java:57)
+  	at org.gradle.api.internal.tasks.execution.SkipOnlyIfTaskExecuter.execute(SkipOnlyIfTaskExecuter.java:74)
+  	at org.gradle.api.internal.tasks.execution.CatchExceptionTaskExecuter.execute(CatchExceptionTaskExecuter.java:36)
+  	at org.gradle.api.internal.tasks.execution.EventFiringTaskExecuter$1.executeTask(EventFiringTaskExecuter.java:77)
+  	at org.gradle.api.internal.tasks.execution.EventFiringTaskExecuter$1.call(EventFiringTaskExecuter.java:55)
+  	at org.gradle.api.internal.tasks.execution.EventFiringTaskExecuter$1.call(EventFiringTaskExecuter.java:52)
+  	at org.gradle.internal.operations.DefaultBuildOperationRunner$CallableBuildOperationWorker.execute(DefaultBuildOperationRunner.java:209)
+  	at org.gradle.internal.operations.DefaultBuildOperationRunner$CallableBuildOperationWorker.execute(DefaultBuildOperationRunner.java:204)
+  	at org.gradle.internal.operations.DefaultBuildOperationRunner$2.execute(DefaultBuildOperationRunner.java:66)
+  	at org.gradle.internal.operations.DefaultBuildOperationRunner$2.execute(DefaultBuildOperationRunner.java:59)
+  	at org.gradle.internal.operations.DefaultBuildOperationRunner.execute(DefaultBuildOperationRunner.java:166)
+  	at org.gradle.internal.operations.DefaultBuildOperationRunner.execute(DefaultBuildOperationRunner.java:59)
+  	at org.gradle.internal.operations.DefaultBuildOperationRunner.call(DefaultBuildOperationRunner.java:53)
+  	at org.gradle.api.internal.tasks.execution.EventFiringTaskExecuter.execute(EventFiringTaskExecuter.java:52)
+  	at org.gradle.execution.plan.LocalTaskNodeExecutor.execute(LocalTaskNodeExecutor.java:45)
+  	at org.gradle.execution.taskgraph.DefaultTaskExecutionGraph$InvokeNodeExecutorsAction.execute(DefaultTaskExecutionGraph.java:355)
+  	at org.gradle.execution.taskgraph.DefaultTaskExecutionGraph$InvokeNodeExecutorsAction.execute(DefaultTaskExecutionGraph.java:342)
+  	at org.gradle.execution.taskgraph.DefaultTaskExecutionGraph$BuildOperationAwareExecutionAction.lambda$execute$0(DefaultTaskExecutionGraph.java:338)
+  	at org.gradle.internal.operations.CurrentBuildOperationRef.with(CurrentBuildOperationRef.java:84)
+  	at org.gradle.execution.taskgraph.DefaultTaskExecutionGraph$BuildOperationAwareExecutionAction.execute(DefaultTaskExecutionGraph.java:338)
+  	at org.gradle.execution.taskgraph.DefaultTaskExecutionGraph$BuildOperationAwareExecutionAction.execute(DefaultTaskExecutionGraph.java:327)
+  	at org.gradle.execution.plan.DefaultPlanExecutor$ExecutorWorker.execute(DefaultPlanExecutor.java:459)
+  	at org.gradle.execution.plan.DefaultPlanExecutor$ExecutorWorker.run(DefaultPlanExecutor.java:376)
+  	at org.gradle.execution.plan.DefaultPlanExecutor.process(DefaultPlanExecutor.java:111)
+  	at org.gradle.execution.taskgraph.DefaultTaskExecutionGraph.executeWithServices(DefaultTaskExecutionGraph.java:146)
+  	at org.gradle.execution.taskgraph.DefaultTaskExecutionGraph.execute(DefaultTaskExecutionGraph.java:131)
+  	at org.gradle.execution.SelectedTaskExecutionAction.execute(SelectedTaskExecutionAction.java:35)
+  	at org.gradle.execution.BuildOperationFiringBuildWorkerExecutor$ExecuteTasks.call(BuildOperationFiringBuildWorkerExecutor.java:54)
+  	at org.gradle.execution.BuildOperationFiringBuildWorkerExecutor$ExecuteTasks.call(BuildOperationFiringBuildWorkerExecutor.java:43)
+  	at org.gradle.internal.operations.DefaultBuildOperationRunner$CallableBuildOperationWorker.execute(DefaultBuildOperationRunner.java:209)
+  	at org.gradle.internal.operations.DefaultBuildOperationRunner$CallableBuildOperationWorker.execute(DefaultBuildOperationRunner.java:204)
+  	at org.gradle.internal.operations.DefaultBuildOperationRunner$2.execute(DefaultBuildOperationRunner.java:66)
+  	at org.gradle.internal.operations.DefaultBuildOperationRunner$2.execute(DefaultBuildOperationRunner.java:59)
+  	at org.gradle.internal.operations.DefaultBuildOperationRunner.execute(DefaultBuildOperationRunner.java:166)
+  	at org.gradle.internal.operations.DefaultBuildOperationRunner.execute(DefaultBuildOperationRunner.java:59)
+  	at org.gradle.internal.operations.DefaultBuildOperationRunner.call(DefaultBuildOperationRunner.java:53)
+  	at org.gradle.execution.BuildOperationFiringBuildWorkerExecutor.execute(BuildOperationFiringBuildWorkerExecutor.java:40)
+  	at org.gradle.internal.build.DefaultBuildLifecycleController.lambda$executeTasks$10(DefaultBuildLifecycleController.java:313)
+  	at org.gradle.internal.model.StateTransitionController.doTransition(StateTransitionController.java:266)
+  	at org.gradle.internal.model.StateTransitionController.lambda$tryTransition$8(StateTransitionController.java:177)
+  	at org.gradle.internal.work.DefaultSynchronizer.withLock(DefaultSynchronizer.java:45)
+  	at org.gradle.internal.model.StateTransitionController.tryTransition(StateTransitionController.java:177)
+  	at org.gradle.internal.build.DefaultBuildLifecycleController.executeTasks(DefaultBuildLifecycleController.java:304)
+  	at org.gradle.internal.build.DefaultBuildWorkGraphController$DefaultBuildWorkGraph.runWork(DefaultBuildWorkGraphController.java:220)
+  	at org.gradle.internal.work.DefaultWorkerLeaseService.withLocks(DefaultWorkerLeaseService.java:263)
+  	at org.gradle.internal.work.DefaultWorkerLeaseService.runAsWorkerThread(DefaultWorkerLeaseService.java:127)
+  	at org.gradle.composite.internal.DefaultBuildController.doRun(DefaultBuildController.java:181)
+  	at org.gradle.composite.internal.DefaultBuildController.access$000(DefaultBuildController.java:50)
+  	at org.gradle.composite.internal.DefaultBuildController$BuildOpRunnable.lambda$run$0(DefaultBuildController.java:198)
+  	at org.gradle.internal.operations.CurrentBuildOperationRef.with(CurrentBuildOperationRef.java:84)
+  	at org.gradle.composite.internal.DefaultBuildController$BuildOpRunnable.run(DefaultBuildController.java:198)
+  	at java.base/java.util.concurrent.Executors$RunnableAdapter.call(Executors.java:572)
+  	at java.base/java.util.concurrent.FutureTask.run(FutureTask.java:317)
+  	at org.gradle.internal.concurrent.ExecutorPolicy$CatchAndRecordFailures.onExecute(ExecutorPolicy.java:64)
+  	at org.gradle.internal.concurrent.AbstractManagedExecutor$1.run(AbstractManagedExecutor.java:47)
+  	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144)
+  	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:642)
+  	at java.base/java.lang.Thread.run(Thread.java:1583)
+  Caused by: com.android.ide.common.process.ProcessException: Error while executing process /home/icecat/XXXXXXX/android-sdk/cmake/3.22.1/bin/cmake with arguments {-H/home/icecat/XXXXXXX/wireguard-android/tunnel/tools -DCMAKE_SYSTEM_NAME=Android -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_SYSTEM_VERSION=24 -DANDROID_PLATFORM=android-24 -DANDROID_ABI=arm64-v8a -DCMAKE_ANDROID_ARCH_ABI=arm64-v8a -DANDROID_NDK=/home/icecat/XXXXXXX/android-sdk/ndk/27.0.12077973 -DCMAKE_ANDROID_NDK=/home/icecat/XXXXXXX/android-sdk/ndk/27.0.12077973 -DCMAKE_TOOLCHAIN_FILE=/home/icecat/XXXXXXX/android-sdk/ndk/27.0.12077973/build/cmake/android.toolchain.cmake -DCMAKE_MAKE_PROGRAM=/home/icecat/XXXXXXX/android-sdk/cmake/3.22.1/bin/ninja -DCMAKE_LIBRARY_OUTPUT_DIRECTORY=/home/icecat/XXXXXXX/wireguard-android/tunnel/build/intermediates/cxx/Debug/1h703k40/obj/arm64-v8a -DCMAKE_RUNTIME_OUTPUT_DIRECTORY=/home/icecat/XXXXXXX/wireguard-android/tunnel/build/intermediates/cxx/Debug/1h703k40/obj/arm64-v8a -DCMAKE_BUILD_TYPE=Debug -B/home/icecat/XXXXXXX/wireguard-android/tunnel/.cxx/Debug/1h703k40/arm64-v8a -GNinja -DGRADLE_USER_HOME=/home/icecat/.gradle -DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON -DANDROID_PACKAGE_NAME=com.wireguard.android.debug}
+  	at com.android.build.gradle.internal.process.GradleProcessResult.buildProcessException(GradleProcessResult.java:73)
+  	at com.android.build.gradle.internal.process.GradleProcessResult.assertNormalExitValue(GradleProcessResult.java:48)
+  	at com.android.build.gradle.internal.cxx.process.ExecuteProcessKt.execute(ExecuteProcess.kt:277)
+  	... 170 more
+  Caused by: org.gradle.process.ProcessExecutionException: Process 'command '/home/icecat/XXXXXXX/android-sdk/cmake/3.22.1/bin/cmake'' finished with non-zero exit value 1
+  	at org.gradle.process.internal.DefaultExecHandle$ExecResultImpl.assertNormalExitValue(DefaultExecHandle.java:450)
+  	at com.android.build.gradle.internal.process.GradleProcessResult.assertNormalExitValue(GradleProcessResult.java:46)
+  	... 171 more
+
+
+* Try:
+> Run with --stacktrace option to get the stack trace.
+> Run with --debug option to get more log output.
+> Run with --scan to generate a Build Scan (Powered by Develocity).
+> Get more help at https://help.gradle.org.
+
+Deprecated Gradle features were used in this build, making it incompatible with Gradle 10.
+
+You can use '--warning-mode all' to show the individual deprecation warnings and determine if they come from your own scripts or plugins.
+
+For more on this, please refer to https://docs.gradle.org/9.1.0/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
+
+BUILD FAILED in 7s
+9 actionable tasks: 7 executed, 2 up-to-date
