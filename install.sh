@@ -36,13 +36,26 @@ apt install -y --reinstall ./"$DEB_FILE"
 # 5. 清理现场
 echo "正在清理临时构建产物喵..."
 rm -f ./*.deb
+systemctl daemon-reload
+
+# 6. 询问是否重启服务
+if systemctl is-active --quiet nekolink; then
+    echo ""
+    read -p "主人，检测到 NekoLink 正在运行，是否现在重启它来应用新魔法喵？(y/n, 默认 n): " confirm_restart
+    if [ "$confirm_restart" == "y" ]; then
+        systemctl restart nekolink
+        echo "服务已重启喵！(〃'▽'〃)"
+    else
+        echo "好的喵，主人记得稍后手动重启服务来生效哦。"
+    fi
+fi
 
 echo ""
 echo "===================================================="
 echo "✨ NekoLink 安装成功！(๑•̀ㅂ•́)و✧ ✨"
 echo "===================================================="
 echo "1. 主人可以使用 'nekolink' 指令启动交互式配置助手喵。"
-echo "2. 服务已由 Systemd 接管，配置好后运行："
-echo "   sudo systemctl start nekolink"
+echo "2. 服务关键指令："
+echo "   sudo systemctl start/stop/restart nekolink"
 echo "3. 您的所有配置文件请放在 /etc/neko-link/ 喵。"
 echo "===================================================="
