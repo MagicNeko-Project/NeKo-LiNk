@@ -12,7 +12,7 @@ echo "正在准备通过 Debian 包管理系统安装 NekoLink..."
 
 # 1. 编译项目 (Rust 魔法时间)
 echo "正在注入 Rust 灵力进行编译喵..."
-cargo build --release
+cargo build --release --workspace --exclude nekolink-android
 
 # 2. 生成 Debian 魔法包
 echo "正在塑造 .deb 安装包喵..."

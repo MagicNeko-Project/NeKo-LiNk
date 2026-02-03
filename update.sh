@@ -31,7 +31,7 @@ if ! command -v cargo &> /dev/null; then
     echo -e "${RED}喵呜！没找到 Cargo，升级失败！请先安装 Rust 环境喵。${NC}"
     exit 1
 fi
-cargo build --release
+cargo build --release --workspace --exclude nekolink-android
 
 # 3. 生成并安装 Debian 魔法包
 echo -e "\n${CYAN}[3/5] 正在塑造并应用全新的 Debian 魔法包...${NC}"
