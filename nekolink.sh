@@ -285,7 +285,7 @@ function edit_config() {
         1) mode="ip" ;;
         2) mode="udp" ;;
         3) mode="tcp" 
-           echo -e "${PINK}... 使用 Fake-TCP 模式喵（Phantun 会自动启动，无需手动配置任何东西喵！）${NC}" ;;
+           echo -e "${PINK}... 使用 Fake-TCP 模式喵（已集成 udp2raw，无需手动配置任何东西喵！）${NC}" ;;
         *) mode="$curr_mode" ;;
     esac
 
