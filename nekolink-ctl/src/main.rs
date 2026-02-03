@@ -57,6 +57,33 @@ static PEER_CACHE: OnceLock<Mutex<HashMap<(String, String), String>>> = OnceLock
 static CONFIG_MUTEX: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 static SIDE_CARS: OnceLock<tokio::sync::Mutex<HashMap<(String, String), tokio::process::Child>>> = OnceLock::new();
 static PROBED_MTU_CACHE: OnceLock<tokio::sync::Mutex<HashMap<String, (u16, std::time::Instant)>>> = OnceLock::new();
+static DNS_CACHE: OnceLock<tokio::sync::Mutex<HashMap<String, (IpAddr, std::time::Instant)>>> = OnceLock::new();
+
+async fn resolve_dns(host: &str) -> Result<IpAddr> {
+    {
+        let cache_mutex = DNS_CACHE.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()));
+        let cache = cache_mutex.lock().await;
+        if let Some((ip, timestamp)) = cache.get(host) {
+            // 简单缓存 5 分钟喵
+            if timestamp.elapsed() < Duration::from_secs(300) {
+                return Ok(*ip);
+            }
+        }
+    }
+
+    // 异步解析 DNS 喵
+    let addr = tokio::net::lookup_host(format!("{}:0", host)).await?
+        .next()
+        .map(|a| a.ip())
+        .ok_or(anyhow::anyhow!("DNS 解析结果为空"))?;
+
+    {
+        let mut cache = DNS_CACHE.get_or_init(|| tokio::sync::Mutex::new(HashMap::new())).lock().await;
+        cache.insert(host.to_string(), (addr, std::time::Instant::now()));
+    }
+    
+    Ok(addr)
+}
 
 async fn get_auto_mtu(endpoint: &str, mode: &str) -> u16 {
     let mut cache = PROBED_MTU_CACHE.get_or_init(|| tokio::sync::Mutex::new(HashMap::new())).lock().await;
@@ -792,6 +819,7 @@ async fn run_socks5_server(interface: String, port: u16, token: CancellationToke
 }
 
 async fn handle_socks5(interface: &str, client: &mut TcpStream, local_ip: Option<IpAddr>) -> Result<()> {
+    let _ = client.set_nodelay(true); // 提升交互响应速度喵
     let mut buf = [0u8; 512];
     
     // 1. Handshake
@@ -881,7 +909,7 @@ async fn handle_socks5(interface: &str, client: &mut TcpStream, local_ip: Option
                 Ok((n, addr)) = relay_socket.recv_from(&mut client_relay_buf) => {
                     if client_udp_addr.is_none() { client_udp_addr = Some(addr); }
                     if Some(addr) == client_udp_addr {
-                        if let Ok((header_len, target_addr)) = parse_socks5_udp_header(&client_relay_buf[..n]) {
+                        if let Ok((header_len, target_addr)) = parse_socks5_udp_header(&client_relay_buf[..n]).await {
                             let _ = tunnel_socket.send_to(&client_relay_buf[header_len..n], target_addr).await;
                         }
                     }
@@ -904,7 +932,7 @@ async fn handle_socks5(interface: &str, client: &mut TcpStream, local_ip: Option
     Ok(())
 }
 
-fn parse_socks5_udp_header(buf: &[u8]) -> Result<(usize, SocketAddr)> {
+async fn parse_socks5_udp_header(buf: &[u8]) -> Result<(usize, SocketAddr)> {
     if buf.len() < 4 { return Err(anyhow::anyhow!("UDP header too short")); }
     if buf[2] != 0x00 { return Err(anyhow::anyhow!("Fragments not supported")); }
     
@@ -921,10 +949,9 @@ fn parse_socks5_udp_header(buf: &[u8]) -> Result<(usize, SocketAddr)> {
             if buf.len() < 5 + len + 2 { return Err(anyhow::anyhow!("UDP header too short for Domain")); }
             let domain = String::from_utf8_lossy(&buf[5..5+len]).to_string();
             let port = u16::from_be_bytes([buf[5+len], buf[5+len+1]]);
-            // 同步解析 DNS 喵
-            use std::net::ToSocketAddrs;
-            let addr = format!("{}:{}", domain, port).to_socket_addrs()?.next().ok_or(anyhow::anyhow!("DNS resolve failed"))?;
-            Ok((5 + len + 2, addr))
+            // 异步解析 DNS 喵
+            let ip = resolve_dns(&domain).await?;
+            Ok((5 + len + 2, SocketAddr::new(ip, port)))
         }
         0x04 => { // IPv6
             if buf.len() < 22 { return Err(anyhow::anyhow!("UDP header too short for IPv6")); }
@@ -955,10 +982,16 @@ fn append_socks5_udp_header(buf: &mut Vec<u8>, addr: SocketAddr) {
 }
 
 async fn connect_via_interface(interface: &str, target: &str, local_ip: Option<IpAddr>) -> Result<TcpStream> {
-    use std::net::ToSocketAddrs;
-
-    // TODO: 使用信令中枢进行异步 DNS 解析，目前先用同步阻塞凑合一下喵
-    let addr = target.to_socket_addrs()?.next().ok_or(anyhow::anyhow!("DNS 解析失败"))?;
+    // 异步 DNS 解析喵
+    let (host, port_str) = target.rsplit_once(':').ok_or(anyhow::anyhow!("不合法的目标地址: {}", target))?;
+    let port: u16 = port_str.parse()?;
+    
+    let ip = if let Ok(parsed_ip) = host.parse::<IpAddr>() {
+        parsed_ip
+    } else {
+        resolve_dns(host).await?
+    };
+    let addr = SocketAddr::new(ip, port);
     
     let domain = if addr.is_ipv4() { Domain::IPV4 } else { Domain::IPV6 };
     let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
@@ -966,17 +999,15 @@ async fn connect_via_interface(interface: &str, target: &str, local_ip: Option<I
     // Bind to device (SO_BINDTODEVICE)
     socket.bind_device(Some(interface.as_bytes()))?;
     
-    // 如果指定了本地 IP，则进行显式绑定喵 (这有助于在 RawIP 等特殊模式下正确选路)
+    // 如果指定了本地 IP，则进行显式绑定喵
     if let Some(lip) = local_ip {
-        // 仅在地址族匹配时绑定喵
         if (lip.is_ipv4() && addr.is_ipv4()) || (lip.is_ipv6() && addr.is_ipv6()) {
             let bind_addr: SocketAddr = SocketAddr::new(lip, 0);
-            if let Err(e) = socket.bind(&bind_addr.into()) {
-                tracing::warn!("显式绑定源 IP {} 失败 (可能是接口未完全准备好): {:?}", lip, e);
-            }
+            let _ = socket.bind(&bind_addr.into());
         }
     }
 
+    socket.set_nodelay(true)?; // 降低小包延迟喵
     socket.set_nonblocking(true)?;
     
     match socket.connect(&addr.into()) {
