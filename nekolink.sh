@@ -277,6 +277,7 @@ function edit_config() {
     curr_mss=$(jq -r '.clamp_mss' "$selected_cfg")
     curr_mss=$(jq -r '.clamp_mss' "$selected_cfg")
     curr_ep=$(jq -r '.peers[0].endpoint // empty' "$selected_cfg")
+    curr_s5=$(jq -r '.socks5_port // "null"' "$selected_cfg")
 
     # 交互式修改
     read -p "传输模式 (当前: $curr_mode, [1] ip, [2] udp, [3] tcp, 直接回车保持不变): " m_choice
@@ -336,6 +337,13 @@ function edit_config() {
         *) auto_route="$curr_aroute" ;;
     esac
 
+    read -p "开启本地 SOCKS5 代理? (当前端口: $curr_s5, 输入端口号开启如 1080, 输入 n 关闭, 直接回车保持不变): " s5_c
+    case "$s5_c" in
+        n) socks5_port="null" ;;
+        "") socks5_port="$curr_s5" ;;
+        *) socks5_port="$s5_c" ;;
+    esac
+
     # signal_port 统一迁移到 global.json 喵
 
     # 使用 jq 构建新 JSON 并覆盖
@@ -351,6 +359,7 @@ function edit_config() {
         --argjson clamp_mss "$clamp_mss" \
         --arg addr "$local_addr" \
         --arg psk "$psk" \
+        --argjson socks5_port "$socks5_port" \
         --arg ep "$endpoint" \
         '{
             interface: $iface,
@@ -363,6 +372,7 @@ function edit_config() {
             clamp_mss: $clamp_mss,
             local_address: $addr,
             psk: $psk,
+            socks5_port: $socks5_port,
             peers: (if $ep != "" then [{endpoint: $ep}] else [] end)
         }' > "$tmp_cfg"
     
@@ -506,6 +516,13 @@ function create_config() {
         auto_route="false"
     fi
 
+    read -p "是否开启本地 SOCKS5 代理? (输入端口号如 1080, 直接回车则不开启): " s5_port
+    if [ -z "$s5_port" ]; then
+        socks5_port="null"
+    else
+        socks5_port="$s5_port"
+    fi
+
     # signal_port 统一迁移到 global.json 喵
 
     # 构建 JSON
@@ -526,6 +543,7 @@ function create_config() {
   "clamp_mss": $clamp_mss,
   "local_address": "$local_addr",
   "psk": "$psk",
+  "socks5_port": $socks5_port,
   "peers": [
 EOF
     else
@@ -541,6 +559,7 @@ EOF
   "clamp_mss": $clamp_mss,
   "local_address": "$local_addr",
   "psk": "$psk",
+  "socks5_port": $socks5_port,
   "peers": [
 EOF
     fi
@@ -623,6 +642,7 @@ function check_and_fix_configs() {
             "clamp_mss|true"
             "local_address|\"10.0.0.1/24\""
             "psk|\"NekoMagic_Default_PSK\""
+            "socks5_port|null"
             "peers|[]"
         )
 

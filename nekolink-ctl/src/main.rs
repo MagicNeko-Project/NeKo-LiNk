@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 use x25519_dalek::{PublicKey, StaticSecret};
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio_util::sync::CancellationToken;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 struct InstanceHandle {
     state: NekoState,
@@ -129,6 +131,9 @@ struct NekoConfig {
     /// 是否开启多队列（默认关闭以提升兼容性喵）
     #[serde(default)]
     pub use_multi_queue: bool,
+    /// 本地 SOCKS5 代理端口喵
+    #[serde(default)]
+    pub socks5_port: Option<u16>,
 }
 
 fn default_tcp_data_port() -> u16 {
@@ -325,7 +330,7 @@ async fn main() -> Result<()> {
                 loop {
                     tokio::select! {
                         _ = token_clone.cancelled() => break,
-                        res = run_instance(state_clone.clone()) => {
+                        res = run_instance(state_clone.clone(), token_clone.clone()) => {
                             if let Err(e) = res {
                                 eprintln!("实例 {} 出错喵: {:?}。5秒后重启...", state_clone.config.interface, e);
                             }
@@ -419,20 +424,20 @@ async fn main() -> Result<()> {
                         let state_clone = state.clone();
                         
                         let task = tokio::spawn(async move {
-                            loop {
-                                tokio::select! {
-                                    _ = token_clone.cancelled() => break,
-                                    res = run_instance(state_clone.clone()) => {
-                                        if let Err(e) = res {
-                                            eprintln!("实例 {} 出错喵: {:?}。5秒后重启...", state_clone.config.interface, e);
-                                        }
-                                        tokio::select! {
-                                            _ = token_clone.cancelled() => break,
-                                            _ = time::sleep(Duration::from_secs(5)) => {}
+                                loop {
+                                    tokio::select! {
+                                        _ = token_clone.cancelled() => break,
+                                        res = run_instance(state_clone.clone(), token_clone.clone()) => {
+                                            if let Err(e) = res {
+                                                eprintln!("实例 {} 出错喵: {:?}。5秒后重启...", state_clone.config.interface, e);
+                                            }
+                                            tokio::select! {
+                                                _ = token_clone.cancelled() => break,
+                                                _ = time::sleep(Duration::from_secs(5)) => {}
+                                            }
                                         }
                                     }
                                 }
-                            }
                         });
                         next_instances.insert(iface, InstanceHandle { state, token, task });
                     } else {
@@ -484,7 +489,7 @@ async fn send_uapi(interface: &str, commands: &str) -> Result<()> {
     Ok(())
 }
 
-async fn run_instance(state: NekoState) -> Result<()> {
+async fn run_instance(state: NekoState, token: CancellationToken) -> Result<()> {
     let config = &state.config;
     println!("正在启动接口 {} 喵...", config.interface);
 
@@ -695,8 +700,34 @@ async fn run_instance(state: NekoState) -> Result<()> {
         }
     }
     
-    // 监控进程
-    let _ = child.wait().await;
+    // 启动 SOCKS5 代理服务喵
+    let mut socks5_task: Option<(tokio::task::JoinHandle<Result<()>>, CancellationToken)> = None;
+    if let Some(s5_port) = config.socks5_port {
+        let iface = config.interface.clone();
+        let s5_token = CancellationToken::new();
+        let s5_token_clone = s5_token.clone();
+        let task = tokio::spawn(async move {
+            run_socks5_server(iface, s5_port, s5_token_clone).await
+        });
+        socks5_task = Some((task, s5_token));
+    }
+    
+    // 监控进程与取消信号喵
+    tokio::select! {
+        _ = child.wait() => {
+            println!("nekolink-cli 进程已退出喵。");
+        }
+        _ = token.cancelled() => {
+            println!("接收到中转停止信号，正在关闭接口 {} 喵...", config.interface);
+            let _ = child.kill().await;
+        }
+    }
+
+    // 清理 SOCKS5 任务喵
+    if let Some((task, s5_token)) = socks5_task {
+        s5_token.cancel();
+        let _ = task.await;
+    }
 
     // 清理 udp2raw 服务端进程
     if let Some(mut srv) = udp2raw_server_child {
@@ -715,6 +746,118 @@ async fn run_instance(state: NekoState) -> Result<()> {
     let _ = cleanup_udp2raw_nft_rules().await;
 
     Ok(())
+}
+
+async fn run_socks5_server(interface: String, port: u16, token: CancellationToken) -> Result<()> {
+    let listener = TcpListener::bind(format!("127.0.0.1:{}", port)).await?;
+    println!("ฅ^•ﻌ•^ฅ SOCKS5 代理已启动，正在监听 127.0.0.1:{} -> {} 喵。", port, interface);
+
+    loop {
+        tokio::select! {
+            _ = token.cancelled() => break,
+            accept_res = listener.accept() => {
+                if let Ok((mut client_stream, _)) = accept_res {
+                    let iface = interface.clone();
+                    tokio::spawn(async move {
+                        if let Err(_e) = handle_socks5(&iface, &mut client_stream).await {
+                             // SOCKS5 错误通常是客户端关闭连接，这里静默处理喵
+                        }
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn handle_socks5(interface: &str, client: &mut TcpStream) -> Result<()> {
+    let mut buf = [0u8; 512];
+    
+    // 1. Handshake
+    client.read_exact(&mut buf[..2]).await?;
+    if buf[0] != 0x05 { return Err(anyhow::anyhow!("Not SOCKS5")); }
+    let nmethods = buf[1] as usize;
+    client.read_exact(&mut buf[..nmethods]).await?;
+    client.write_all(&[0x05, 0x00]).await?; // No auth
+
+    // 2. Request
+    client.read_exact(&mut buf[..4]).await?;
+    if buf[1] != 0x01 { return Err(anyhow::anyhow!("Only CONNECT supported")); }
+    
+    let target_addr: String = match buf[3] {
+        0x01 => { // IPv4
+            client.read_exact(&mut buf[..4]).await?;
+            let ip = std::net::Ipv4Addr::new(buf[0], buf[1], buf[2], buf[3]);
+            client.read_exact(&mut buf[..2]).await?;
+            let port = u16::from_be_bytes([buf[0], buf[1]]);
+            format!("{}:{}", ip, port)
+        }
+        0x03 => { // Domain
+            client.read_exact(&mut buf[..1]).await?;
+            let len = buf[0] as usize;
+            client.read_exact(&mut buf[..len]).await?;
+            let domain = String::from_utf8_lossy(&buf[..len]).to_string();
+            client.read_exact(&mut buf[..2]).await?;
+            let port = u16::from_be_bytes([buf[0], buf[1]]);
+            format!("{}:{}", domain, port)
+        }
+        0x04 => { // IPv6
+             client.read_exact(&mut buf[..16]).await?;
+             let ip = std::net::Ipv6Addr::from(<[u8; 16]>::try_from(&buf[..16]).unwrap());
+             client.read_exact(&mut buf[..2]).await?;
+             let port = u16::from_be_bytes([buf[0], buf[1]]);
+             format!("[{}]:{}", ip, port)
+        }
+        _ => return Err(anyhow::anyhow!("Unsupported address type")),
+    };
+
+    // 3. Connect to target through interface
+    let mut target_stream = match connect_via_interface(interface, &target_addr).await {
+        Ok(s) => {
+            // SOCKS5 响应: 成功
+            client.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await?;
+            s
+        }
+        Err(_e) => {
+            // SOCKS5 响应: 失败
+            let _ = client.write_all(&[0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
+            return Err(anyhow::anyhow!("Connect failed"));
+        }
+    };
+
+    // 4. Relay
+    let _ = tokio::io::copy_bidirectional(client, &mut target_stream).await;
+    
+    Ok(())
+}
+
+async fn connect_via_interface(interface: &str, target: &str) -> Result<TcpStream> {
+    use std::net::ToSocketAddrs;
+
+    let addr = target.to_socket_addrs()?.next().ok_or(anyhow::anyhow!("DNS resolve failed"))?;
+    
+    let domain = if addr.is_ipv4() { Domain::IPV4 } else { Domain::IPV6 };
+    let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+    
+    // Bind to device (SO_BINDTODEVICE)
+    socket.bind_device(Some(interface.as_bytes()))?;
+    socket.set_nonblocking(true)?;
+    
+    match socket.connect(&addr.into()) {
+        Ok(_) => {},
+        Err(e) => {
+            if e.raw_os_error() != Some(libc::EINPROGRESS) {
+                return Err(e.into());
+            }
+        }
+    }
+    
+    let stream = TcpStream::from_std(socket.into())?;
+    stream.writable().await?;
+    if let Some(e) = stream.take_error()? {
+        return Err(e.into());
+    }
+    Ok(stream)
 }
 
 
