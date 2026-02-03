@@ -59,23 +59,36 @@ static SIDE_CARS: OnceLock<tokio::sync::Mutex<HashMap<(String, String), tokio::p
 static PROBED_MTU_CACHE: OnceLock<tokio::sync::Mutex<HashMap<String, (u16, std::time::Instant)>>> = OnceLock::new();
 static DNS_CACHE: OnceLock<tokio::sync::Mutex<HashMap<String, (IpAddr, std::time::Instant)>>> = OnceLock::new();
 
-async fn resolve_dns(host: &str) -> Result<IpAddr> {
+async fn resolve_dns(host: &str, interface: Option<&str>) -> Result<IpAddr> {
     {
         let cache_mutex = DNS_CACHE.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()));
         let cache = cache_mutex.lock().await;
         if let Some((ip, timestamp)) = cache.get(host) {
-            // 简单缓存 5 分钟喵
             if timestamp.elapsed() < Duration::from_secs(300) {
                 return Ok(*ip);
             }
         }
     }
 
-    // 异步解析 DNS 喵
-    let addr = tokio::net::lookup_host(format!("{}:0", host)).await?
-        .next()
-        .map(|a| a.ip())
-        .ok_or(anyhow::anyhow!("DNS 解析结果为空"))?;
+    let addr = if let Some(iface) = interface {
+        // 使用隧道接口进行可信 DNS 解析 (Google DNS 8.8.8.8) 喵
+        match resolve_via_tunnel(host, iface).await {
+            Ok(ip) => ip,
+            Err(_e) => {
+                // tracing::warn!("可信 DNS 解析失败，降级回系统解析: {:?}", _e);
+                 tokio::net::lookup_host(format!("{}:0", host)).await?
+                    .next()
+                    .map(|a| a.ip())
+                    .ok_or(anyhow::anyhow!("系统 DNS 解析结果为空"))?
+            }
+        }
+    } else {
+        // 没有指定接口，直接使用系统解析
+         tokio::net::lookup_host(format!("{}:0", host)).await?
+            .next()
+            .map(|a| a.ip())
+            .ok_or(anyhow::anyhow!("系统 DNS 解析结果为空"))?
+    };
 
     {
         let mut cache = DNS_CACHE.get_or_init(|| tokio::sync::Mutex::new(HashMap::new())).lock().await;
@@ -83,6 +96,52 @@ async fn resolve_dns(host: &str) -> Result<IpAddr> {
     }
     
     Ok(addr)
+}
+
+// 手动构造 DNS 查询包并通过隧道接口发送喵
+async fn resolve_via_tunnel(host: &str, interface: &str) -> Result<IpAddr> {
+    use hickory_proto::op::{Message, Query, ResponseCode};
+    use hickory_proto::rr::{Name, RecordType, RData};
+    use std::str::FromStr;
+
+    // 1. 尝试解析为 A 记录 (IPv4)
+    let name = Name::from_str(host).map_err(|_| anyhow::anyhow!("Invalid hostname"))?;
+    if !name.is_fqdn() {
+        // 如果不是 FQDN，可能需要 append search domain，这里简化处理只查一次
+        // name.append_domain(...) 
+    }
+    
+    // 构造查询
+    let mut query = Query::query(name.clone(), RecordType::A);
+    let mut msg = Message::new();
+    msg.add_query(query);
+    msg.set_recursion_desired(true);
+    let msg_bytes = msg.to_vec()?;
+
+    // 绑定到隧道接口
+    let socket = connect_via_interface_udp(interface, None).await?;
+    
+    // 发送给 8.8.8.8:53
+    let target = "8.8.8.8:53".parse::<SocketAddr>().unwrap();
+    socket.send_to(&msg_bytes, target).await?;
+
+    // 接收响应
+    let mut buf = [0u8; 4096];
+    let (len, _src) = time::timeout(Duration::from_secs(3), socket.recv_from(&mut buf)).await??;
+    
+    let resp = Message::from_vec(&buf[..len])?;
+    if resp.response_code() != ResponseCode::NoError {
+        return Err(anyhow::anyhow!("DNS query failed: {:?}", resp.response_code()));
+    }
+
+    // 提取 IP
+    for answer in resp.answers() {
+        if let Some(RData::A(ip)) = answer.data() {
+            return Ok(IpAddr::V4(ip.0));
+        }
+    }
+
+    Err(anyhow::anyhow!("No A record found via tunnel"))
 }
 
 async fn get_auto_mtu(endpoint: &str, mode: &str) -> u16 {
@@ -909,7 +968,7 @@ async fn handle_socks5(interface: &str, client: &mut TcpStream, local_ip: Option
                 Ok((n, addr)) = relay_socket.recv_from(&mut client_relay_buf) => {
                     if client_udp_addr.is_none() { client_udp_addr = Some(addr); }
                     if Some(addr) == client_udp_addr {
-                        if let Ok((header_len, target_addr)) = parse_socks5_udp_header(&client_relay_buf[..n]).await {
+                        if let Ok((header_len, target_addr)) = parse_socks5_udp_header(&client_relay_buf[..n], interface).await {
                             let _ = tunnel_socket.send_to(&client_relay_buf[header_len..n], target_addr).await;
                         }
                     }
@@ -932,7 +991,7 @@ async fn handle_socks5(interface: &str, client: &mut TcpStream, local_ip: Option
     Ok(())
 }
 
-async fn parse_socks5_udp_header(buf: &[u8]) -> Result<(usize, SocketAddr)> {
+async fn parse_socks5_udp_header(buf: &[u8], interface: &str) -> Result<(usize, SocketAddr)> {
     if buf.len() < 4 { return Err(anyhow::anyhow!("UDP header too short")); }
     if buf[2] != 0x00 { return Err(anyhow::anyhow!("Fragments not supported")); }
     
@@ -949,8 +1008,8 @@ async fn parse_socks5_udp_header(buf: &[u8]) -> Result<(usize, SocketAddr)> {
             if buf.len() < 5 + len + 2 { return Err(anyhow::anyhow!("UDP header too short for Domain")); }
             let domain = String::from_utf8_lossy(&buf[5..5+len]).to_string();
             let port = u16::from_be_bytes([buf[5+len], buf[5+len+1]]);
-            // 异步解析 DNS 喵
-            let ip = resolve_dns(&domain).await?;
+            // 异步解析 DNS 喵 (使用可信隧道解析)
+            let ip = resolve_dns(&domain, Some(interface)).await?;
             Ok((5 + len + 2, SocketAddr::new(ip, port)))
         }
         0x04 => { // IPv6
@@ -989,7 +1048,8 @@ async fn connect_via_interface(interface: &str, target: &str, local_ip: Option<I
     let ip = if let Ok(parsed_ip) = host.parse::<IpAddr>() {
         parsed_ip
     } else {
-        resolve_dns(host).await?
+        // TCP 模式下也使用可信解析喵
+        resolve_dns(host, Some(interface)).await?
     };
     let addr = SocketAddr::new(ip, port);
     
