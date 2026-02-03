@@ -1,6 +1,6 @@
 [package]
 name = "nekolink-ctl"
-version = "2.7.7"
+version = "2.7.8"
 edition = "2021"
 
 [dependencies]
@@ -16,7 +16,7 @@ x25519-dalek = { version = "2.0.1", features = ["static_secrets"] }
 rand_core = { version = "0.6.4", features = ["getrandom"] }
 blake2 = "0.10"
 chacha20poly1305 = "0.10"
-socket2 = { version = "0.4", features = ["all"] }
+socket2 = { version = "0.5", features = ["all"] }
 libc = "0.2"
 tokio-util = { version = "0.7" }
 parking_lot = "0.12"

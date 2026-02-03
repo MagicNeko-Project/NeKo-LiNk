@@ -1008,6 +1008,7 @@ async fn connect_via_interface(interface: &str, target: &str, local_ip: Option<I
     }
 
     socket.set_nodelay(true)?; // 降低小包延迟喵
+    socket.set_tcp_keepalive(&socket2::TcpKeepalive::new().with_time(Duration::from_secs(60)))?; // 开启 Keepalive 防止死连接喵
     socket.set_nonblocking(true)?;
     
     match socket.connect(&addr.into()) {
@@ -1020,7 +1021,12 @@ async fn connect_via_interface(interface: &str, target: &str, local_ip: Option<I
     }
     
     let stream = TcpStream::from_std(socket.into())?;
-    stream.writable().await?;
+    
+    // 增加连接超时机制 (10秒)，防止被墙时无限等待喵
+    if let Err(_) = time::timeout(Duration::from_secs(10), stream.writable()).await {
+        return Err(anyhow::anyhow!("连接超时喵 (可能是被阻断或网络不通)"));
+    }
+    
     if let Some(e) = stream.take_error()? {
         return Err(e.into());
     }
