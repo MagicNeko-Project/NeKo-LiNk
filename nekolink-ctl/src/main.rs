@@ -456,10 +456,15 @@ async fn main() -> Result<()> {
                 for (iface, old_h) in instances.drain() {
                     println!("喵！检测到接口 {} 已从配置中移除，正在停止...", iface);
                     old_h.token.cancel();
+                    // 显式清理全局状态喵，防止残留缓存或进程影响后续同名接口的创建
+                    let iface_clone = iface.clone();
+                    tokio::spawn(async move {
+                        cleanup_interface_state(&iface_clone).await;
+                    });
                 }
                 
                 *instances = next_instances;
-                println!("ฅ^•ﻌ•^ฅ 热重载魔法施展完成！目前运行 {} 个接口喵。", instances.len());
+                println!("ฅ^•ﻌ•^ctl 热重载魔法施展完成！目前运行 {} 个接口喵。", instances.len());
             }
             Err(e) => {
                 eprintln!("喵呜... 热重载加载配置失败: {:?}", e);
@@ -499,7 +504,8 @@ async fn run_instance(state: NekoState, token: CancellationToken) -> Result<()> 
 
     println!("使用公钥: {} 喵！", state.pub_key_b64());
 
-    // 2. 预清理：强制删除可能存在的旧接口喵
+    // 2. 状态预清理：强制删除旧接口、清理缓存、杀死残留侧车喵
+    cleanup_interface_state(&config.interface).await;
     let _ = run_cmd(&format!("ip link del {} 2>/dev/null", config.interface));
 
     // 3. 启动 nekolink-cli
@@ -1592,6 +1598,33 @@ fn get_interface_mtu(interface: &str) -> Result<u16> {
     } else {
         Err(anyhow::anyhow!("获取 MTU 失败"))
     }
+}
+
+async fn cleanup_interface_state(interface: &str) {
+    // 1. 清理 PEER_CACHE 喵
+    if let Some(cache_mutex) = PEER_CACHE.get() {
+        let mut cache = cache_mutex.lock().unwrap();
+        cache.retain(|(iface, _), _| iface != interface);
+    }
+
+    // 2. 清理 SIDE_CARS 喵 (杀死残留的 udp2raw 进程)
+    if let Some(sidecars_mutex) = SIDE_CARS.get() {
+        let mut sidecars = sidecars_mutex.lock().await;
+        let mut keys_to_remove = Vec::new();
+        for ((iface, pubkey), _) in sidecars.iter() {
+            if iface == interface {
+                keys_to_remove.push((iface.clone(), pubkey.clone()));
+            }
+        }
+        for key in keys_to_remove {
+            if let Some(mut child) = sidecars.remove(&key) {
+                let _ = child.kill().await;
+            }
+        }
+    }
+    
+    // 3. 清理 PROBED_MTU_CACHE 喵 (由于 MTU 缓存是以 Endpoint 为 Key 的，目前不需要按接口清理，
+    // 但是考虑到热重载可能有网络变动，保持它一段时间自动过期即可喵)
 }
 
 fn run_cmd(cmd: &str) -> Result<()> {
