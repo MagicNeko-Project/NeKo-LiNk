@@ -52,8 +52,9 @@ function show_advanced_menu() {
     echo "1. 设置全局信令端口 (Global Signal Port)"
     echo "2. 将所有隧道修改为 MTU 自动协商 (MTU Auto-Negotiation)"
     echo "3. 导入 wg-quick 配置文件 (WireGuard 兼容模式)"
-    echo "4. 返回主菜单"
-    read -p "请输入数字 [1-4]: " adv_choice
+    echo "4. 一键注入 SOCKS5 极速神力 (Auto-Optimize Kernel)"
+    echo "5. 返回主菜单"
+    read -p "请输入数字 [1-5]: " adv_choice
 }
 
 function import_wgquick_config() {
@@ -738,6 +739,65 @@ function set_global_signal_port() {
     echo -e "${CYAN}提示：修改后请重启 nekolink 服务以生效喵。${NC}"
 }
 
+function auto_optimize_kernel() {
+    echo -e "\n${PINK}--- 正在为系统注入 SOCKS5 极速神力 (内核优化) ---${NC}"
+    echo -e "${CYAN}此操作将修改 /etc/sysctl.conf 和 /etc/security/limits.conf。${NC}"
+    echo -e "${CYAN}优化内容包括：开启 BBR、增加连接队列、扩大端口范围、提升文件句柄上限等喵。${NC}\n"
+    
+    read -p "确定要继续吗？(y/n): " confirm
+    if [ "$confirm" != "y" ]; then
+        echo -e "${PINK}操作取消喵。${NC}"
+        return
+    fi
+
+    # 1. 备份现有配置
+    echo -e "${CYAN}正在备份配置文件...${NC}"
+    cp /etc/sysctl.conf /etc/sysctl.conf.bak.$(date +%F-%T)
+    cp /etc/security/limits.conf /etc/security/limits.conf.bak.$(date +%F-%T)
+    
+    # 2. 修改 sysctl.conf
+    echo -e "${CYAN}正在应用 sysctl 内核参数...${NC}"
+    declare -A sysctl_params=(
+        ["net.core.default_qdisc"]="fq"
+        ["net.ipv4.tcp_congestion_control"]="bbr"
+        ["net.core.somaxconn"]="65535"
+        ["net.ipv4.tcp_max_syn_backlog"]="65535"
+        ["net.ipv4.ip_local_port_range"]="10000 65000"
+        ["net.ipv4.tcp_tw_reuse"]="1"
+        ["fs.file-max"]="1000000"
+        ["net.core.rmem_max"]="16777216"
+        ["net.core.wmem_max"]="16777216"
+        ["net.ipv4.tcp_rmem"]="4096 87380 16777216"
+        ["net.ipv4.tcp_wmem"]="4096 16384 16777216"
+    )
+
+    for key in "${!sysctl_params[@]}"; do
+        value="${sysctl_params[$key]}"
+        if grep -q "^$key" /etc/sysctl.conf; then
+            sed -i "s|^$key.*|$key = $value|" /etc/sysctl.conf
+        else
+            echo "$key = $value" >> /etc/sysctl.conf
+        fi
+    done
+    
+    # 立即生效
+    sysctl -p
+    
+    # 3. 修改 limits.conf (所有用户)
+    echo -e "${CYAN}正在提升文件描述符限制 (ulimit)...${NC}"
+    if ! grep -q "* soft nofile 1000000" /etc/security/limits.conf; then
+        echo "* soft nofile 1000000" >> /etc/security/limits.conf
+        echo "* hard nofile 1000000" >> /etc/security/limits.conf
+    fi
+    if ! grep -q "root soft nofile 1000000" /etc/security/limits.conf; then
+        echo "root soft nofile 1000000" >> /etc/security/limits.conf
+        echo "root hard nofile 1000000" >> /etc/security/limits.conf
+    fi
+
+    echo -e "\n${PINK}注入成功！您的系统现在拥有赛车引擎般的性能了喵！( ⸝⸝•ᴗ•⸝⸝ )੭⁾⁾${NC}"
+    echo -e "${CYAN}提示：部分 limits 设置需要注销重登录或重启系统后才能完全生效喵。${NC}"
+}
+
 while true; do
     show_menu
     case $choice in
@@ -763,7 +823,8 @@ while true; do
                 1) set_global_signal_port ;;
                 2) set_all_tunnels_auto_mtu ;;
                 3) import_wgquick_config ;;
-                4) continue ;;
+                4) auto_optimize_kernel ;;
+                5) continue ;;
                 *) echo "无效选择喵！" ;;
             esac
             ;;

@@ -87,6 +87,39 @@ SOCKS5 是一种通用代理协议，不仅可以转发网页 (HTTP)，还能转
 
 ---
 
+## 🏎️ 骨灰级性能优化：内核调优指南
+
+当主人的 SOCKS5 服务需要承载成百上千的并发连接时，Linux 默认的内核参数可能会成为瓶颈。
+猫娘为您准备了一份 **“赛车手专用”** 的调优清单，建议在 `/etc/sysctl.conf` 中添加以下内容喵：
+
+```ini
+# 1. 开启 TCP BBR 拥塞控制 (Google 黑科技，大幅提升弱网速度)
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+
+# 2. 增加 TCP 连接队列长度 (防止突发流量把连接挤爆)
+net.core.somaxconn = 65535
+net.ipv4.tcp_max_syn_backlog = 65535
+
+# 3. 扩大端口范围 & 允许端口复用 (解决 TIME_WAIT 耗尽端口问题)
+net.ipv4.ip_local_port_range = 10000 65000
+net.ipv4.tcp_tw_reuse = 1
+
+# 4. 增大文件句柄上限 (防止 "Too many open files" 报错)
+fs.file-max = 1000000
+# 注意：还需要同步修改 /etc/security/limits.conf 中的 nofile 限制喵
+
+# 5. 调整 TCP 缓冲区 (让大水管跑得更欢)
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.ipv4.tcp_rmem = 4096 87380 16777216
+net.ipv4.tcp_wmem = 4096 16384 16777216
+```
+
+修改完成后，执行 `sudo sysctl -p` 即可生效喵！
+
+---
+
 ## ❓ 常见问题
 
 **Q: 为什么我设置了 `0.0.0.0` 却还是不能从外网连？**
