@@ -25,7 +25,16 @@ Break free from UDP (Protocol 17) throttling and identification! You can communi
 The ultimate penetration magic! By masquerading all traffic as legitimate TCP packets (including full handshake simulation and state management), your data flows appear like regular web browsing to network monitors.
 
 
+### ⚡ Extreme Performance (v3.1.0 Restored)
+**性能怪兽回归**：我们修复了兼容性问题并带回了三大加速引擎：
+- **recvmmsg**: 批量接收，大幅减少系统调用。
+- **sendmmsg**: 智能批量发送队列。
+- **UDP GRO**: 内核级收包聚合 (Linux/Android)，吞吐量猛增，CPU 占用骤降。
 
+**Speed Deamon Returns**: We fixed the compatibility issues and brought back the three acceleration engines:
+- **recvmmsg**: Batch receiving to drastically reduce syscalls.
+- **sendmmsg**: Smart batch sending queue.
+- **UDP GRO**: Kernel-level packet aggregation (Linux/Android), significantly boosting throughput while lowering CPU usage.
 ### 🤝 Automated Key Exchange
 无需手动复制粘贴冗长的公钥。只要预共享密钥 (PSK) 匹配，NekoLink 就能通过加密信令通道自动交换 WireGuard 公钥。
 

@@ -112,7 +112,7 @@ async fn resolve_via_tunnel(host: &str, interface: &str) -> Result<IpAddr> {
     }
     
     // 构造查询
-    let mut query = Query::query(name.clone(), RecordType::A);
+    let query = Query::query(name.clone(), RecordType::A);
     let mut msg = Message::new();
     msg.add_query(query);
     msg.set_recursion_desired(true);
@@ -220,7 +220,12 @@ struct NekoConfig {
     /// 本地 SOCKS5 代理端口喵
     #[serde(default)]
     pub socks5_port: Option<u16>,
+    /// 是否开启 UDP GRO 接收卸载（默认开启，若遇到性能问题可关闭喵）
+    #[serde(default = "default_true")]
+    pub enable_udp_gro: bool,
 }
+
+fn default_true() -> bool { true }
 
 fn default_tcp_data_port() -> u16 {
     4567
@@ -607,6 +612,9 @@ async fn run_instance(state: NekoState, token: CancellationToken) -> Result<()> 
         if !config.use_multi_queue {
             cmd.arg("--disable-multi-queue");
         }
+    }
+    if !config.enable_udp_gro {
+        cmd.arg("--disable-udp-gro");
     }
     
     // 强制设置 MTU，默认 1420 喵

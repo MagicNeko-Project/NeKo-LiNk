@@ -25,6 +25,9 @@ pub mod tun;
 #[path = "tun_linux.rs"]
 pub mod tun;
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use libc::{iovec, mmsghdr, msghdr, recvmmsg, sendmmsg, sockaddr_storage, MSG_DONTWAIT, cmsghdr, c_void, c_int, setsockopt};
+
 use std::collections::HashMap;
 use std::io::{self, Write as _};
 use std::mem::MaybeUninit;
@@ -53,7 +56,11 @@ use dev_lock::{Lock, LockReadGuard};
 const HANDSHAKE_RATE_LIMIT: u64 = 100; // The number of handshakes per second we can tolerate before using cookies
 
 const MAX_UDP_SIZE: usize = (1 << 16) - 1;
+const MAX_PACKET_COUNT: usize = 64; // GotaTun uses this batch size
 const MAX_ITR: usize = 100; // Number of packets to handle per handler call
+const UDP_GRO: c_int = 104;
+const SOL_UDP: c_int = 17;
+const CMSG_LEN: usize = 64; // Enough for standard CMSG
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -116,6 +123,8 @@ pub struct DeviceConfig {
     pub uapi_fd: i32,
     pub ip_protocol: Option<u8>,
     pub transport_mode: TransportMode,
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub enable_udp_gro: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -135,6 +144,10 @@ impl Default for DeviceConfig {
             uapi_fd: -1,
             ip_protocol: None,
             transport_mode: TransportMode::Udp,
+            #[cfg(target_os = "linux")]
+            enable_udp_gro: true,
+            #[cfg(target_os = "android")]
+            enable_udp_gro: true,
         }
     }
 }
@@ -173,6 +186,12 @@ struct ThreadData {
     iface: Arc<TunSocket>,
     src_buf: [u8; MAX_UDP_SIZE],
     dst_buf: [u8; MAX_UDP_SIZE],
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    batch_bufs: Vec<Box<[u8; MAX_UDP_SIZE]>>,
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    send_batch_bufs: Vec<Box<[u8; MAX_UDP_SIZE]>>,
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    cmsg_bufs: Vec<Box<[u8; CMSG_LEN]>>,
 }
 
 impl DeviceHandle {
@@ -216,6 +235,9 @@ impl DeviceHandle {
         let mut thread_local = ThreadData {
             src_buf: [0u8; MAX_UDP_SIZE],
             dst_buf: [0u8; MAX_UDP_SIZE],
+            batch_bufs: (0..MAX_PACKET_COUNT).map(|_| Box::new([0u8; MAX_UDP_SIZE])).collect(),
+            send_batch_bufs: (0..MAX_PACKET_COUNT).map(|_| Box::new([0u8; MAX_UDP_SIZE])).collect(),
+            cmsg_bufs: (0..MAX_PACKET_COUNT).map(|_| Box::new([0u8; CMSG_LEN])).collect(),
             iface: if _i == 0 || !device.read().config.use_multi_queue {
                 // For the first thread use the original iface
                 Arc::clone(&device.read().iface)
@@ -638,111 +660,456 @@ impl Device {
                     None => return Action::Continue,
                 };
 
-                // Safety: the `recv_from` implementation promises not to write uninitialised
-                // bytes to the buffer, so this casting is safe.
-                let src_buf =
-                    unsafe { &mut *(&mut t.src_buf[..] as *mut [u8] as *mut [MaybeUninit<u8>]) };
-                while let Ok((packet_len, addr)) = udp.recv_from(src_buf) {
-                    let mut offset = 0;
+                #[cfg(any(target_os = "linux", target_os = "android"))]
+                {
+                    let fd = udp.as_raw_fd();
                     
-                    // NekoLink: 处理 IP 层头部 (Raw IP 模式) 喵
-                    if d.config.ip_protocol.is_some() && addr.as_socket().unwrap().is_ipv4() {
-                        if packet_len < 20 { continue; }
-                        let ihl = (t.src_buf[0] & 0x0f) as usize * 4;
-                        if packet_len < ihl { continue; }
-                        offset = ihl;
-                    }
-
-
-                    let packet = &t.src_buf[offset..packet_len];
-                    // The rate limiter initially checks mac1 and mac2, and optionally asks to send a cookie
-                    let parsed_packet = match rate_limiter.verify_packet(
-                        Some(addr.as_socket().unwrap().ip()),
-                        packet,
-                        &mut t.dst_buf,
-                    ) {
-                        Ok(packet) => packet,
-                        Err(TunnResult::WriteToNetwork(cookie)) => {
-                            let _: Result<_, _> = udp.send_to(cookie, &addr);
-                            continue;
-                        }
-                        Err(_) => continue,
-                    };
-
-                    let peer = match &parsed_packet {
-                        Packet::HandshakeInit(p) => {
-                            parse_handshake_anon(private_key, public_key, p)
-                                .ok()
-                                .and_then(|hh| {
-                                    d.peers.get(&x25519::PublicKey::from(hh.peer_static_public))
-                                })
-                        }
-                        Packet::HandshakeResponse(p) => d.peers_by_idx.get(&(p.receiver_idx >> 8)),
-                        Packet::PacketCookieReply(p) => d.peers_by_idx.get(&(p.receiver_idx >> 8)),
-                        Packet::PacketData(p) => d.peers_by_idx.get(&(p.receiver_idx >> 8)),
-                    };
-
-                    let peer = match peer {
-                        None => continue,
-                        Some(peer) => peer,
-                    };
-
-                    let mut p = peer.lock();
-
-                    // NekoLink 2.3.0: 提取对端端口喵
-                    let remote_port = addr.as_socket().unwrap().port();
-
-                    // We found a peer, use it to decapsulate the message+
-                    let mut flush = false; // Are there packets to send from the queue?
-                    let res = p.tunnel.handle_verified_packet(parsed_packet, &mut t.dst_buf[..]);
-                    
-                     if !matches!(res, TunnResult::Err(_)) {
-                          // 验证通过，此时才更新端点并尝试连接喵
-                          let ip_addr = addr.as_socket().unwrap().ip();
-                          let final_addr = SocketAddr::new(ip_addr, remote_port);
-                          
-                          p.set_endpoint(final_addr);
-
-                          if d.config.use_connected_socket {
-                              let _ = p.connect_endpoint(d.listen_port, d.fwmark, d.config.ip_protocol).map(|sock| {
-                                  d.register_conn_handler(Arc::clone(peer), sock, ip_addr).unwrap();
-                              });
-                          }
-                     }
-
-                    match res {
-                        TunnResult::Done => {}
-                        TunnResult::Err(_) => continue,
-                        TunnResult::WriteToNetwork(packet) => {
-                            flush = true;
-                            let _: Result<_, _> = udp.send_to(packet, &addr);
-                        }
-                        TunnResult::WriteToTunnelV4(packet, addr) => {
-                            if p.is_allowed_ip(addr) {
-                                t.iface.write4(packet);
-                            }
-                        }
-                        TunnResult::WriteToTunnelV6(packet, addr) => {
-                            if p.is_allowed_ip(addr) {
-                                t.iface.write6(packet);
-                            }
-                        }
-                    };
-
-                    if flush {
-                        // Flush pending queue
-                        while let TunnResult::WriteToNetwork(packet) =
-                            p.tunnel.decapsulate(None, &[], &mut t.dst_buf[..])
-                        {
-                            let _: Result<_, _> = udp.send_to(packet, &addr);
+                    if d.config.enable_udp_gro {
+                        // NekoLink Phase 3: 尝试启用 UDP_GRO
+                        unsafe {
+                             let val: c_int = 1;
+                             setsockopt(
+                                 fd,
+                                 SOL_UDP,
+                                 UDP_GRO,
+                                 &val as *const _ as *const c_void,
+                                 std::mem::size_of::<c_int>() as _
+                             );
+                             // 忽略错误，不管成功与否都继续
                         }
                     }
+                    
+                    // Prepare data structures for recvmmsg
+                    let mut raw_addrs = [unsafe { std::mem::zeroed::<sockaddr_storage>() }; MAX_PACKET_COUNT];
+                    let mut iovecs: Vec<iovec> = t.batch_bufs
+                        .iter_mut()
+                        .map(|b| iovec {
+                            iov_base: b.as_mut_ptr() as *mut _,
+                            iov_len: b.len(),
+                        })
+                        .collect();
+                    
+                    let mut hdrs: Vec<mmsghdr> = (0..MAX_PACKET_COUNT)
+                        .map(|i| {
+                            let mut hdr: msghdr = unsafe { std::mem::zeroed() };
+                            hdr.msg_name = &mut raw_addrs[i] as *mut _ as *mut _;
+                            hdr.msg_namelen = std::mem::size_of::<sockaddr_storage>() as _;
+                            hdr.msg_iov = &mut iovecs[i];
+                            hdr.msg_iovlen = 1;
+                            // NekoLink Phase 3: 挂载 Control Buffer
+                            hdr.msg_control = t.cmsg_bufs[i].as_mut_ptr() as *mut _;
+                            hdr.msg_controllen = CMSG_LEN as _;
+                            mmsghdr {
+                                msg_hdr: hdr,
+                                msg_len: 0,
+                            }
+                        })
+                        .collect();
+                    
+                    // NekoLink Phase 2: sendmmsg 准备结构
+                    let mut send_len = 0;
+                    let mut send_addrs = [unsafe { std::mem::zeroed::<sockaddr_storage>() }; MAX_PACKET_COUNT];
+                    let mut send_iovecs: Vec<iovec> = t.send_batch_bufs
+                        .iter_mut()
+                        .map(|b| iovec {
+                            iov_base: b.as_mut_ptr() as *mut _,
+                            iov_len: 0, // 初始为 0，发送时更新
+                        })
+                        .collect();
+                    
+                    let mut send_hdrs: Vec<mmsghdr> = (0..MAX_PACKET_COUNT)
+                        .map(|i| {
+                            let mut hdr: msghdr = unsafe { std::mem::zeroed() };
+                            hdr.msg_name = &mut send_addrs[i] as *mut _ as *mut _;
+                            hdr.msg_namelen = std::mem::size_of::<sockaddr_storage>() as _;
+                            hdr.msg_iov = &mut send_iovecs[i];
+                            hdr.msg_iovlen = 1;
+                            mmsghdr {
+                                msg_hdr: hdr,
+                                msg_len: 0,
+                            }
+                        })
+                        .collect();
+                    
 
-                    iter -= 1;
-                    if iter == 0 {
-                        break;
+
+                    loop {
+                        // libc::recvmmsg returns int (number of pkts) or -1
+                        let res = unsafe {
+                            recvmmsg(
+                                fd,
+                                hdrs.as_mut_ptr(),
+                                MAX_PACKET_COUNT as _,
+                                MSG_DONTWAIT,
+                                std::ptr::null_mut(),
+                            )
+                        };
+
+                        if res < 0 {
+                            let err = std::io::Error::last_os_error();
+                             if err.kind() == std::io::ErrorKind::WouldBlock {
+                                 break;
+                             }
+                             // Other errors?
+                             break;
+                        }
+                        
+                        let count = res as usize;
+                        if count == 0 { break; }
+
+                        for i in 0..count {
+                            let pkt_len = hdrs[i].msg_len as usize;
+                            let addr_storage = raw_addrs[i];
+                            let addr_len = hdrs[i].msg_hdr.msg_namelen;
+
+                            // Convert sockaddr_storage to SocketAddr
+                            let addr = unsafe {
+                                let s = socket2::SockAddr::new(addr_storage, addr_len);
+                                s.as_socket()
+                            };
+                            
+                            let addr = match addr {
+                                Some(a) => a,
+                                None => continue,
+                            };
+                            
+                            let src_buf = &mut t.batch_bufs[i][..pkt_len];
+
+                            // NekoLink Phase 3: 解析 CMSG 获取 GRO segment size
+                            let mut gro_segment_size = 0;
+                            let hdr = &hdrs[i].msg_hdr;
+                            if hdr.msg_controllen > 0 {
+                                unsafe {
+                                    let mut cmsg: *mut cmsghdr = libc::CMSG_FIRSTHDR(hdr) as *mut _;
+                                    while !cmsg.is_null() {
+                                        if (*cmsg).cmsg_level == SOL_UDP && (*cmsg).cmsg_type == UDP_GRO {
+                                            // Found GRO segment size
+                                            let data_ptr = libc::CMSG_DATA(cmsg);
+                                            // The data is a u16 (segment size)
+                                            // Actually Linux kernel passes it as int or u16? Usually u16 for segment size in GSO, 
+                                            // but for UDP_GRO it might be u16 payload_len.
+                                            // Let's assume u16 as per typical kernel behavior for gso_size.
+                                            let val_ptr = data_ptr as *const u16;
+                                            gro_segment_size = *val_ptr as usize;
+                                            break; 
+                                        }
+                                        cmsg = libc::CMSG_NXTHDR(hdr, cmsg) as *mut _;
+                                    }
+                                }
+                            }
+
+                            // 如果没启用 GRO 或没收到 segment info，不仅当成单包处理
+                            if gro_segment_size == 0 {
+                                gro_segment_size = pkt_len;
+                            }
+
+                            // 遍历所有 segment (如果 gro_segment_size < pkt_len，说明是 GRO 包)
+                            let mut current_offset = 0;
+                            while current_offset < pkt_len {
+                                let remaining = pkt_len - current_offset;
+                                let this_len = if remaining > gro_segment_size { gro_segment_size } else { remaining };
+                                let segment_buf = &src_buf[current_offset..current_offset+this_len];
+                                current_offset += this_len;
+
+                                let mut offset = 0;
+                                // NekoLink: 处理 IP 层头部 (Raw IP 模式) 喵
+                                if d.config.ip_protocol.is_some() && addr.is_ipv4() {
+                                    if this_len < 20 { continue; }
+                                    let ihl = (segment_buf[0] & 0x0f) as usize * 4;
+                                    if this_len < ihl { continue; }
+                                    offset = ihl;
+                                }
+
+                                let packet = &segment_buf[offset..this_len];
+                            let parsed_packet = match rate_limiter.verify_packet(
+                                Some(addr.ip()),
+                                packet,
+                                &mut t.dst_buf,
+                            ) {
+                                Ok(packet) => packet,
+                                Err(TunnResult::WriteToNetwork(cookie)) => {
+                                    // NekoLink: 将 cookie 加入发送队列
+                                    if send_len < MAX_PACKET_COUNT {
+                                        t.send_batch_bufs[send_len][..cookie.len()].copy_from_slice(cookie);
+                                        send_iovecs[send_len].iov_len = cookie.len();
+                                        
+                                        // 设置目标地址
+                                        let sockaddr = socket2::SockAddr::from(addr);
+                                        unsafe {
+                                            let src = sockaddr.as_ptr() as *const sockaddr_storage;
+                                            let dst = &mut send_addrs[send_len] as *mut sockaddr_storage;
+                                            std::ptr::copy_nonoverlapping(src, dst, 1);
+                                            send_hdrs[send_len].msg_hdr.msg_namelen = sockaddr.len();
+                                        }
+                                        
+                                        send_len += 1;
+                                    }
+                                    
+                                    // 满了就发
+                                    if send_len == MAX_PACKET_COUNT {
+                                        let res = unsafe {
+                                            sendmmsg(
+                                                fd,
+                                                send_hdrs.as_mut_ptr(),
+                                                send_len as _,
+                                                MSG_DONTWAIT,
+                                            )
+                                        };
+                                        if res < 0 && cfg!(debug_assertions) {}
+                                        send_len = 0;
+                                    }
+                                    continue;
+                                }
+                                Err(_) => continue,
+                            };
+
+                            let peer = match &parsed_packet {
+                                Packet::HandshakeInit(p) => {
+                                    parse_handshake_anon(private_key, public_key, p)
+                                        .ok()
+                                        .and_then(|hh| {
+                                            d.peers.get(&x25519::PublicKey::from(hh.peer_static_public))
+                                        })
+                                }
+                                Packet::HandshakeResponse(p) => d.peers_by_idx.get(&(p.receiver_idx >> 8)),
+                                Packet::PacketCookieReply(p) => d.peers_by_idx.get(&(p.receiver_idx >> 8)),
+                                Packet::PacketData(p) => d.peers_by_idx.get(&(p.receiver_idx >> 8)),
+                            };
+
+                            let peer = match peer {
+                                None => continue,
+                                Some(peer) => peer,
+                            };
+
+                            let mut p = peer.lock();
+                            let remote_port = addr.port();
+
+                            let mut flush = false;
+                            let res = p.tunnel.handle_verified_packet(parsed_packet, &mut t.dst_buf[..]);
+                            
+                             if !matches!(res, TunnResult::Err(_)) {
+                                  let ip_addr = addr.ip();
+                                  let final_addr = SocketAddr::new(ip_addr, remote_port);
+                                  p.set_endpoint(final_addr);
+
+                                  if d.config.use_connected_socket {
+                                      let _ = p.connect_endpoint(d.listen_port, d.fwmark, d.config.ip_protocol).map(|sock| {
+                                          d.register_conn_handler(Arc::clone(peer), sock, ip_addr).unwrap();
+                                      });
+                                  }
+                             }
+
+                            match res {
+                                TunnResult::Done => {}
+                                TunnResult::Err(_) => continue,
+                                TunnResult::WriteToNetwork(packet) => {
+                                    flush = true;
+                                    if send_len < MAX_PACKET_COUNT {
+                                        t.send_batch_bufs[send_len][..packet.len()].copy_from_slice(packet);
+                                        send_iovecs[send_len].iov_len = packet.len();
+                                        
+                                        let sockaddr = socket2::SockAddr::from(addr);
+                                        unsafe {
+                                            let src = sockaddr.as_ptr() as *const sockaddr_storage;
+                                            let dst = &mut send_addrs[send_len] as *mut sockaddr_storage;
+                                            std::ptr::copy_nonoverlapping(src, dst, 1);
+                                            send_hdrs[send_len].msg_hdr.msg_namelen = sockaddr.len();
+                                        }
+
+                                        send_len += 1;
+                                    }
+                                    
+                                    if send_len == MAX_PACKET_COUNT {
+                                        let res = unsafe {
+                                            sendmmsg(
+                                                fd,
+                                                send_hdrs.as_mut_ptr(),
+                                                send_len as _,
+                                                MSG_DONTWAIT,
+                                            )
+                                        };
+                                        if res < 0 && cfg!(debug_assertions) {}
+                                        send_len = 0;
+                                    }
+                                }
+                                TunnResult::WriteToTunnelV4(packet, addr) => {
+                                    if p.is_allowed_ip(addr) {
+                                        t.iface.write4(packet);
+                                    }
+                                }
+                                TunnResult::WriteToTunnelV6(packet, addr) => {
+                                    if p.is_allowed_ip(addr) {
+                                        t.iface.write6(packet);
+                                    }
+                                }
+                                } // match res
+                                
+                                if flush {
+                                    while let TunnResult::WriteToNetwork(packet) =
+                                        p.tunnel.decapsulate(None, &[], &mut t.dst_buf[..])
+                                    {
+                                        if send_len < MAX_PACKET_COUNT {
+                                            t.send_batch_bufs[send_len][..packet.len()].copy_from_slice(packet);
+                                            send_iovecs[send_len].iov_len = packet.len();
+                                            
+                                            let sockaddr = socket2::SockAddr::from(addr);
+                                            unsafe {
+                                                let src = sockaddr.as_ptr() as *const sockaddr_storage;
+                                                let dst = &mut send_addrs[send_len] as *mut sockaddr_storage;
+                                                std::ptr::copy_nonoverlapping(src, dst, 1);
+                                                send_hdrs[send_len].msg_hdr.msg_namelen = sockaddr.len();
+                                            }
+    
+                                            send_len += 1;
+                                        }
+                                        
+                                        if send_len == MAX_PACKET_COUNT {
+                                            let res = unsafe {
+                                                sendmmsg(
+                                                    fd,
+                                                    send_hdrs.as_mut_ptr(),
+                                                    send_len as _,
+                                                    MSG_DONTWAIT,
+                                                )
+                                            };
+                                            if res < 0 && cfg!(debug_assertions) {}
+                                            send_len = 0;
+                                        }
+                                    }
+                                }
+                            } // while current_offset < pkt_len
+                        } // for loop
+                        
+                        // Flush any remaining packets
+                        if send_len > 0 {
+                            let res = unsafe {
+                                sendmmsg(
+                                    fd,
+                                    send_hdrs.as_mut_ptr(),
+                                    send_len as _,
+                                    MSG_DONTWAIT,
+                                )
+                            };
+                            if res < 0 && cfg!(debug_assertions) {}
+                            send_len = 0;
+                        }
+
+                        iter -= count;
+                        if iter <= 0 || count < MAX_PACKET_COUNT {
+                            break;
+                        }
                     }
                 }
+
+                #[cfg(not(any(target_os = "linux", target_os = "android")))]
+                {
+                    // Safety: the `recv_from` implementation promises not to write uninitialised
+                    // bytes to the buffer, so this casting is safe.
+                    let src_buf =
+                        unsafe { &mut *(&mut t.src_buf[..] as *mut [u8] as *mut [MaybeUninit<u8>]) };
+                    while let Ok((packet_len, addr)) = udp.recv_from(src_buf) {
+                        let mut offset = 0;
+                        
+                        // NekoLink: 处理 IP 层头部 (Raw IP 模式) 喵
+                        if d.config.ip_protocol.is_some() && addr.as_socket().unwrap().is_ipv4() {
+                            if packet_len < 20 { continue; }
+                            let ihl = (t.src_buf[0] & 0x0f) as usize * 4;
+                            if packet_len < ihl { continue; }
+                            offset = ihl;
+                        }
+
+
+                        let packet = &t.src_buf[offset..packet_len];
+                        // The rate limiter initially checks mac1 and mac2, and optionally asks to send a cookie
+                        let parsed_packet = match rate_limiter.verify_packet(
+                            Some(addr.as_socket().unwrap().ip()),
+                            packet,
+                            &mut t.dst_buf,
+                        ) {
+                            Ok(packet) => packet,
+                            Err(TunnResult::WriteToNetwork(cookie)) => {
+                                let _: Result<_, _> = udp.send_to(cookie, &addr);
+                                continue;
+                            }
+                            Err(_) => continue,
+                        };
+
+                        let peer = match &parsed_packet {
+                            Packet::HandshakeInit(p) => {
+                                parse_handshake_anon(private_key, public_key, p)
+                                    .ok()
+                                    .and_then(|hh| {
+                                        d.peers.get(&x25519::PublicKey::from(hh.peer_static_public))
+                                    })
+                            }
+                            Packet::HandshakeResponse(p) => d.peers_by_idx.get(&(p.receiver_idx >> 8)),
+                            Packet::PacketCookieReply(p) => d.peers_by_idx.get(&(p.receiver_idx >> 8)),
+                            Packet::PacketData(p) => d.peers_by_idx.get(&(p.receiver_idx >> 8)),
+                        };
+
+                        let peer = match peer {
+                            None => continue,
+                            Some(peer) => peer,
+                        };
+
+                        let mut p = peer.lock();
+
+                        // NekoLink 2.3.0: 提取对端端口喵
+                        let remote_port = addr.as_socket().unwrap().port();
+
+                        // We found a peer, use it to decapsulate the message+
+                        let mut flush = false; // Are there packets to send from the queue?
+                        let res = p.tunnel.handle_verified_packet(parsed_packet, &mut t.dst_buf[..]);
+                        
+                        if !matches!(res, TunnResult::Err(_)) {
+                            // 验证通过，此时才更新端点并尝试连接喵
+                            let ip_addr = addr.as_socket().unwrap().ip();
+                            let final_addr = SocketAddr::new(ip_addr, remote_port);
+                            
+                            p.set_endpoint(final_addr);
+
+                            if d.config.use_connected_socket {
+                                let _ = p.connect_endpoint(d.listen_port, d.fwmark, d.config.ip_protocol).map(|sock| {
+                                    d.register_conn_handler(Arc::clone(peer), sock, ip_addr).unwrap();
+                                });
+                            }
+                        }
+
+                        match res {
+                            TunnResult::Done => {}
+                            TunnResult::Err(_) => continue,
+                            TunnResult::WriteToNetwork(packet) => {
+                                flush = true;
+                                let _: Result<_, _> = udp.send_to(packet, &addr);
+                            }
+                            TunnResult::WriteToTunnelV4(packet, addr) => {
+                                if p.is_allowed_ip(addr) {
+                                    t.iface.write4(packet);
+                                }
+                            }
+                            TunnResult::WriteToTunnelV6(packet, addr) => {
+                                if p.is_allowed_ip(addr) {
+                                    t.iface.write6(packet);
+                                }
+                            }
+                        };
+
+                        if flush {
+                            // Flush pending queue
+                            while let TunnResult::WriteToNetwork(packet) =
+                                p.tunnel.decapsulate(None, &[], &mut t.dst_buf[..])
+                            {
+                                let _: Result<_, _> = udp.send_to(packet, &addr);
+                            }
+                        }
+
+                        iter -= 1;
+                        if iter == 0 {
+                            break;
+                        }
+                    }
+                }
+
                 Action::Continue
             }),
         )?;
