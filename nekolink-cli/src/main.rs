@@ -87,6 +87,10 @@ fn main() {
                 .takes_value(true)
                 .env("WG_IP_PROTOCOL")
                 .help("Use a custom IP protocol instead of UDP"),
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            Arg::new("disable-udp-gro")
+                .long("disable-udp-gro")
+                .help("Disable UDP GRO (Generic Receive Offload)"),
         ])
         .get_matches();
 
@@ -162,6 +166,8 @@ fn main() {
         } else {
             TransportMode::Udp
         },
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        enable_udp_gro: !matches.is_present("disable-udp-gro"),
     };
 
     let mut device_handle: DeviceHandle = match DeviceHandle::new(tun_name, config) {

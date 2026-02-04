@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 
+## [3.1.0] - 2026-02-04
+
+### Changed
+- **Restoration**: 重新恢复了 v3.0.0 的所有性能特性 (`recvmmsg`, `sendmmsg`, `UDP GRO`)，因为 UDP 缓冲区问题已通过扩大 Buffer 解决。
+- **Fix**: 保留了 v3.0.3 的 4MB UDP 缓冲区修复，确保在开启 GRO 的情况下也能稳定运行。
+- **Feature**: 保留了 v3.0.1 的 `enable_udp_gro` 开关，允许用户按需关闭 GRO。
+
 ## [3.0.3] - 2026-02-04
 
 ### Fixed
