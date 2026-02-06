@@ -53,10 +53,15 @@ jobs:
           mv NekoLink_${VERSION}_${ARCH}.deb $MV_NAME
           echo "PKG_PATH=$MV_NAME" >> $GITHUB_ENV
 
+      - name: Prepare Artifact Name
+        run: |
+          SAFE_NAME=$(echo "${{ matrix.target-env }}-${{ matrix.arch }}" | tr ':' '-')
+          echo "ARTIFACT_NAME=package-$SAFE_NAME" >> $GITHUB_ENV
+
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: package-${{ matrix.target-env }}-${{ matrix.arch }}
+          name: ${{ env.ARTIFACT_NAME }}
           path: ${{ env.PKG_PATH }}
 
   release:
