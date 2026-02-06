@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["nekolink-core", "nekolink-cli", "nekolink-ctl", "nekolink-android"]
+exclude = ["third_party/mullvad-tcp"]
 
 [profile.release]
 lto = "thin"        # 使用 ThinLTO 显著降低链接时的内存压力
