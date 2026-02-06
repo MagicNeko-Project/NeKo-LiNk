@@ -1646,7 +1646,7 @@ fn derive_cipher(psk: &str) -> ChaCha20Poly1305 {
 // udp2raw 使用 -a 参数自动管理 iptables 规则，无需手动配置 nftables 喵
 
 
-async fn configure_peer(interface: &str, peer_pub_key: &str, mut endpoint: String, keepalive: Option<u16>, peer_mtu: Option<u16>, auto_sync_mtu: bool, mode: &str, tcp_data_port: u16, psk: &str) -> Result<()> {
+async fn configure_peer(interface: &str, peer_pub_key: &str, mut endpoint: String, keepalive: Option<u16>, peer_mtu: Option<u16>, auto_sync_mtu: bool, mode: &str, _tcp_data_port: u16, _psk: &str) -> Result<()> {
     // 尝试解析域名端点喵
     if !endpoint.is_empty() {
         let resolved = if let Ok(mut addrs) = tokio::net::lookup_host(&endpoint).await {

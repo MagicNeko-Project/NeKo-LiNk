@@ -167,7 +167,6 @@ pub struct Device {
     iface: Arc<TunSocket>,
     udp4: Option<socket2::Socket>,
     udp6: Option<socket2::Socket>,
-    udp6: Option<socket2::Socket>,
     tcp_listener: Option<socket2::Socket>,
     // Map of Peer Endpoint Address -> TCP Stream
     tcp_connections: Mutex<HashMap<SocketAddr, Mutex<socket2::Socket>>>,
@@ -451,8 +450,6 @@ impl Device {
             peers: Default::default(),
             peers_by_idx: Default::default(),
             peers_by_ip: AllowedIps::new(),
-            udp4: Default::default(),
-            udp6: Default::default(),
             udp4: Default::default(),
             udp6: Default::default(),
             tcp_listener: Default::default(),
@@ -1528,7 +1525,7 @@ impl Device {
                   loop {
                       match listener.accept() {
                           Ok((sock, addr)) => {
-                              tracing::info!("喵！接受新 TCP 连接: {}", addr);
+                              tracing::info!("喵！接受新 TCP 连接: {:?}", addr);
                               if let Err(e) = sock.set_nonblocking(true) {
                                   tracing::error!("无法设置非阻塞: {:?}", e);
                                   continue;
@@ -1556,7 +1553,7 @@ impl Device {
                   }
                   Action::Continue
              })
-        )
+        ).map(|_| ())
     }
 }
 

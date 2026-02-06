@@ -5,7 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.7.5] - 2026-02-02
+## [3.1.1] - 2026-02-06
+
+### Fixed
+- **编译障碍清除**：修复了 `nekolink-core` 中由于字段重定义和类型不匹配导致的编译失败。
+- **UDP over TCP 深度验证**：确认了 Mullvad 模式逻辑集成正确。
+- **控制中心告警清理**：消除了 `nekolink-ctl` 中的未使用变量编译器警告喵。
+
+## [3.1.0] - 2026-02-05
+
+### Added
+- **Native TCP Server Mode**：原生支持 TCP 处理。
 
 ### Added
 - **接口级热重载魔法**：实现了基于 `SIGHUP` 信号的零停机配置更新，支持不重启进程的情况下更新隧道。
