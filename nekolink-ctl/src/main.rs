@@ -616,6 +616,9 @@ async fn run_instance(state: NekoState, token: CancellationToken) -> Result<()> 
     if !config.enable_udp_gro {
         cmd.arg("--disable-udp-gro");
     }
+    if config.mode == "tcp" {
+        cmd.arg("--tcp");
+    }
     
     // 强制设置 MTU，默认 1420 喵
     // 特殊：如果 config.mtu 为 0 (自动同步)，启动时先用 1420 喵
@@ -1658,89 +1661,8 @@ async fn configure_peer(interface: &str, peer_pub_key: &str, mut endpoint: Strin
     // 保存原始探测地址喵（防止 TCP 模式下被 127.0.0.1 覆盖）
     let probe_address = endpoint.clone();
     
-    // 处理 TCP 模式下的侧车逻辑喵
-    if mode == "tcp" {
-        let sidecar_key = (interface.to_string(), peer_pub_key.to_string());
-        let mut sidecars = SIDE_CARS.get_or_init(|| tokio::sync::Mutex::new(HashMap::new())).lock().await;
-
-        // 如果已经有侧车且 Endpoint 没变，直接复用喵
-        let mut need_new_sidecar = true;
-        let mut local_port = 0;
-
-        if let Some(_) = sidecars.get(&sidecar_key) {
-             // 检查缓存的 Endpoint 喵
-             let cache_mutex = PEER_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-             let cache = cache_mutex.lock().unwrap();
-             if let Some(old_ep) = cache.get(&sidecar_key) {
-                 if old_ep.starts_with("127.0.0.1:") {
-                      // 已经是一个本地中转了喵
-                      need_new_sidecar = false;
-                      local_port = old_ep[10..].parse().unwrap_or(0);
-                 }
-             }
-        }
-
-        if need_new_sidecar {
-            // 先清理旧侧车喵
-            if let Some(mut old_child) = sidecars.remove(&sidecar_key) {
-                let _ = old_child.kill().await;
-            }
-
-            // 解析远端 IP（endpoint 格式可能是 IP:PORT 或纯 IP）
-            let remote_ip = endpoint.split(':').next().unwrap_or(&endpoint);
-            // 使用协商的 tcp_data_port，如果为 0 则使用默认 4567 喵
-            let effective_port = if tcp_data_port > 0 { tcp_data_port } else { 4567 };
-            let remote_addr = format!("{}:{}", remote_ip, effective_port);
-
-            // 寻找一个闲置的本地 UDP 端口（简单起见，从 40000 开始随机抽一个喵）
-            local_port = (OsRng.next_u32() % 10000 + 40000) as u16;
-            let local_udp = format!("127.0.0.1:{}", local_port);
-            
-            // 使用 PSK 前 16 字符作为 udp2raw 密码喵（与服务端保持一致）
-            let udp2raw_key = if psk.len() >= 16 { &psk[..16] } else { psk };
-            
-            println!("喵！正在为队友 {} 启动 udp2raw 侧车：{} <-> {} (TCP 数据端口: {})", peer_pub_key, local_udp, remote_addr, effective_port);
-            
-            // 检查系统是否有 iptables 喵
-            let has_iptables = check_command_exists("iptables");
-            let mut cmd = tokio::process::Command::new("udp2raw");
-            cmd.arg("-c")  // 客户端模式
-               .arg("-l").arg(&local_udp)
-               .arg("-r").arg(&remote_addr)
-               .arg("-k").arg(udp2raw_key)
-               .arg("--raw-mode").arg("faketcp")
-               .kill_on_drop(true);
-
-            if has_iptables {
-                cmd.arg("-a"); // 如果有 iptables，继续使用自动模式喵
-            } else {
-                // 如果没有 iptables，手动拦截来自对端 TCP 端口的包喵
-                // 客户端需要拦截源端口为 effective_port 的包喵
-                println!("喵！检测到缺少 iptables，客户端将手动配置 nftables 拦截来自对端端口 {} 的回包喵...", effective_port);
-                let _ = std::process::Command::new("nft")
-                    .arg("add").arg("table").arg("inet").arg("nekolink_udp2raw")
-                    .status();
-                let _ = std::process::Command::new("nft")
-                    .args(&[
-                        "add", "chain", "inet", "nekolink_udp2raw", "input", "{", "type", "filter", "hook", "input", "priority", "0", ";", "policy", "accept", ";", "}"
-                    ])
-                    .status();
-                let _ = std::process::Command::new("nft")
-                    .args(&[
-                        "insert", "rule", "inet", "nekolink_udp2raw", "input", "tcp", "sport", &effective_port.to_string(), "drop"
-                    ])
-                    .status();
-            }
-
-            // 启动 udp2raw 客户端 喵！
-            let child = cmd.spawn()?;
-            
-            sidecars.insert(sidecar_key, child);
-            endpoint = local_udp;
-        } else {
-            endpoint = format!("127.0.0.1:{}", local_port);
-        }
-    }
+    // 处理 TCP 模式下的侧车逻辑喵 -> 已移除，使用 native TCP 模式
+    // if mode == "tcp" { ... }
 
     let locker = CONFIG_MUTEX.get_or_init(|| tokio::sync::Mutex::new(()));
     let _guard = locker.lock().await;

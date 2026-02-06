@@ -3,6 +3,7 @@
 
 pub mod allowed_ips;
 pub mod api;
+pub mod tcp_framing;
 mod dev_lock;
 pub mod drop_privileges;
 #[cfg(test)]
@@ -60,7 +61,10 @@ const MAX_PACKET_COUNT: usize = 64; // GotaTun uses this batch size
 const MAX_ITR: usize = 100; // Number of packets to handle per handler call
 const UDP_GRO: c_int = 104;
 const SOL_UDP: c_int = 17;
+
 const CMSG_LEN: usize = 64; // Enough for standard CMSG
+
+use tcp_framing::TcpFraming;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -131,6 +135,7 @@ pub struct DeviceConfig {
 pub enum TransportMode {
     Udp,
     RawIp,
+    Tcp,
 }
 
 impl Default for DeviceConfig {
@@ -162,6 +167,10 @@ pub struct Device {
     iface: Arc<TunSocket>,
     udp4: Option<socket2::Socket>,
     udp6: Option<socket2::Socket>,
+    udp6: Option<socket2::Socket>,
+    tcp_listener: Option<socket2::Socket>,
+    // Map of Peer Endpoint Address -> TCP Stream
+    tcp_connections: Mutex<HashMap<SocketAddr, Mutex<socket2::Socket>>>,
 
     yield_notice: Option<EventRef>,
     exit_notice: Option<EventRef>,
@@ -370,6 +379,39 @@ impl Device {
             None,
         );
 
+        // NekoLink TCP Mode: 连接到 Endpoint 喵
+        if self.config.transport_mode == TransportMode::Tcp {
+            if let Some(endpoint_addr) = endpoint {
+               let proto = match endpoint_addr {
+                   SocketAddr::V4(_) => Domain::IPV4,
+                   SocketAddr::V6(_) => Domain::IPV6,
+               };
+               match socket2::Socket::new(proto, Type::STREAM, Some(Protocol::TCP)) {
+                   Ok(sock) => {
+                       match sock.connect(&endpoint_addr.into()) {
+                           Ok(_) => {
+                               sock.set_nonblocking(true).unwrap_or(());
+                               sock.set_nodelay(true).unwrap_or(()); // 降低延迟
+                                // NekoLink: Server Mode Support
+                                if let Ok(write_sock) = sock.try_clone() {
+                                    self.tcp_connections.lock().insert(endpoint_addr, Mutex::new(write_sock));
+                                }
+
+                                match self.register_tcp_stream_handler(sock.try_clone().unwrap(), endpoint_addr) {
+                                    Ok(_) => {
+                                        tracing::info!("喵！TCP 连接建立成功: {}", endpoint_addr);
+                                    },
+                                    Err(e) => tracing::error!("无法注册 TCP Handler: {:?}", e),
+                                }
+                           },
+                           Err(e) => tracing::error!("TCP 连接失败 {}: {:?}", endpoint_addr, e),
+                       }
+                   },
+                   Err(e) => tracing::error!("创建 TCP socket 失败: {:?}", e),
+               }
+            }
+        }
+
         let peer = Peer::new(tunn, next_index, endpoint, allowed_ips, preshared_key, self.config.transport_mode);
 
         let peer = Arc::new(Mutex::new(peer));
@@ -411,6 +453,10 @@ impl Device {
             peers_by_ip: AllowedIps::new(),
             udp4: Default::default(),
             udp6: Default::default(),
+            udp4: Default::default(),
+            udp6: Default::default(),
+            tcp_listener: Default::default(),
+            tcp_connections: Mutex::new(HashMap::new()),
             cleanup_paths: Default::default(),
             mtu: AtomicUsize::new(mtu),
             rate_limiter: None,
@@ -456,8 +502,48 @@ impl Device {
             unsafe { self.queue.clear_event_by_fd(s.as_raw_fd()) };
         }
 
+        if let Some(s) = self.tcp_listener.take() {
+            unsafe { self.queue.clear_event_by_fd(s.as_raw_fd()) };
+        }
+        {
+            let mut conns = self.tcp_connections.lock();
+            for (_, s) in conns.drain() {
+                 unsafe { self.queue.clear_event_by_fd(s.lock().as_raw_fd()) };
+            }
+        }
+
         for peer in self.peers.values() {
             peer.lock().shutdown_endpoint();
+        }
+
+        if self.config.transport_mode == TransportMode::Tcp {
+            // TCP Server Mode: If port is set, bind and listen
+            if port != 0 {
+                match socket2::Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP)) {
+                    Ok(sock) => {
+                        // Dual stack
+                        let _ = sock.set_only_v6(false);
+                        let _ = sock.set_reuse_address(true);
+                        
+                        match sock.bind(&SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0).into()) {
+                            Ok(_) => {
+                                let _ = sock.listen(128); // Backlog
+                                let _ = sock.set_nonblocking(true);
+                                
+                                tracing::info!("喵！TCP Server 监听在 [::]:{}", port);
+                                
+                                if let Err(e) = self.register_tcp_listener_handler(sock.try_clone().unwrap()) {
+                                     tracing::error!("无法注册 Listener Handler: {:?}", e);
+                                }
+                                self.tcp_listener = Some(sock);
+                            }
+                            Err(e) => tracing::error!("TCP Bind 失败: {:?}", e),
+                        }
+                    }
+                    Err(e) => tracing::error!("创建 TCP Listener 失败: {:?}", e),
+                }
+            }
+            return Ok(());
         }
 
         // Then open new sockets and bind to the port
@@ -1247,17 +1333,38 @@ impl Device {
                             tracing::error!(message = "Encapsulate error", error = ?e)
                         }
                         TunnResult::WriteToNetwork(packet) => {
-                            let mut endpoint = peer.endpoint_mut();
-                            if let Some(conn) = endpoint.conn.as_mut() {
-                                // Prefer to send using the connected socket
-                                let _: Result<_, _> = conn.write(packet);
-                            } else if let Some(addr) = endpoint.addr {
-                                match addr {
-                                    SocketAddr::V4(_) => { if let Some(s) = udp4 { let _ = s.send_to(packet, &addr.into()); } }
-                                    SocketAddr::V6(_) => { if let Some(s) = udp6 { let _ = s.send_to(packet, &addr.into()); } }
+                            // NekoLink TCP Mode
+                            if d.config.transport_mode == TransportMode::Tcp {
+                                if let Some(endpoint) = peer.endpoint().addr {
+                                    // Use tcp_connections map to find the stream
+                                    let mut conns_lock = d.tcp_connections.lock();
+                                    if let Some(stream_mutex) = conns_lock.get_mut(&endpoint) {
+                                         // If stream is poisoned or whatever, we might fail.
+                                         // Note: map values are Mutex<Socket>
+                                         let mut stream = stream_mutex.lock();
+                                         use std::io::Write;
+                                         let len = packet.len() as u16;
+                                         let len_bytes = len.to_be_bytes();
+                                         let _ = stream.write(&len_bytes);
+                                         let _ = stream.write(packet);
+                                    } else {
+                                        // Connection not found (maybe disconnected or client mode not yet connected)
+                                        // This is common during handshake start
+                                    }
                                 }
                             } else {
-                                tracing::error!("No endpoint");
+                                let mut endpoint = peer.endpoint_mut();
+                                if let Some(conn) = endpoint.conn.as_mut() {
+                                    // Prefer to send using the connected socket
+                                    let _: Result<_, _> = conn.write(packet);
+                                } else if let Some(addr) = endpoint.addr {
+                                    match addr {
+                                        SocketAddr::V4(_) => { if let Some(s) = udp4 { let _ = s.send_to(packet, &addr.into()); } }
+                                        SocketAddr::V6(_) => { if let Some(s) = udp6 { let _ = s.send_to(packet, &addr.into()); } }
+                                    }
+                                } else {
+                                    tracing::error!("No endpoint");
+                                }
                             }
                         }
                         _ => panic!("Unexpected result from encapsulate"),
@@ -1267,6 +1374,189 @@ impl Device {
             }),
         )?;
         Ok(())
+    }
+    
+    // NekoLink: 处理 TCP 数据流
+    // NekoLink: 处理 TCP 数据流
+    fn register_tcp_stream_handler(&self, sock: socket2::Socket, endpoint: SocketAddr) -> Result<(), Error> {
+        let sock = Mutex::new(sock);
+        let fd = sock.lock().as_raw_fd();
+        let framing = Mutex::new(TcpFraming::new());
+        self.queue.new_event(
+            fd,
+            Box::new(move |d, t| {
+                let mut sock = sock.lock();
+                let mut framing = framing.lock();
+                
+                // 1. 读取数据到 Framing Buffer
+                let buf = framing.get_free_space();
+                use std::io::Read;
+
+                match sock.read(buf) {
+                    Ok(0) => {
+                        tracing::info!("TCP 连接断开: {}", endpoint);
+                        d.tcp_connections.lock().remove(&endpoint);
+                        // Do NOT trigger exit
+                        return Action::Exit;
+                    }
+                    Ok(n) => {
+                        framing.advance(n);
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        return Action::Continue;
+                    }
+                    Err(e) => {
+                        tracing::error!("TCP 读取错误 ({}): {:?}", endpoint, e);
+                        d.tcp_connections.lock().remove(&endpoint);
+                        return Action::Exit;
+                    }
+                }
+
+                // 2. 循环处理完整的数据包
+                let mut packets_processed = 0;
+                let mut bytes_consumed = 0;
+                
+                while let Some((total_len, packet)) = framing.peek_packet(bytes_consumed) {
+                    let pkt_len = packet.len();
+                    if pkt_len > MAX_UDP_SIZE {
+                        break; 
+                    }
+
+                    let (private_key, public_key) = match d.key_pair.as_ref() {
+                        Some(k) => k,
+                        None => break,
+                    };
+
+                    let rate_limiter = match d.rate_limiter.as_ref() {
+                        Some(r) => r,
+                        None => break,
+                    };
+                    
+                    let fake_addr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+
+                    let parsed_packet = match rate_limiter.verify_packet(
+                        Some(fake_addr),
+                        packet,
+                        &mut t.dst_buf,
+                    ) {
+                         Ok(p) => p,
+                         Err(TunnResult::WriteToNetwork(cookie)) => {
+                             let len = cookie.len() as u16;
+                             let len_bytes = len.to_be_bytes();
+                             use std::io::Write;
+                             let _ = sock.write(&len_bytes); 
+                             let _ = sock.write(cookie);
+                             
+                             bytes_consumed += total_len; 
+                             continue;
+                         }
+                         Err(_) => {
+                             bytes_consumed += total_len;
+                             continue;
+                         }
+                    };
+
+                    // Identify Peer
+                    let peer = match &parsed_packet {
+                         Packet::HandshakeInit(p) => {
+                             parse_handshake_anon(private_key, public_key, p)
+                                 .ok()
+                                 .and_then(|hh| {
+                                     d.peers.get(&x25519::PublicKey::from(hh.peer_static_public))
+                                 })
+                         }
+                         Packet::HandshakeResponse(p) => d.peers_by_idx.get(&(p.receiver_idx >> 8)),
+                         Packet::PacketCookieReply(p) => d.peers_by_idx.get(&(p.receiver_idx >> 8)),
+                         Packet::PacketData(p) => d.peers_by_idx.get(&(p.receiver_idx >> 8)),
+                    };
+
+                    if let Some(peer_arc) = peer {
+                        let mut p = peer_arc.lock();
+                        // Decapsulate
+                        let res = p.tunnel.handle_verified_packet(parsed_packet, &mut t.dst_buf[..]);
+                        
+                        match res {
+                            TunnResult::Done => {},
+                            TunnResult::Err(e) => tracing::error!("Decapsulate error: {:?}", e),
+                            TunnResult::WriteToNetwork(resp) => {
+                                let len = resp.len() as u16;
+                                let len_bytes = len.to_be_bytes();
+                                use std::io::Write;
+                                let _ = sock.write(&len_bytes);
+                                let _ = sock.write(resp);
+                            },
+                            TunnResult::WriteToTunnelV4(tun_pkt, addr) => {
+                                 if p.is_allowed_ip(addr) { t.iface.write4(tun_pkt); }
+                            },
+                            TunnResult::WriteToTunnelV6(tun_pkt, addr) => {
+                                 if p.is_allowed_ip(addr) { t.iface.write6(tun_pkt); }
+                            }
+                        }
+                        
+                         while let TunnResult::WriteToNetwork(resp) =
+                                p.tunnel.decapsulate(None, &[], &mut t.dst_buf[..])
+                         {
+                             let len = resp.len() as u16;
+                             let len_bytes = len.to_be_bytes();
+                             use std::io::Write;
+                             let _ = sock.write(&len_bytes);
+                             let _ = sock.write(resp);
+                         }
+                    }
+
+                    bytes_consumed += total_len;
+                    packets_processed += 1;
+                    if packets_processed >= MAX_ITR { break; }
+                }
+
+                framing.compact(bytes_consumed);
+
+                Action::Continue
+            })
+        ).map(|_| ())
+    }
+
+    fn register_tcp_listener_handler(&self, listener: socket2::Socket) -> Result<(), Error> {
+        let listener = Mutex::new(listener); // Wrap in Mutex for interior mutability if needed (Shared ref in Fn)
+        let fd = listener.lock().as_raw_fd();
+        
+        self.queue.new_event(
+             fd,
+             Box::new(move |d, _| {
+                  let listener = listener.lock();
+                  // Accept loop
+                  loop {
+                      match listener.accept() {
+                          Ok((sock, addr)) => {
+                              tracing::info!("喵！接受新 TCP 连接: {}", addr);
+                              if let Err(e) = sock.set_nonblocking(true) {
+                                  tracing::error!("无法设置非阻塞: {:?}", e);
+                                  continue;
+                              }
+                              if let Err(e) = sock.set_nodelay(true) {
+                                  tracing::error!("无法设置 NODELAY: {:?}", e);
+                              }
+                              
+                              // 1. Add to Connection Map (Owned socket for Writing)
+                              if let Ok(write_sock) = sock.try_clone() {
+                                  d.tcp_connections.lock().insert(addr.as_socket().unwrap(), Mutex::new(write_sock));
+                              }
+                              
+                              // 2. Register Stream (Owned socket for Reading, + Dup FD)
+                              if let Err(e) = d.register_tcp_stream_handler(sock, addr.as_socket().unwrap()) {
+                                  tracing::error!("无法注册 Stream Handler: {:?}", e);
+                              }
+                          },
+                          Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                          Err(e) => {
+                              tracing::error!("Accept 错误: {:?}", e);
+                              break;
+                          }
+                      }
+                  }
+                  Action::Continue
+             })
+        )
     }
 }
 

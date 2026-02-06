@@ -8,3 +8,4 @@ build_deb_tmp/
 Cargo.lock
 android-sdk/
 go/
+mullvad_analysis

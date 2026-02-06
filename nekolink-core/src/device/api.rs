@@ -173,6 +173,9 @@ fn api_get(writer: &mut BufWriter<&UnixStream>, d: &Device) -> i32 {
                 writeln!(writer, "ip_protocol={}", p).ok();
             }
         }
+        TransportMode::Tcp => {
+            writeln!(writer, "protocol=tcp").ok();
+        }
     }
 
     if let Some(fwmark) = d.fwmark {
