@@ -29,7 +29,7 @@ if ! command -v udp2tcp &> /dev/null || ! command -v tcp2udp &> /dev/null; then
     # 进入子模块目录编译
     cd third_party/mullvad-tcp
     echo -e "${CYAN}正在进行本地魔法编译 (Release 模式)...${NC}"
-    cargo build --release
+    cargo build --release --all-features
     
     echo -e "${CYAN}正在将组件安置到 /usr/local/bin ...${NC}"
     cp target/release/udp2tcp /usr/local/bin/
