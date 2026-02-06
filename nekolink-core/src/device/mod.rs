@@ -169,7 +169,7 @@ pub struct Device {
     udp6: Option<socket2::Socket>,
     tcp_listener: Option<socket2::Socket>,
     // Map of Peer Endpoint Address -> TCP Stream
-    tcp_connections: Mutex<HashMap<SocketAddr, Mutex<socket2::Socket>>>,
+    tcp_connections: Mutex<HashMap<SocketAddr, Arc<Mutex<socket2::Socket>>>>,
 
     yield_notice: Option<EventRef>,
     exit_notice: Option<EventRef>,
@@ -1512,7 +1512,7 @@ impl Device {
                               
                               // 1. Add to Connection Map (Owned socket for Writing)
                               if let Ok(write_sock) = sock.try_clone() {
-                                  d.tcp_connections.lock().insert(addr.as_socket().unwrap(), Mutex::new(write_sock));
+                                  d.tcp_connections.lock().insert(addr.as_socket().unwrap(), Arc::new(Mutex::new(write_sock)));
                               }
                               
                               // 2. Register Stream (Owned socket for Reading, + Dup FD)
