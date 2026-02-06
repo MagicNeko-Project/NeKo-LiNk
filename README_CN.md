@@ -151,6 +151,9 @@ sudo tcpdump -i eth0 proto 141 -n -v
 
 - **基于原项目修改**：本项目是基于官方 [Boringtun](https://github.com/cloudflare/boringtun) (by Cloudflare) 深度定制与二次开发的喵。感谢原作者们的优秀工作！
 - **开源协议**：本项目沿用 [3-Clause BSD License](./LICENSE.md)。
+- [架构方案](docs/ARCHITECTURE.md)
+- [自动化发布指南](docs/CI_CD_GUIDE.md) (GitHub Actions)
+- [SOCKS5 使用指南](docs/SOCKS5_GUIDE_CN.md)
 - **商标声明**：WireGuard® 是 Jason A. Donenfeld 的注册商标。NekoLink 与其无官方合作关系。
 
 ---
