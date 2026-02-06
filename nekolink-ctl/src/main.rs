@@ -200,7 +200,7 @@ struct NekoConfig {
     pub mtu: Option<u16>,
     #[serde(default)]
     pub clamp_mss: bool,
-    /// TCP 模式下，辅助组件 (Sidecar) 的远端数据端口（默认 4567）喵
+    /// Fake-TCP (udp2raw) 模式下，对端监听的物理端口（默认 4567）喵
     #[serde(default = "default_tcp_data_port")]
     pub tcp_data_port: u16,
     /// WireGuard 原生兼容模式：禁用信令通道，使用配置文件中的公钥
@@ -744,14 +744,14 @@ async fn run_instance(state: NekoState, token: CancellationToken) -> Result<()> 
         println!("喵！WireGuard 兼容模式配置完成，共配置了 {} 个 Peer。", config.peers.len());
     }
     
-    // FakeTCP 模式：自动启动 udp2raw 组件喵
+    // Fake-TCP (udp2raw) 模式：自动启动 udp2raw 组件喵
     let mut udp2raw_server_child: Option<tokio::process::Child> = None;
     if config.mode == "fake-tcp" {
         // 判断是服务端还是客户端：服务端 = peers 为空 或 所有 peers 的 endpoint 都为空
         let is_server = config.peers.is_empty() || config.peers.iter().all(|p| p.endpoint.is_empty());
         
         if is_server {
-            println!("喵！检测到 TCP 服务端模式，正在自动启动 udp2raw...");
+            println!("喵！检测到 Fake-TCP 服务端模式，正在自动启动 udp2raw...");
             
             // 获取 WireGuard 监听端口
             let wg_port = get_actual_listen_port(&config.interface).unwrap_or(51820);
@@ -763,7 +763,6 @@ async fn run_instance(state: NekoState, token: CancellationToken) -> Result<()> 
             
             // 使用 PSK 的前 16 字符作为 udp2raw 密码喵
             let udp2raw_key = if config.psk.len() >= 16 { &config.psk[..16] } else { &config.psk };
-
             // 检查系统是否有 iptables 喵
             let has_iptables = check_command_exists("iptables");
             let mut cmd = tokio::process::Command::new("udp2raw");
@@ -798,7 +797,7 @@ async fn run_instance(state: NekoState, token: CancellationToken) -> Result<()> 
                 }
             }
         } else {
-            println!("喵！检测到 TCP 客户端模式，侧车将在信令握手时自动启动喵。");
+            println!("喵！检测到 Fake-TCP 客户端模式，侧车将在信令握手时自动启动喵。");
         }
     }
     
@@ -1277,8 +1276,12 @@ async fn run_global_tcp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
 
                 for state in current_states {
                     let established = get_established_peers(&state.config.interface).await;
-                    // 跳过非 TCP 模式、空公钥、以及 WireGuard 兼容模式的接口喵
-                    if state.config.mode != "tcp" || state.pub_key.as_bytes() == &[0u8; 32] || state.config.native_wg_compat {
+                    // 跳过空公钥、以及 WireGuard 兼容模式的接口喵
+                    if state.pub_key.as_bytes() == &[0u8; 32] || state.config.native_wg_compat {
+                        continue;
+                    }
+                    // 仅处理 TCP 相关模式喵
+                    if state.config.mode != "tcp" && state.config.mode != "fake-tcp" {
                         continue;
                     }
                     
@@ -1308,6 +1311,7 @@ async fn run_global_tcp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                             let mode_inner = state.config.mode.clone();
                             let psk_inner = state.config.psk.clone();
                             let auto_mtu_enabled = state.config.mtu == Some(0);
+                            let local_tcp_data_port = state.config.tcp_data_port;
                             
                             tokio::spawn(async move {
                                 // println!("喵！正在发起 TCP 信令连接: {}...", addr);
@@ -1324,6 +1328,12 @@ async fn run_global_tcp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                                         let mut msg = pub_key_bytes.clone();
                                         msg.extend_from_slice(&current_mtu.to_be_bytes());
                                         msg.extend_from_slice(&actual_tunnel_port.to_be_bytes());
+                                        
+                                        // 如果是 Fake-TCP 模式，额外携带本地 Sidecar 端口喵
+                                        if mode_inner == "fake-tcp" {
+                                            let sidecar_port = local_tcp_data_port;
+                                            msg.extend_from_slice(&sidecar_port.to_be_bytes());
+                                        }
 
                                         let mut nonce_bytes = [0u8; 12];
                                         OsRng.fill_bytes(&mut nonce_bytes);
@@ -1339,25 +1349,33 @@ async fn run_global_tcp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                                                                         let nonce = Nonce::from_slice(nonce_part);
                                                                         if let Ok(decrypted) = cipher.decrypt(nonce, encrypted_part) {
                                                                             if decrypted.len() >= 36 {
-                                                                                let peer_pub_key = BASE64.encode(&decrypted[..32]);
-                                                                                let peer_mtu = Some(u16::from_be_bytes([decrypted[32], decrypted[33]]));
-                                                                                let peer_tunnel_port = u16::from_be_bytes([decrypted[34], decrypted[35]]);
-                                                                                // 扩展：提取对端的 Sidecar 数据端口喵
-                                                                                let peer_sidecar_port = if decrypted.len() >= 38 {
-                                                                                    u16::from_be_bytes([decrypted[36], decrypted[37]])
-                                                                                } else {
-                                                                                    4567 // 默认端口
-                                                                                };
-                                                                                if peer_tunnel_port == 0 && !is_raw_ip_mode {
-                                                                                    return;
-                                                                                }
+                                                                                 let peer_pub_key = BASE64.encode(&decrypted[..32]);
+                                                                                 let peer_mtu = Some(u16::from_be_bytes([decrypted[32], decrypted[33]]));
+                                                                                 let peer_tunnel_port = u16::from_be_bytes([decrypted[34], decrypted[35]]);
+                                                                                 
+                                                                                 // 识别下层端口信息喵
+                                                                                 let peer_lower_port = if mode_inner == "fake-tcp" && decrypted.len() >= 38 {
+                                                                                     u16::from_be_bytes([decrypted[36], decrypted[37]])
+                                                                                 } else {
+                                                                                     0
+                                                                                 };
 
-                                                                                let mut endpoint = addr.ip().to_string();
-                                                                                if peer_tunnel_port > 0 {
-                                                                                    endpoint = format!("{}:{}", endpoint, peer_tunnel_port);
-                                                                                }
-                                                                                println!("喵！成功接收 TCP 信令响应 (ACK)：来自 {} (隧道端口: {}, Sidecar端口: {})", endpoint, peer_tunnel_port, peer_sidecar_port);
-                                                                                let _ = configure_peer(&interface_inner, &peer_pub_key, endpoint, None, peer_mtu, true, &mode_inner, peer_sidecar_port, &psk_inner).await;
+                                                                                 if peer_tunnel_port == 0 && !is_raw_ip_mode {
+                                                                                     return;
+                                                                                 }
+
+                                                                                 let mut endpoint = addr.ip().to_string();
+                                                                                 if peer_tunnel_port > 0 {
+                                                                                     endpoint = format!("{}:{}", endpoint, peer_tunnel_port);
+                                                                                 }
+                                                                                 
+                                                                                 if mode_inner == "fake-tcp" {
+                                                                                    println!("喵！成功接收 TCP 信令响应 (ACK)：来自 {} (Fake-TCP 端口: {})", endpoint, peer_lower_port);
+                                                                                 } else {
+                                                                                    println!("喵！成功接收 TCP 信令响应 (ACK)：来自 {} (原生 TCP 模式)", endpoint);
+                                                                                 }
+                                                                                 
+                                                                                 let _ = configure_peer(&interface_inner, &peer_pub_key, endpoint, None, peer_mtu, true, &mode_inner, peer_lower_port, &psk_inner).await;
                                                                             }
                                                                         }
                                                                     },
@@ -1397,19 +1415,20 @@ async fn run_global_tcp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
 
                                 for state in current_states {
                                     // 跳过非 TCP 模式和 WireGuard 兼容模式的接口喵
-                                    if state.config.mode != "tcp" || state.config.native_wg_compat { continue; }
+                                    if state.config.mode != "tcp" && state.config.mode != "fake-tcp" || state.config.native_wg_compat { continue; }
                                     let cipher = derive_cipher(&state.config.psk);
                                     if let Ok(decrypted) = cipher.decrypt(nonce, encrypted_part) {
                                         if decrypted.len() >= 36 {
-                                            let peer_pub_key = BASE64.encode(&decrypted[..32]);
-                                            let peer_mtu = Some(u16::from_be_bytes([decrypted[32], decrypted[33]]));
-                                            let peer_tunnel_port = u16::from_be_bytes([decrypted[34], decrypted[35]]);
-                                            // 扩展：提取对端的 Sidecar 数据端口喵
-                                            let peer_sidecar_port = if decrypted.len() >= 38 {
-                                                u16::from_be_bytes([decrypted[36], decrypted[37]])
-                                            } else {
-                                                0
-                                            };
+                                             let peer_pub_key = BASE64.encode(&decrypted[..32]);
+                                             let peer_mtu = Some(u16::from_be_bytes([decrypted[32], decrypted[33]]));
+                                             let peer_tunnel_port = u16::from_be_bytes([decrypted[34], decrypted[35]]);
+                                             
+                                             // 识别对端下层端口喵
+                                             let peer_lower_port = if state.config.mode == "fake-tcp" && decrypted.len() >= 38 {
+                                                 u16::from_be_bytes([decrypted[36], decrypted[37]])
+                                             } else {
+                                                 0
+                                             };
                                             
                                             if peer_tunnel_port == 0 && state.config.mode != "ip" {
                                                 continue;
@@ -1419,10 +1438,14 @@ async fn run_global_tcp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                                                 endpoint = format!("{}:{}", endpoint, peer_tunnel_port);
                                             }
 
-                                            println!("喵！12580 (TCP) 识别成功：{} -> {} (Sidecar端口: {})", endpoint, state.config.interface, peer_sidecar_port);
-                                            // 使用对端的 Sidecar 端口（如果协商到的话）
-                                            let effective_sidecar_port = if peer_sidecar_port > 0 { peer_sidecar_port } else { state.config.tcp_data_port };
-                                            let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0), &state.config.mode, effective_sidecar_port, &state.config.psk).await;
+                                            if state.config.mode == "fake-tcp" {
+                                                println!("喵！12580 (TCP) 识别成功：{} -> {} (Fake-TCP 端口: {})", endpoint, state.config.interface, peer_lower_port);
+                                            } else {
+                                                println!("喵！12580 (TCP) 识别成功：{} -> {} (原生 TCP 模式)", endpoint, state.config.interface);
+                                            }
+                                            // 使用对端的下层端口（如果协商到的话）
+                                            let effective_lower_port = if peer_lower_port > 0 { peer_lower_port } else { state.config.tcp_data_port };
+                                            let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0), &state.config.mode, effective_lower_port, &state.config.psk).await;
                                             
                                             // TCP 握手响应喵！直接在当前流回发
                                             let msg_base = state.pub_key.as_bytes().to_vec();
@@ -1431,12 +1454,15 @@ async fn run_global_tcp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                                             } else { 
                                                 get_interface_mtu(&state.config.interface).unwrap_or(1420) 
                                             };
-                                            let actual_tunnel_port = get_actual_listen_port(&state.config.interface).unwrap_or(0);
-                                            let mut resp_msg = msg_base;
-                                            resp_msg.extend_from_slice(&current_mtu.to_be_bytes());
-                                            resp_msg.extend_from_slice(&actual_tunnel_port.to_be_bytes());
-                                            // 扩展：添加 Phantun 数据端口喵
-                                            resp_msg.extend_from_slice(&state.config.tcp_data_port.to_be_bytes());
+                                             let actual_tunnel_port = get_actual_listen_port(&state.config.interface).unwrap_or(0);
+                                             let mut resp_msg = msg_base;
+                                             resp_msg.extend_from_slice(&current_mtu.to_be_bytes());
+                                             resp_msg.extend_from_slice(&actual_tunnel_port.to_be_bytes());
+                                             
+                                             // 如果是 Fake-TCP 模式，额外携带本地 Sidecar 端口喵
+                                             if state.config.mode == "fake-tcp" {
+                                                resp_msg.extend_from_slice(&state.config.tcp_data_port.to_be_bytes());
+                                             }
                                             
                                             let mut nonce_bytes = [0u8; 12];
                                             OsRng.fill_bytes(&mut nonce_bytes);
