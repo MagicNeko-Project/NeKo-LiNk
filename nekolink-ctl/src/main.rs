@@ -1920,9 +1920,9 @@ async fn probe_mtu_cmd(endpoint: &str, mode: &str) -> Result<()> {
     // UDP: 60 (IP 20 + UDP 8 + WG 32)
     // TCP (udp2raw): 84 (IP 20 + TCP 20 + udp2raw 12 + WG 32)
     let overhead = match mode {
-        "ip" => 52,
-        "tcp" => 84,
-        _ => 60, // udp
+        "ip" => 20, // IPv4 Header
+        "tcp" => 20 + 20 + 2, // IP + TCP + 2 bytes framing
+        _ => 20 + 8, // IP + UDP
     };
 
     let recommended = pmtu - overhead;

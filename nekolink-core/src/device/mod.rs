@@ -381,33 +381,8 @@ impl Device {
         // NekoLink TCP Mode: 连接到 Endpoint 喵
         if self.config.transport_mode == TransportMode::Tcp {
             if let Some(endpoint_addr) = endpoint {
-               let proto = match endpoint_addr {
-                   SocketAddr::V4(_) => Domain::IPV4,
-                   SocketAddr::V6(_) => Domain::IPV6,
-               };
-               match socket2::Socket::new(proto, Type::STREAM, Some(Protocol::TCP)) {
-                   Ok(sock) => {
-                       match sock.connect(&endpoint_addr.into()) {
-                           Ok(_) => {
-                               sock.set_nonblocking(true).unwrap_or(());
-                               sock.set_nodelay(true).unwrap_or(()); // 降低延迟
-                                // NekoLink: Server Mode Support
-                                if let Ok(write_sock) = sock.try_clone() {
-                                    self.tcp_connections.lock().insert(endpoint_addr, Mutex::new(write_sock));
-                                }
-
-                                match self.register_tcp_stream_handler(sock.try_clone().unwrap(), endpoint_addr) {
-                                    Ok(_) => {
-                                        tracing::info!("喵！TCP 连接建立成功: {}", endpoint_addr);
-                                    },
-                                    Err(e) => tracing::error!("无法注册 TCP Handler: {:?}", e),
-                                }
-                           },
-                           Err(e) => tracing::error!("TCP 连接失败 {}: {:?}", endpoint_addr, e),
-                       }
-                   },
-                   Err(e) => tracing::error!("创建 TCP socket 失败: {:?}", e),
-               }
+                // 喵！不再同步连接，而是记录 Endpoint，发送数据包时按需触发。
+                tracing::info!("喵！TCP 模式已就绪，对端：{}", endpoint_addr);
             }
         }
 
@@ -1333,20 +1308,15 @@ impl Device {
                             // NekoLink TCP Mode
                             if d.config.transport_mode == TransportMode::Tcp {
                                 if let Some(endpoint) = peer.endpoint().addr {
-                                    // Use tcp_connections map to find the stream
-                                    let mut conns_lock = d.tcp_connections.lock();
-                                    if let Some(stream_mutex) = conns_lock.get_mut(&endpoint) {
-                                         // If stream is poisoned or whatever, we might fail.
-                                         // Note: map values are Mutex<Socket>
+                                    // 尝试连接或获取现有连接喵
+                                    if let Some(stream_mutex) = d.maybe_connect_tcp(endpoint) {
                                          let mut stream = stream_mutex.lock();
                                          use std::io::Write;
                                          let len = packet.len() as u16;
                                          let len_bytes = len.to_be_bytes();
                                          let _ = stream.write(&len_bytes);
                                          let _ = stream.write(packet);
-                                    } else {
-                                        // Connection not found (maybe disconnected or client mode not yet connected)
-                                        // This is common during handshake start
+                                         let _ = stream.flush(); // 确保发出喵
                                     }
                                 }
                             } else {
@@ -1474,11 +1444,15 @@ impl Device {
                             TunnResult::Done => {},
                             TunnResult::Err(e) => tracing::error!("Decapsulate error: {:?}", e),
                             TunnResult::WriteToNetwork(resp) => {
-                                let len = resp.len() as u16;
-                                let len_bytes = len.to_be_bytes();
-                                use std::io::Write;
-                                let _ = sock.write(&len_bytes);
-                                let _ = sock.write(resp);
+                                if let Some(stream_mutex) = d.maybe_connect_tcp(endpoint) {
+                                    let mut stream = stream_mutex.lock();
+                                    let len = resp.len() as u16;
+                                    let len_bytes = len.to_be_bytes();
+                                    use std::io::Write;
+                                    let _ = stream.write(&len_bytes);
+                                    let _ = stream.write(resp);
+                                    let _ = stream.flush();
+                                }
                             },
                             TunnResult::WriteToTunnelV4(tun_pkt, addr) => {
                                  if p.is_allowed_ip(addr) { t.iface.write4(tun_pkt); }
@@ -1491,11 +1465,15 @@ impl Device {
                          while let TunnResult::WriteToNetwork(resp) =
                                 p.tunnel.decapsulate(None, &[], &mut t.dst_buf[..])
                          {
-                             let len = resp.len() as u16;
-                             let len_bytes = len.to_be_bytes();
-                             use std::io::Write;
-                             let _ = sock.write(&len_bytes);
-                             let _ = sock.write(resp);
+                            if let Some(stream_mutex) = d.maybe_connect_tcp(endpoint) {
+                                let mut stream = stream_mutex.lock();
+                                let len = resp.len() as u16;
+                                let len_bytes = len.to_be_bytes();
+                                use std::io::Write;
+                                let _ = stream.write(&len_bytes);
+                                let _ = stream.write(resp);
+                                let _ = stream.flush();
+                            }
                          }
                     }
 
@@ -1552,6 +1530,47 @@ impl Device {
                   Action::Continue
              })
         ).map(|_| ())
+    }
+
+    /// NekoLink: 获取或建立 TCP 连接喵
+    fn maybe_connect_tcp(&self, endpoint: SocketAddr) -> Option<Arc<Mutex<socket2::Socket>>> {
+        let mut conns = self.tcp_connections.lock();
+        if let Some(stream) = conns.get(&endpoint) {
+            return Some(Arc::clone(stream));
+        }
+
+        // 异步发起连接（此处仅同步创建并注册，实际连接在 epoll 循环中非阻塞完成或在 write 时报错）
+        let proto = match endpoint {
+            SocketAddr::V4(_) => Domain::IPV4,
+            SocketAddr::V6(_) => Domain::IPV6,
+        };
+
+        match socket2::Socket::new(proto, Type::STREAM, Some(Protocol::TCP)) {
+            Ok(sock) => {
+                let _ = sock.set_nonblocking(true);
+                let _ = sock.set_nodelay(true);
+                
+                // 尝试非阻塞连接喵
+                match sock.connect(&endpoint.into()) {
+                    Ok(_) | Err(_) => {
+                        // 无论成功还是 EINPROGRESS，我们都先注册它
+                        if let Ok(write_sock) = sock.try_clone() {
+                            let stream_arc = Arc::new(Mutex::new(write_sock));
+                            conns.insert(endpoint, Arc::clone(&stream_arc));
+                            
+                            if let Err(e) = self.register_tcp_stream_handler(sock, endpoint) {
+                                tracing::error!("喵呜！无法注册 TCP Stream Handler: {:?}", e);
+                            } else {
+                                tracing::info!("喵！已发起异步 TCP 连接请求: {}", endpoint);
+                            }
+                            return Some(stream_arc);
+                        }
+                    }
+                }
+            }
+            Err(e) => tracing::error!("喵呜！创建 TCP socket 失败: {:?}", e),
+        }
+        None
     }
 }
 
