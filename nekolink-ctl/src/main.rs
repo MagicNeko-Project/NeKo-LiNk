@@ -175,8 +175,7 @@ async fn get_auto_mtu(endpoint: &str, mode: &str) -> u16 {
 
     let recommended = match mode {
         "ip" => pmtu - (ip_header_size + 32),                      // IP + WG
-        "fake-tcp" => pmtu - (ip_header_size + 20 + 12 + 32),       // IP + TCP + udp2raw + WG
-        "tcp" => pmtu - (ip_header_size + 20 + 32),               // IP + TCP (原生) + WG
+        "mullvad-tcp" => pmtu - (ip_header_size + 20 + 2 + 32),    // IP + TCP + 2 bytes framing + WG
         _ => pmtu - (ip_header_size + 8 + 32),                     // IP + UDP + WG
     };
     cache.insert(endpoint.to_string(), (recommended, std::time::Instant::now()));
@@ -200,9 +199,9 @@ struct NekoConfig {
     pub mtu: Option<u16>,
     #[serde(default)]
     pub clamp_mss: bool,
-    /// Fake-TCP (udp2raw) 模式下，对端监听的物理端口（默认 4567）喵
+    /// Mullvad TCP 模式下，远端绑定的物理端口（默认 12581）喵
     #[serde(default = "default_tcp_data_port")]
-    pub tcp_data_port: u16,
+    pub mullvad_tcp_port: u16,
     /// WireGuard 原生兼容模式：禁用信令通道，使用配置文件中的公钥
     #[serde(default)]
     pub native_wg_compat: bool,
@@ -223,7 +222,7 @@ struct NekoConfig {
 fn default_true() -> bool { true }
 
 fn default_tcp_data_port() -> u16 {
-    4567
+    12581
 }
 
 fn default_mode() -> String {
@@ -611,7 +610,7 @@ async fn run_instance(state: NekoState, token: CancellationToken) -> Result<()> 
     if !config.enable_udp_gro {
         cmd.arg("--disable-udp-gro");
     }
-    if config.mode == "tcp" {
+    if config.mode == "tcp" || config.mode == "mullvad-tcp" {
         cmd.arg("--tcp");
     }
     
@@ -744,60 +743,53 @@ async fn run_instance(state: NekoState, token: CancellationToken) -> Result<()> 
         println!("喵！WireGuard 兼容模式配置完成，共配置了 {} 个 Peer。", config.peers.len());
     }
     
-    // Fake-TCP (udp2raw) 模式：自动启动 udp2raw 组件喵
-    let mut udp2raw_server_child: Option<tokio::process::Child> = None;
-    if config.mode == "fake-tcp" {
-        // 判断是服务端还是客户端：服务端 = peers 为空 或 所有 peers 的 endpoint 都为空
+    // Mullvad TCP 模式：启动 udp2tcp / tcp2udp 侧车喵
+    let mut mullvad_sidecar: Option<tokio::process::Child> = None;
+    if config.mode == "mullvad-tcp" {
         let is_server = config.peers.is_empty() || config.peers.iter().all(|p| p.endpoint.is_empty());
-        
-        if is_server {
-            println!("喵！检测到 Fake-TCP 服务端模式，正在自动启动 udp2raw...");
-            
-            // 获取 WireGuard 监听端口
-            let wg_port = get_actual_listen_port(&config.interface).unwrap_or(51820);
-            let local_wg = format!("127.0.0.1:{}", wg_port);
-            
-            // 使用配置的端口，如果为 0 则默认 4567 喵
-            let effective_port = if config.tcp_data_port > 0 { config.tcp_data_port } else { 4567 };
-            let listen_addr = format!("0.0.0.0:{}", effective_port);
-            
-            // 使用 PSK 的前 16 字符作为 udp2raw 密码喵
-            let udp2raw_key = if config.psk.len() >= 16 { &config.psk[..16] } else { &config.psk };
-            // 检查系统是否有 iptables 喵
-            let has_iptables = check_command_exists("iptables");
-            let mut cmd = tokio::process::Command::new("udp2raw");
-            cmd.arg("-s")  // 服务端模式
-               .arg("-l").arg(&listen_addr)
-               .arg("-r").arg(&local_wg)
-               .arg("-k").arg(udp2raw_key)
-               .arg("--raw-mode").arg("faketcp")
-               .kill_on_drop(true);
+        let wg_port = get_actual_listen_port(&config.interface).unwrap_or(51820);
+        let effective_port = config.mullvad_tcp_port;
 
-            if has_iptables {
-                cmd.arg("-a"); // 如果有 iptables，继续使用自动模式喵
-            } else {
-                // 如果没有 iptables，我们手动用 nftables 挡一下喵
-                let _ = setup_udp2raw_nft_rules(effective_port).await;
-            }
+        if is_server {
+            println!("喵！检测到 Mullvad TCP 服务端模式，正在启动 tcp2udp...");
+            let mut cmd = tokio::process::Command::new("tcp2udp");
+            cmd.arg("--bind-addr").arg(format!("0.0.0.0:{}", effective_port))
+               .arg("--dst-addr").arg(format!("127.0.0.1:{}", wg_port))
+               .kill_on_drop(true);
             
-            let server_child = cmd.spawn();
-            
-            match server_child {
+            match cmd.spawn() {
                 Ok(child) => {
-                    println!("喵！udp2raw 服务端已启动：监听 TCP {} -> 转发到 {}", effective_port, local_wg);
-                    if !has_iptables {
-                        println!("💡 提示：检测到系统中缺少 iptables，已为您自动配置 nftables 拦截规则喵！");
-                    }
-                    udp2raw_server_child = Some(child);
+                    println!("喵！tcp2udp 已启动：监听 TCP {} -> 转发到 UDP 127.0.0.1:{}", effective_port, wg_port);
+                    mullvad_sidecar = Some(child);
                 }
-                Err(e) => {
-                    eprintln!("喵呜... 无法启动 udp2raw: {:?}", e);
-                    // 如果启动失败，清理一下 nft 规则（如果加了的话）
-                    if !has_iptables { let _ = cleanup_udp2raw_nft_rules().await; }
-                }
+                Err(e) => eprintln!("喵呜... 无法启动 tcp2udp: {:?}", e),
             }
         } else {
-            println!("喵！检测到 Fake-TCP 客户端模式，侧车将在信令握手时自动启动喵。");
+            // 客户端模式：侧车将在信令握手成功，获得对端 IP 后启动喵
+            // 这里我们先占个位，实际启动在 configure_peer 中处理（或者这里先启动一个连向配置地址的）
+            if let Some(peer) = config.peers.first() {
+                if !peer.endpoint.is_empty() {
+                    let remote_addr = peer.endpoint.clone();
+                    println!("喵！检测到 Mullvad TCP 客户端模式，正在启动 udp2tcp...");
+                    
+                    // 我们需要一个本地端口供 WireGuard 连接喵
+                    // 为了简化，我们让 udp2tcp 监听在 wg_port + 1000 之类的位置，或者由系统分配
+                    let bridge_port = wg_port + 1; 
+                    
+                    let mut cmd = tokio::process::Command::new("udp2tcp");
+                    cmd.arg("--bind-addr").arg(format!("127.0.0.1:{}", bridge_port))
+                       .arg("--dst-addr").arg(&remote_addr)
+                       .kill_on_drop(true);
+                    
+                    match cmd.spawn() {
+                        Ok(child) => {
+                            println!("喵！udp2tcp 已启动：监听 UDP 127.0.0.1:{} -> 转发到 TCP {}", bridge_port, remote_addr);
+                            mullvad_sidecar = Some(child);
+                        }
+                        Err(e) => eprintln!("喵呜... 无法启动 udp2tcp: {:?}", e),
+                    }
+                }
+            }
         }
     }
     
@@ -838,9 +830,9 @@ async fn run_instance(state: NekoState, token: CancellationToken) -> Result<()> 
         let _ = task.await;
     }
 
-    // 清理 udp2raw 服务端进程
-    if let Some(mut srv) = udp2raw_server_child {
-        println!("正在关闭 udp2raw 喵...");
+    // 清理 Mullvad 侧车
+    if let Some(mut srv) = mullvad_sidecar {
+        println!("正在关闭 Mullvad TCP 侧车喵...");
         let _ = srv.kill().await;
     }
 
@@ -851,8 +843,7 @@ async fn run_instance(state: NekoState, token: CancellationToken) -> Result<()> 
     }
     let _ = run_cmd(&format!("ip link del {} 2>/dev/null", config.interface));
     
-    // 清理 udp2raw 的 nftables 规则喵
-    let _ = cleanup_udp2raw_nft_rules().await;
+    // (此处原为清理 udp2raw 规则的代码喵)
 
     Ok(())
 }
@@ -1281,7 +1272,7 @@ async fn run_global_tcp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                         continue;
                     }
                     // 仅处理 TCP 相关模式喵
-                    if state.config.mode != "tcp" && state.config.mode != "fake-tcp" {
+                    if state.config.mode != "tcp" && state.config.mode != "mullvad-tcp" {
                         continue;
                     }
                     
@@ -1311,7 +1302,7 @@ async fn run_global_tcp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                             let mode_inner = state.config.mode.clone();
                             let psk_inner = state.config.psk.clone();
                             let auto_mtu_enabled = state.config.mtu == Some(0);
-                            let local_tcp_data_port = state.config.tcp_data_port;
+                            let local_tcp_data_port = state.config.mullvad_tcp_port;
                             
                             tokio::spawn(async move {
                                 // println!("喵！正在发起 TCP 信令连接: {}...", addr);
@@ -1323,17 +1314,13 @@ async fn run_global_tcp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                                         } else {
                                             if auto_mtu_enabled { get_auto_mtu(&addr.ip().to_string(), "tcp").await } else { get_interface_mtu(&interface_inner).unwrap_or(1420) }
                                         };
-                                        let actual_tunnel_port = get_actual_listen_port(&interface_inner).unwrap_or(0);
+                                        let actual_tunnel_port = if mode_inner == "mullvad-tcp" { local_tcp_data_port } else { get_actual_listen_port(&interface_inner).unwrap_or(0) };
 
                                         let mut msg = pub_key_bytes.clone();
                                         msg.extend_from_slice(&current_mtu.to_be_bytes());
                                         msg.extend_from_slice(&actual_tunnel_port.to_be_bytes());
                                         
-                                        // 如果是 Fake-TCP 模式，额外携带本地 Sidecar 端口喵
-                                        if mode_inner == "fake-tcp" {
-                                            let sidecar_port = local_tcp_data_port;
-                                            msg.extend_from_slice(&sidecar_port.to_be_bytes());
-                                        }
+                                        // 原本的 Fake-TCP 端口逻辑已移除喵
 
                                         let mut nonce_bytes = [0u8; 12];
                                         OsRng.fill_bytes(&mut nonce_bytes);
@@ -1354,11 +1341,7 @@ async fn run_global_tcp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                                                                                  let peer_tunnel_port = u16::from_be_bytes([decrypted[34], decrypted[35]]);
                                                                                  
                                                                                  // 识别下层端口信息喵
-                                                                                 let peer_lower_port = if mode_inner == "fake-tcp" && decrypted.len() >= 38 {
-                                                                                     u16::from_be_bytes([decrypted[36], decrypted[37]])
-                                                                                 } else {
-                                                                                     0
-                                                                                 };
+                                                                                 let _peer_lower_port = 0;
 
                                                                                  if peer_tunnel_port == 0 && !is_raw_ip_mode {
                                                                                      return;
@@ -1369,13 +1352,9 @@ async fn run_global_tcp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                                                                                      endpoint = format!("{}:{}", endpoint, peer_tunnel_port);
                                                                                  }
                                                                                  
-                                                                                 if mode_inner == "fake-tcp" {
-                                                                                    println!("喵！成功接收 TCP 信令响应 (ACK)：来自 {} (Fake-TCP 端口: {})", endpoint, peer_lower_port);
-                                                                                 } else {
-                                                                                    println!("喵！成功接收 TCP 信令响应 (ACK)：来自 {} (原生 TCP 模式)", endpoint);
-                                                                                 }
+                                                                                 println!("喵！成功接收 TCP 信令响应 (ACK)：来自 {} (传输模式: {})", endpoint, mode_inner);
                                                                                  
-                                                                                 let _ = configure_peer(&interface_inner, &peer_pub_key, endpoint, None, peer_mtu, true, &mode_inner, peer_lower_port, &psk_inner).await;
+                                                                                 let _ = configure_peer(&interface_inner, &peer_pub_key, endpoint, None, peer_mtu, true, &mode_inner, 0, &psk_inner).await;
                                                                             }
                                                                         }
                                                                     },
@@ -1415,7 +1394,7 @@ async fn run_global_tcp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
 
                                 for state in current_states {
                                     // 跳过非 TCP 模式和 WireGuard 兼容模式的接口喵
-                                    if state.config.mode != "tcp" && state.config.mode != "fake-tcp" || state.config.native_wg_compat { continue; }
+                                    if state.config.mode != "tcp" && state.config.mode != "mullvad-tcp" || state.config.native_wg_compat { continue; }
                                     let cipher = derive_cipher(&state.config.psk);
                                     if let Ok(decrypted) = cipher.decrypt(nonce, encrypted_part) {
                                         if decrypted.len() >= 36 {
@@ -1423,12 +1402,7 @@ async fn run_global_tcp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                                              let peer_mtu = Some(u16::from_be_bytes([decrypted[32], decrypted[33]]));
                                              let peer_tunnel_port = u16::from_be_bytes([decrypted[34], decrypted[35]]);
                                              
-                                             // 识别对端下层端口喵
-                                             let peer_lower_port = if state.config.mode == "fake-tcp" && decrypted.len() >= 38 {
-                                                 u16::from_be_bytes([decrypted[36], decrypted[37]])
-                                             } else {
-                                                 0
-                                             };
+                                             let _peer_lower_port = 0;
                                             
                                             if peer_tunnel_port == 0 && state.config.mode != "ip" {
                                                 continue;
@@ -1438,14 +1412,9 @@ async fn run_global_tcp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                                                 endpoint = format!("{}:{}", endpoint, peer_tunnel_port);
                                             }
 
-                                            if state.config.mode == "fake-tcp" {
-                                                println!("喵！12580 (TCP) 识别成功：{} -> {} (Fake-TCP 端口: {})", endpoint, state.config.interface, peer_lower_port);
-                                            } else {
-                                                println!("喵！12580 (TCP) 识别成功：{} -> {} (原生 TCP 模式)", endpoint, state.config.interface);
-                                            }
+                                            println!("喵！12580 (TCP) 识别成功：{} -> {} (传输模式: {})", endpoint, state.config.interface, state.config.mode);
                                             // 使用对端的下层端口（如果协商到的话）
-                                            let effective_lower_port = if peer_lower_port > 0 { peer_lower_port } else { state.config.tcp_data_port };
-                                            let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0), &state.config.mode, effective_lower_port, &state.config.psk).await;
+                                            let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0), &state.config.mode, 0, &state.config.psk).await;
                                             
                                             // TCP 握手响应喵！直接在当前流回发
                                             let msg_base = state.pub_key.as_bytes().to_vec();
@@ -1454,15 +1423,12 @@ async fn run_global_tcp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                                             } else { 
                                                 get_interface_mtu(&state.config.interface).unwrap_or(1420) 
                                             };
-                                             let actual_tunnel_port = get_actual_listen_port(&state.config.interface).unwrap_or(0);
+                                             let actual_tunnel_port = if state.config.mode == "mullvad-tcp" { state.config.mullvad_tcp_port } else { get_actual_listen_port(&state.config.interface).unwrap_or(0) };
                                              let mut resp_msg = msg_base;
                                              resp_msg.extend_from_slice(&current_mtu.to_be_bytes());
                                              resp_msg.extend_from_slice(&actual_tunnel_port.to_be_bytes());
                                              
-                                             // 如果是 Fake-TCP 模式，额外携带本地 Sidecar 端口喵
-                                             if state.config.mode == "fake-tcp" {
-                                                resp_msg.extend_from_slice(&state.config.tcp_data_port.to_be_bytes());
-                                             }
+                                             // 原本的 Fake-TCP 端口逻辑已移除喵
                                             
                                             let mut nonce_bytes = [0u8; 12];
                                             OsRng.fill_bytes(&mut nonce_bytes);
@@ -1664,7 +1630,7 @@ fn derive_cipher(psk: &str) -> ChaCha20Poly1305 {
     ChaCha20Poly1305::new(&psk_bytes.into())
 }
 
-// udp2raw 使用 -a 参数自动管理 iptables 规则，无需手动配置 nftables 喵
+// 原 udp2raw 逻辑已由 Mullvad TCP 侧车方案替代喵
 
 
 async fn configure_peer(interface: &str, peer_pub_key: &str, mut endpoint: String, keepalive: Option<u16>, peer_mtu: Option<u16>, auto_sync_mtu: bool, mode: &str, _tcp_data_port: u16, _psk: &str) -> Result<()> {
@@ -1679,9 +1645,34 @@ async fn configure_peer(interface: &str, peer_pub_key: &str, mut endpoint: Strin
             endpoint = r;
         }
     }
-    // 保存原始探测地址喵（防止 TCP 模式下被 127.0.0.1 覆盖）
-    let probe_address = endpoint.clone();
+    // 保存原始探测地址喵（防止被 127.0.0.1 覆盖后无法探测 PMTU）
+    let probe_address_orig = endpoint.clone();
     
+    // Mullvad TCP 模式特殊处理喵
+    if mode == "mullvad-tcp" && !endpoint.is_empty() && !endpoint.starts_with("127.0.0.1") {
+        let wg_port = get_actual_listen_port(interface).unwrap_or(51820);
+        let bridge_port = wg_port + 1;
+        let remote_addr = endpoint.clone();
+        
+        // 确保 udp2tcp 正在运行并连向对端喵
+        // 注意：这里为了简化，假设只有一个主 Peer。
+        // 如果有多个 Peer，需要更复杂的 udp2tcp 进程池管理喵。
+        println!("喵！正在建立 Mullvad TCP 桥接: 127.0.0.1:{} -> {}", bridge_port, remote_addr);
+        
+        let mut cmd = tokio::process::Command::new("udp2tcp");
+        cmd.arg("--bind-addr").arg(format!("127.0.0.1:{}", bridge_port))
+           .arg("--dst-addr").arg(&remote_addr)
+           .kill_on_drop(true);
+        
+        // 我们不在这里持有 child，因为 configure_peer 可能被多次调用喵。
+        // 真正的进程生命周期由 run_instance 中的 mullvad_sidecar 或系统的 kill_on_drop 兜底喵。
+        let _ = cmd.spawn(); 
+        
+        // 修改 WireGuard 的 Endpoint 为本地网桥喵
+        endpoint = format!("127.0.0.1:{}", bridge_port);
+    }
+
+    let probe_address = if endpoint.starts_with("127.0.0.1") { probe_address_orig } else { endpoint.clone() };
 
 
     let locker = CONFIG_MUTEX.get_or_init(|| tokio::sync::Mutex::new(()));
@@ -1926,7 +1917,7 @@ async fn probe_mtu_cmd(endpoint: &str, mode: &str) -> Result<()> {
     println!("正在探测到 {} 的 PMTU 魔法喵...", host);
 
     // 针对 TCP 模式尝试使用真 TCP 探测，否则回退到 ICMP
-    let pmtu = if mode == "tcp" {
+    let pmtu = if mode == "tcp" || mode == "mullvad-tcp" {
         match perform_tcp_mtu_probe(host).await {
             Ok(val) => {
                 println!("喵！成功通过 TCP 握手探测到路径 MTU 为 {}。", val);
@@ -1944,7 +1935,7 @@ async fn probe_mtu_cmd(endpoint: &str, mode: &str) -> Result<()> {
     // 精准开销分析喵：
     // IP: 52 (IP 20 + WG 32)
     // UDP: 60 (IP 20 + UDP 8 + WG 32)
-    // TCP (udp2raw): 84 (IP 20 + TCP 20 + udp2raw 12 + WG 32)
+    // Mullvad TCP: 74 (IP 20 + TCP 20 + framing 2 + WG 32)
     let overhead = match mode {
         "ip" => 20, // IPv4 Header
         "tcp" => 20 + 20 + 2, // IP + TCP + 2 bytes framing
@@ -2043,53 +2034,9 @@ fn check_ping(host: &str, size: u16) -> bool {
     }
 }
 
-fn check_command_exists(cmd: &str) -> bool {
-    std::process::Command::new(cmd)
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
+// check_command_exists 原本用于 udp2raw，现已移除喵
 
-async fn setup_udp2raw_nft_rules(port: u16) -> Result<()> {
-    println!("喵！检测到缺少 iptables，执行 nftables 备选预案：手动拦截端口 {}...", port);
-    
-    // 创建一个专用的表喵
-    let _ = std::process::Command::new("nft")
-        .arg("add").arg("table").arg("inet").arg("nekolink_udp2raw")
-        .status();
-        
-    // 创建链并添加拦截规则喵
-    // udp2raw 需要拦截目标端口的 TCP 包，防止内核回复 RST 喵
-    let status = std::process::Command::new("nft")
-        .args(&[
-            "add", "chain", "inet", "nekolink_udp2raw", "input", "{", "type", "filter", "hook", "input", "priority", "0", ";", "policy", "accept", ";", "}"
-        ])
-        .status();
-
-    if let Ok(s) = status {
-        if s.success() {
-            let _ = std::process::Command::new("nft")
-                .args(&[
-                    "insert", "rule", "inet", "nekolink_udp2raw", "input", "tcp", "dport", &port.to_string(), "drop"
-                ])
-                .status();
-            println!("喵！nftables 拦截规则已生效喵！");
-        }
-    }
-    
-    Ok(())
-}
-
-async fn cleanup_udp2raw_nft_rules() -> Result<()> {
-    println!("喵！正在清理 nftables 拦截规则...");
-    let _ = std::process::Command::new("nft")
-        .arg("delete").arg("table").arg("inet").arg("nekolink_udp2raw")
-        .status();
-    Ok(())
-}
+// (原 setup_udp2raw_nft_rules 和 cleanup_udp2raw_nft_rules 已移除喵)
 fn get_actual_listen_port(interface: &str) -> Option<u16> {
     // 通过 UAPI 获取实际监听端口
     let path = format!("/var/run/wireguard/{}.sock", interface);

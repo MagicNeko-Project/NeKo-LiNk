@@ -10,6 +10,41 @@ fi
 
 echo "正在准备通过 Debian 包管理系统安装 NekoLink..."
 
+# 0. Mullvad udp-over-tcp 魔法准备
+PINK='\033[1;35m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+echo -e "${PINK}正在检查 Mullvad udp-over-tcp 组件...${NC}"
+
+if ! command -v udp2tcp &> /dev/null || ! command -v tcp2udp &> /dev/null; then
+    echo -e "${CYAN}发现缺少 Mullvad 组件，正在开始自动化编译安装仪式...${NC}"
+    
+    # 安装必要依赖
+    if ! command -v cargo &> /dev/null || ! command -v git &> /dev/null; then
+        echo -e "${CYAN}正在补充编译依赖 (cargo, git)...${NC}"
+        apt-get update && apt-get install -y cargo git
+    fi
+
+    TEMP_DIR=$(mktemp -d)
+    echo -e "${CYAN}正在下载源码到 $TEMP_DIR ...${NC}"
+    git clone https://github.com/mullvad/udp-over-tcp.git "$TEMP_DIR"
+    
+    cd "$TEMP_DIR"
+    echo -e "${CYAN}正在进行魔法编译 (Release 模式)...${NC}"
+    cargo build --release
+    
+    echo -e "${CYAN}正在将组件安置到 /usr/local/bin ...${NC}"
+    cp target/release/udp2tcp /usr/local/bin/
+    cp target/release/tcp2udp /usr/local/bin/
+    
+    cd - > /dev/null
+    rm -rf "$TEMP_DIR"
+    echo -e "${PINK}Mullvad 组件安装完成喵！${NC}"
+else
+    echo -e "${PINK}Mullvad 组件已就绪，跳过编译喵。${NC}"
+fi
+
 # 1. 编译项目 (Rust 魔法时间)
 echo "正在注入 Rust 灵力进行编译喵..."
 cargo build --release --workspace --exclude nekolink-android

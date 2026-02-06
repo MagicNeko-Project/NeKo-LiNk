@@ -281,14 +281,12 @@ function edit_config() {
     curr_s5=$(jq -r '.socks5_port // "null"' "$selected_cfg")
 
     # 交互式修改
-    read -p "传输模式 (当前: $curr_mode, [1] ip, [2] udp, [3] 原生 TCP, [4] 伪装 TCP (Fake-TCP), 直接回车保持不变): " m_choice
+    read -p "传输模式 (当前: $curr_mode, [1] ip, [2] udp, [3] Mullvad TCP 模式, 直接回车保持不变): " m_choice
     case "$m_choice" in
         1) mode="ip" ;;
         2) mode="udp" ;;
-        3) mode="tcp" 
-           echo -e "${PINK}... 使用原生 TCP 传输模式喵！${NC}" ;;
-        4) mode="fake-tcp"
-           echo -e "${PINK}... 使用 Fake-TCP 模式喵（已集成 udp2raw，无需手动配置任何东西喵！）${NC}" ;;
+        3) mode="mullvad-tcp" 
+           echo -e "${PINK}... 使用 Mullvad TCP 模式喵！${NC}" ;;
         *) mode="$curr_mode" ;;
     esac
 
@@ -296,13 +294,9 @@ function edit_config() {
         read -p "IP 协议号 (当前: $curr_proto, 直接回车保持不变): " proto
         [ -z "$proto" ] && proto=$curr_proto
         listen_port="null"
-    elif [ "$mode" == "tcp" ] || [ "$mode" == "fake-tcp" ]; then
+    elif [ "$mode" == "tcp" ] || [ "$mode" == "mullvad-tcp" ]; then
         proto="null"
-        if [ "$mode" == "fake-tcp" ]; then
-            read -p "伪装 TCP 监听端口 (当前: $curr_lport, 直接回车保持不变): " listen_port
-        else
-            read -p "原生 TCP 监听端口 (当前: $curr_lport, 直接回车保持不变): " listen_port
-        fi
+        read -p "TCP 监听端口 (当前: $curr_lport, 直接回车保持不变): " listen_port
         [ -z "$listen_port" ] && listen_port=$curr_lport
     else
         read -p "WireGuard 监听端口 (当前: $curr_lport, 直接回车保持不变): " listen_port
@@ -437,9 +431,8 @@ function create_config() {
     echo -e "\n${CYAN}选择数据传输模式：${NC}"
     echo "1. IP 协议模式 (绕过 UDP 限制，推荐)"
     echo "2. UDP 模式 (标准协议)"
-    echo "3. 原生 TCP 模式 (直接建立 TCP 隧道)"
-    echo "4. 伪装 TCP 模式 (Fake-TCP, 穿透力极强)"
-    read -p "请选择 [1-4]: " mode_choice
+    echo "3. Mullvad TCP 模式 (稳定穿透)"
+    read -p "请选择 [1-3]: " mode_choice
     case "$mode_choice" in
         1)
             mode="ip"
@@ -448,21 +441,11 @@ function create_config() {
             listen_port="null"
             ;;
         3)
-            mode="tcp"
-            echo -e "${PINK}... 使用原生 TCP 模式喵！${NC}"
+            mode="mullvad-tcp"
+            echo -e "${PINK}... 使用 Mullvad TCP 模式喵！${NC}"
             proto="null"
-            read -p "请输入原生 TCP 监听端口 ( 默认 51820 ): " listen_port
-            [ -z "$listen_port" ] && listen_port=51820
-            ;;
-        4)
-            mode="fake-tcp"
-            echo -e "${PINK}... 使用 Fake-TCP 模式喵！${NC}"
-            echo -e "${CYAN}UDP 流量将通过 udp2raw 伪装为 TCP 流量喵！${NC}"
-            proto="null"
-            read -p "请输入 Fake-TCP 数据端口 ( 默认 4567 ): " tcp_data_port
-            [ -z "$tcp_data_port" ] && tcp_data_port=4567
-            read -p "请输入 WireGuard 监听端口 ( 0 为自动, 默认 0 ): " listen_port
-            [ -z "$listen_port" ] && listen_port=0
+            read -p "请输入 TCP 监听端口 ( 默认 12581 ): " listen_port
+            [ -z "$listen_port" ] && listen_port=12581
             ;;
         *)
             mode="udp"
@@ -544,25 +527,7 @@ function create_config() {
     json_path="$CONFIG_DIR/$iface.json"
     
     # 构建基础 JSON
-    if [ "$mode" == "fake-tcp" ]; then
-        cat > "$json_path" <<EOF
-{
-  "interface": "$iface",
-  "mode": "$mode",
-  "ip_protocol": $proto,
-  "listen_port": $listen_port,
-  "tcp_data_port": $tcp_data_port,
-  "auto_route": $auto_route,
-  "persistent_keepalive": $keepalive,
-  "mtu": $mtu,
-  "clamp_mss": $clamp_mss,
-  "local_address": "$local_addr",
-  "psk": "$psk",
-  "socks5_port": $socks5_port,
-  "peers": [
-EOF
-    else
-        cat > "$json_path" <<EOF
+    cat > "$json_path" <<EOF
 {
   "interface": "$iface",
   "mode": "$mode",
@@ -577,7 +542,6 @@ EOF
   "socks5_port": $socks5_port,
   "peers": [
 EOF
-    fi
 
     if [ -n "$endpoint" ]; then
         cat >> "$json_path" <<EOF
