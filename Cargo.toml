@@ -3,12 +3,12 @@ resolver = "3"
 members = ["nekolink-core", "nekolink-cli", "nekolink-ctl", "nekolink-android"]
 
 [profile.release]
-lto = true        # Enable full link-time optimization.
-codegen-units = 1 # Use only 1 codegen-unit to enable full optimizations.
+lto = "thin"        # 使用 ThinLTO 显著降低链接时的内存压力
+# codegen-units = 1 # 移除硬编码的单单元设置以允许并行编译
 
 [profile.bench]
-lto = true        # Enable full link-time optimization.
-codegen-units = 1 # Use only 1 codegen-unit to enable full optimizations.
+lto = "thin"
+# codegen-units = 1
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
