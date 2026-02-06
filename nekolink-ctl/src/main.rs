@@ -237,6 +237,8 @@ struct NekoState {
     config: NekoConfig,
     priv_b64: String,
     pub_key: PublicKey,
+    // 存储客户端模式下的 Mullvad sidecar 进程喵
+    client_sidecar: Arc<parking_lot::Mutex<Option<tokio::process::Child>>>,
 }
 
 impl NekoState {
@@ -410,7 +412,7 @@ async fn main() -> Result<()> {
                 let (p_b64, _, p_k) = load_or_generate_keys(&iface)?;
                 (p_b64, p_k)
             };
-            let state = NekoState { config, priv_b64, pub_key };
+            let state = NekoState { config, priv_b64, pub_key, client_sidecar: Arc::new(parking_lot::Mutex::new(None)) };
             let token = CancellationToken::new();
             let token_clone = token.clone();
             let state_clone = state.clone();
@@ -507,7 +509,7 @@ async fn main() -> Result<()> {
                             (p_b64, p_k)
                         };
 
-                        let state = NekoState { config: config.clone(), priv_b64, pub_key };
+                        let state = NekoState { config: config.clone(), priv_b64, pub_key, client_sidecar: Arc::new(parking_lot::Mutex::new(None)) };
                         let token = CancellationToken::new();
                         let token_clone = token.clone();
                         let state_clone = state.clone();
@@ -1213,7 +1215,7 @@ async fn run_global_udp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
 
                                 println!("喵！12580 (UDP) 握手处理成功：{} -> {}", endpoint, state.config.interface);
                                 // UDP 模式不使用 Phantun，直接配置 peer 喵
-                                let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0), &state.config.mode, 0, &state.config.psk).await;
+                                let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0), &state.config.mode, 0, &state.config.psk, Some(state.client_sidecar.clone())).await;
                                 
                                 // 回回响应喵（UDP 模式不包含 Phantun 端口）
                                 let msg_base = state.pub_key.as_bytes().to_vec();
@@ -1303,6 +1305,7 @@ async fn run_global_tcp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                             let psk_inner = state.config.psk.clone();
                             let auto_mtu_enabled = state.config.mtu == Some(0);
                             let local_tcp_data_port = state.config.mullvad_tcp_port;
+                            let client_sidecar_clone = state.client_sidecar.clone();
                             
                             tokio::spawn(async move {
                                 // println!("喵！正在发起 TCP 信令连接: {}...", addr);
@@ -1354,7 +1357,7 @@ async fn run_global_tcp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                                                                                  
                                                                                  println!("喵！成功接收 TCP 信令响应 (ACK)：来自 {} (传输模式: {})", endpoint, mode_inner);
                                                                                  
-                                                                                 let _ = configure_peer(&interface_inner, &peer_pub_key, endpoint, None, peer_mtu, true, &mode_inner, 0, &psk_inner).await;
+                                                                                 let _ = configure_peer(&interface_inner, &peer_pub_key, endpoint, None, peer_mtu, true, &mode_inner, 0, &psk_inner, Some(client_sidecar_clone)).await;
                                                                             }
                                                                         }
                                                                     },
@@ -1414,7 +1417,7 @@ async fn run_global_tcp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
 
                                             println!("喵！12580 (TCP) 识别成功：{} -> {} (传输模式: {})", endpoint, state.config.interface, state.config.mode);
                                             // 使用对端的下层端口（如果协商到的话）
-                                            let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0), &state.config.mode, 0, &state.config.psk).await;
+                                            let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0), &state.config.mode, 0, &state.config.psk, Some(state.client_sidecar.clone())).await;
                                             
                                             // TCP 握手响应喵！直接在当前流回发
                                             let msg_base = state.pub_key.as_bytes().to_vec();
@@ -1554,7 +1557,7 @@ async fn run_global_raw_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                                          let ip_addr = addr.as_socket().map(|s| s.ip()).unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
                                          let peer_mtu = if decrypted.len() >= 34 { Some(u16::from_be_bytes([decrypted[32], decrypted[33]])) } else { None };
                                          println!("喵！12580 (Raw IP) 识别成功：{} -> {}", ip_addr, state.config.interface);
-                                         let _ = configure_peer(&state.config.interface, &BASE64.encode(&decrypted[..32]), ip_addr.to_string(), state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0), "ip", 0, &state.config.psk).await;
+                                         let _ = configure_peer(&state.config.interface, &BASE64.encode(&decrypted[..32]), ip_addr.to_string(), state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0), "ip", 0, &state.config.psk, Some(state.client_sidecar.clone())).await;
  
                                          // Raw IP 响应喵！
                                          let msg_base = state.pub_key.as_bytes().to_vec();
@@ -1633,7 +1636,7 @@ fn derive_cipher(psk: &str) -> ChaCha20Poly1305 {
 // 原 udp2raw 逻辑已由 Mullvad TCP 侧车方案替代喵
 
 
-async fn configure_peer(interface: &str, peer_pub_key: &str, mut endpoint: String, keepalive: Option<u16>, peer_mtu: Option<u16>, auto_sync_mtu: bool, mode: &str, _tcp_data_port: u16, _psk: &str) -> Result<()> {
+async fn configure_peer(interface: &str, peer_pub_key: &str, mut endpoint: String, keepalive: Option<u16>, peer_mtu: Option<u16>, auto_sync_mtu: bool, mode: &str, _tcp_data_port: u16, _psk: &str, client_sidecar: Option<Arc<parking_lot::Mutex<Option<tokio::process::Child>>>>) -> Result<()> {
     // 尝试解析域名端点喵
     if !endpoint.is_empty() {
         let resolved = if let Ok(mut addrs) = tokio::net::lookup_host(&endpoint).await {
@@ -1655,8 +1658,6 @@ async fn configure_peer(interface: &str, peer_pub_key: &str, mut endpoint: Strin
         let remote_addr = endpoint.clone();
         
         // 确保 udp2tcp 正在运行并连向对端喵
-        // 注意：这里为了简化，假设只有一个主 Peer。
-        // 如果有多个 Peer，需要更复杂的 udp2tcp 进程池管理喵。
         println!("喵！正在建立 Mullvad TCP 桥接: 127.0.0.1:{} -> {}", bridge_port, remote_addr);
         
         let mut cmd = tokio::process::Command::new("udp2tcp");
@@ -1664,9 +1665,19 @@ async fn configure_peer(interface: &str, peer_pub_key: &str, mut endpoint: Strin
            .arg("--dst-addr").arg(&remote_addr)
            .kill_on_drop(true);
         
-        // 我们不在这里持有 child，因为 configure_peer 可能被多次调用喵。
-        // 真正的进程生命周期由 run_instance 中的 mullvad_sidecar 或系统的 kill_on_drop 兜底喵。
-        let _ = cmd.spawn(); 
+        // 如果提供了 client_sidecar，就将进程句柄存储起来喵
+        if let Some(sidecar_ref) = client_sidecar {
+            match cmd.spawn() {
+                Ok(child) => {
+                    println!("喵！udp2tcp 进程已启动并托管 (PID: {:?})", child.id());
+                    *sidecar_ref.lock() = Some(child);
+                }
+                Err(e) => eprintln!("喵呜... 无法启动 udp2tcp: {:?}", e),
+            }
+        } else {
+            // 降级模式：启动但不托管（会变成僵尸进程，但至少能工作）
+            let _ = cmd.spawn();
+        }
         
         // 修改 WireGuard 的 Endpoint 为本地网桥喵
         endpoint = format!("127.0.0.1:{}", bridge_port);
