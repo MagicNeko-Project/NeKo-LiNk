@@ -1429,10 +1429,8 @@ impl Device {
                         None => break,
                     };
                     
-                    let fake_addr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
-
                     let parsed_packet = match rate_limiter.verify_packet(
-                        Some(fake_addr),
+                        Some(endpoint.ip()),
                         packet,
                         &mut t.dst_buf,
                     ) {

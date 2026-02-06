@@ -173,17 +173,12 @@ async fn get_auto_mtu(endpoint: &str, mode: &str) -> u16 {
     let is_ipv6 = host.contains(':') || host.parse::<std::net::Ipv6Addr>().is_ok();
     let ip_header_size: u16 = if is_ipv6 { 40 } else { 20 };
 
-    // 计算各模式的开销喵
-    // RawIP: IP头 + WG(32)
-    // TCP(udp2raw): IP头 + TCP(20) + udp2raw(12) + WG(32)
-    // UDP: IP头 + UDP(8) + WG(32)
-    let overhead = match mode {
-        "ip" => ip_header_size + 32,                    // IP + WG
-        "tcp" => ip_header_size + 20 + 12 + 32,         // IP + TCP + udp2raw + WG
-        _ => ip_header_size + 8 + 32,                    // IP + UDP + WG
+    let recommended = match mode {
+        "ip" => pmtu - (ip_header_size + 32),                      // IP + WG
+        "fake-tcp" => pmtu - (ip_header_size + 20 + 12 + 32),       // IP + TCP + udp2raw + WG
+        "tcp" => pmtu - (ip_header_size + 20 + 32),               // IP + TCP (原生) + WG
+        _ => pmtu - (ip_header_size + 8 + 32),                     // IP + UDP + WG
     };
-
-    let recommended = pmtu - overhead;
     cache.insert(endpoint.to_string(), (recommended, std::time::Instant::now()));
     recommended
 }
@@ -749,9 +744,9 @@ async fn run_instance(state: NekoState, token: CancellationToken) -> Result<()> 
         println!("喵！WireGuard 兼容模式配置完成，共配置了 {} 个 Peer。", config.peers.len());
     }
     
-    // TCP 模式：自动启动 udp2raw 组件喵
+    // FakeTCP 模式：自动启动 udp2raw 组件喵
     let mut udp2raw_server_child: Option<tokio::process::Child> = None;
-    if config.mode == "tcp" {
+    if config.mode == "fake-tcp" {
         // 判断是服务端还是客户端：服务端 = peers 为空 或 所有 peers 的 endpoint 都为空
         let is_server = config.peers.is_empty() || config.peers.iter().all(|p| p.endpoint.is_empty());
         
@@ -1661,8 +1656,47 @@ async fn configure_peer(interface: &str, peer_pub_key: &str, mut endpoint: Strin
     // 保存原始探测地址喵（防止 TCP 模式下被 127.0.0.1 覆盖）
     let probe_address = endpoint.clone();
     
-    // 处理 TCP 模式下的侧车逻辑喵 -> 已移除，使用 native TCP 模式
-    // if mode == "tcp" { ... }
+    // 处理 FakeTCP 模式下的侧车逻辑喵
+    if mode == "fake-tcp" {
+        let pub_key_bytes = decode_base64(peer_pub_key).unwrap_or_default();
+        if pub_key_bytes.len() == 32 {
+            let key = (interface.to_string(), peer_pub_key.to_string());
+            let mut sidecars = SIDE_CARS.get_or_init(|| tokio::sync::Mutex::new(HashMap::new())).lock().await;
+            
+            if !sidecars.contains_key(&key) {
+                println!("喵！检测到新队友 {} (FakeTCP 模式)，正在启动本地 udp2raw 侧车...", peer_pub_key);
+                
+                // 自动分配一个本地 UDP 端口用于对接 WireGuard 喵
+                let local_udp_port = 30000 + (OsRng.next_u32() % 10000) as u16; 
+                let local_addr = format!("127.0.0.1:{}", local_udp_port);
+                
+                // 使用 PSK 的前 16 字符作为密码喵
+                let udp2raw_key = if _psk.len() >= 16 { &_psk[..16] } else { _psk };
+
+                let mut cmd = tokio::process::Command::new("udp2raw");
+                cmd.arg("-c") // 客户端模式
+                   .arg("-l").arg(&local_addr)
+                   .arg("-r").arg(&probe_address)
+                   .arg("-k").arg(udp2raw_key)
+                   .arg("--raw-mode").arg("faketcp")
+                   .kill_on_drop(true);
+
+                match cmd.spawn() {
+                    Ok(child) => {
+                        sidecars.insert(key, child);
+                        // 将 WireGuard 的 Endpoint 指向本地侧车端口喵
+                        endpoint = local_addr;
+                        println!("喵！侧车启动成功：本地 {} -> 远端 {}", local_addr, probe_address);
+                    }
+                    Err(e) => eprintln!("喵呜... 无法启动侧车: {:?}", e),
+                }
+            } else {
+                // 侧车已在运行，我们需要获取它的本地端口喵
+                // 这里简化处理：目前的 Sidecar 架构建议在握手成功后保持 Endpoint 不变
+                // 如果需要动态获取，可以在 SIDE_CARS 中存入 (Child, LocalPort) 喵
+            }
+        }
+    }
 
     let locker = CONFIG_MUTEX.get_or_init(|| tokio::sync::Mutex::new(()));
     let _guard = locker.lock().await;
