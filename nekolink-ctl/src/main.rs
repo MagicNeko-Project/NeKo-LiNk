@@ -745,14 +745,15 @@ async fn run_instance(state: NekoState, token: CancellationToken) -> Result<()> 
         println!("喵！WireGuard 兼容模式配置完成，共配置了 {} 个 Peer。", config.peers.len());
     }
     
-    // Mullvad TCP 模式：启动 udp2tcp / tcp2udp 侧车喵
+    // Mullvad TCP 模式：启动服务端侧车 tcp2udp 喵
     let mut mullvad_sidecar: Option<tokio::process::Child> = None;
     if config.mode == "mullvad-tcp" {
         let is_server = config.peers.is_empty() || config.peers.iter().all(|p| p.endpoint.is_empty());
-        let wg_port = get_actual_listen_port(&config.interface).unwrap_or(51820);
-        let effective_port = config.mullvad_tcp_port;
-
+        
         if is_server {
+            let wg_port = get_actual_listen_port(&config.interface).unwrap_or(51820);
+            let effective_port = config.mullvad_tcp_port;
+            
             println!("喵！检测到 Mullvad TCP 服务端模式，正在启动 tcp2udp...");
             let mut cmd = tokio::process::Command::new("tcp2udp");
             cmd.arg("--bind-addr").arg(format!("0.0.0.0:{}", effective_port))
@@ -766,33 +767,8 @@ async fn run_instance(state: NekoState, token: CancellationToken) -> Result<()> 
                 }
                 Err(e) => eprintln!("喵呜... 无法启动 tcp2udp: {:?}", e),
             }
-        } else {
-            // 客户端模式：侧车将在信令握手成功，获得对端 IP 后启动喵
-            // 这里我们先占个位，实际启动在 configure_peer 中处理（或者这里先启动一个连向配置地址的）
-            if let Some(peer) = config.peers.first() {
-                if !peer.endpoint.is_empty() {
-                    let remote_addr = peer.endpoint.clone();
-                    println!("喵！检测到 Mullvad TCP 客户端模式，正在启动 udp2tcp...");
-                    
-                    // 我们需要一个本地端口供 WireGuard 连接喵
-                    // 为了简化，我们让 udp2tcp 监听在 wg_port + 1000 之类的位置，或者由系统分配
-                    let bridge_port = wg_port + 1; 
-                    
-                    let mut cmd = tokio::process::Command::new("udp2tcp");
-                    cmd.arg("--bind-addr").arg(format!("127.0.0.1:{}", bridge_port))
-                       .arg("--dst-addr").arg(&remote_addr)
-                       .kill_on_drop(true);
-                    
-                    match cmd.spawn() {
-                        Ok(child) => {
-                            println!("喵！udp2tcp 已启动：监听 UDP 127.0.0.1:{} -> 转发到 TCP {}", bridge_port, remote_addr);
-                            mullvad_sidecar = Some(child);
-                        }
-                        Err(e) => eprintln!("喵呜... 无法启动 udp2tcp: {:?}", e),
-                    }
-                }
-            }
         }
+        // 客户端模式：udp2tcp 将由 NekoState.client_sidecar 在 configure_peer 中启动和管理喵
     }
     
     // 启动 SOCKS5 代理服务喵
