@@ -16,12 +16,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target-env: [ubuntu-20.04, ubuntu-22.04, ubuntu-24.04, debian-12, debian-13]
+        target-env: [ubuntu-22.04, ubuntu-24.04, debian-12, debian-13]
         arch: [amd64, arm64]
     
     container:
-      # 对于 amd64 使用普通镜像，对于 arm64 使用支持多架构的镜像
-      image: ${{ (contains(matrix.target-env, 'ubuntu') && matrix.target-env) || (matrix.target-env == 'debian-12' && 'debian:12') || 'debian:trixie' }}
+      # 修复镜像名称格式：ubuntu-xx.xx -> ubuntu:xx.xx
+      image: ${{ (contains(matrix.target-env, 'ubuntu') && replace(matrix.target-env, 'ubuntu-', 'ubuntu:')) || (matrix.target-env == 'debian-12' && 'debian:12') || 'debian:trixie' }}
 
     steps:
       - name: Checkout code
