@@ -27,7 +27,6 @@
 
 | 操作系统 | 架构 | 产物体积 |
 | :--- | :--- | :--- |
-| **Ubuntu 20.04** | amd64 / arm64 | `.deb` 包 |
 | **Ubuntu 22.04** | amd64 / arm64 | `.deb` 包 |
 | **Ubuntu 24.04** | amd64 / arm64 | `.deb` 包 |
 | **Debian 12 (Bookworm)** | amd64 / arm64 | `.deb` 包 |
