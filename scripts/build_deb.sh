@@ -60,10 +60,19 @@ cp target/release/nekolink-ctl "$BUILD_DIR/usr/local/bin/"
 
 # 5. 封装 Mullvad 组件 (替代旧的 udp2raw)
 echo "正在将 Mullvad 魔法组件装入包中..."
-if [ -f "/usr/local/bin/udp2tcp" ]; then
+if [ -f "third_party/mullvad-tcp/target/release/udp2tcp" ]; then
+    cp third_party/mullvad-tcp/target/release/udp2tcp "$BUILD_DIR/usr/local/bin/"
+elif [ -f "target/release/udp2tcp" ]; then
+    cp target/release/udp2tcp "$BUILD_DIR/usr/local/bin/"
+elif [ -f "/usr/local/bin/udp2tcp" ]; then
     cp /usr/local/bin/udp2tcp "$BUILD_DIR/usr/local/bin/"
 fi
-if [ -f "/usr/local/bin/tcp2udp" ]; then
+
+if [ -f "third_party/mullvad-tcp/target/release/tcp2udp" ]; then
+    cp third_party/mullvad-tcp/target/release/tcp2udp "$BUILD_DIR/usr/local/bin/"
+elif [ -f "target/release/tcp2udp" ]; then
+    cp target/release/tcp2udp "$BUILD_DIR/usr/local/bin/"
+elif [ -f "/usr/local/bin/tcp2udp" ]; then
     cp /usr/local/bin/tcp2udp "$BUILD_DIR/usr/local/bin/"
 fi
 

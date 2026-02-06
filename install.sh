@@ -18,20 +18,17 @@ NC='\033[0m'
 echo -e "${PINK}正在检查 Mullvad udp-over-tcp 组件...${NC}"
 
 if ! command -v udp2tcp &> /dev/null || ! command -v tcp2udp &> /dev/null; then
-    echo -e "${CYAN}发现缺少 Mullvad 组件，正在开始自动化编译安装仪式...${NC}"
+    echo -e "${CYAN}发现缺少 Mullvad 组件，正在开始自动化本地编译安装仪式...${NC}"
     
-    # 安装必要依赖
-    if ! command -v cargo &> /dev/null || ! command -v git &> /dev/null; then
-        echo -e "${CYAN}正在补充编译依赖 (cargo, git)...${NC}"
-        apt-get update && apt-get install -y cargo git
+    # 检查本地源码是否存在喵
+    if [ ! -f "third_party/mullvad-tcp/Cargo.toml" ]; then
+        echo -e "${CYAN}正在初始化子模块灵力...${NC}"
+        git submodule update --init --recursive
     fi
 
-    TEMP_DIR=$(mktemp -d)
-    echo -e "${CYAN}正在下载源码到 $TEMP_DIR ...${NC}"
-    git clone https://github.com/mullvad/udp-over-tcp.git "$TEMP_DIR"
-    
-    cd "$TEMP_DIR"
-    echo -e "${CYAN}正在进行魔法编译 (Release 模式)...${NC}"
+    # 进入子模块目录编译
+    cd third_party/mullvad-tcp
+    echo -e "${CYAN}正在进行本地魔法编译 (Release 模式)...${NC}"
     cargo build --release
     
     echo -e "${CYAN}正在将组件安置到 /usr/local/bin ...${NC}"
@@ -39,8 +36,7 @@ if ! command -v udp2tcp &> /dev/null || ! command -v tcp2udp &> /dev/null; then
     cp target/release/tcp2udp /usr/local/bin/
     
     cd - > /dev/null
-    rm -rf "$TEMP_DIR"
-    echo -e "${PINK}Mullvad 组件安装完成喵！${NC}"
+    echo -e "${PINK}Mullvad 组件本地化构建安装完成喵！${NC}"
 else
     echo -e "${PINK}Mullvad 组件已就绪，跳过编译喵。${NC}"
 fi
