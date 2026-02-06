@@ -53,8 +53,9 @@ function show_advanced_menu() {
     echo "2. 将所有隧道修改为 MTU 自动协商 (MTU Auto-Negotiation)"
     echo "3. 导入 wg-quick 配置文件 (WireGuard 兼容模式)"
     echo "4. 一键注入 SOCKS5 极速神力 (Auto-Optimize Kernel)"
-    echo "5. 返回主菜单"
-    read -p "请输入数字 [1-5]: " adv_choice
+    echo "5. Mullvad TCP 组件诊断 (Diagnose tcp2udp/udp2tcp)"
+    echo "6. 返回主菜单"
+    read -p "请输入数字 [1-6]: " adv_choice
 }
 
 function import_wgquick_config() {
@@ -776,6 +777,79 @@ function auto_optimize_kernel() {
     echo -e "${CYAN}提示：部分 limits 设置需要注销重登录或重启系统后才能完全生效喵。${NC}"
 }
 
+function diagnose_mullvad_tcp() {
+    echo -e "\n${PINK}--- Mullvad TCP 组件诊断工具 ---${NC}"
+    echo -e "${CYAN}正在检查 tcp2udp 和 udp2tcp 运行状态喵...${NC}\n"
+    
+    # 检查 tcp2udp 进程
+    echo -e "${CYAN}=== tcp2udp (服务端) ===${NC}"
+    tcp2udp_count=$(ps aux | grep -v grep | grep -c "tcp2udp")
+    if [ $tcp2udp_count -gt 0 ]; then
+        echo -e "${PINK}✓ 发现 $tcp2udp_count 个 tcp2udp 进程${NC}"
+        ps aux | grep -v grep | grep "tcp2udp" | while read line; do
+            pid=$(echo "$line" | awk '{print $2}')
+            cmd=$(echo "$line" | awk '{for(i=11;i<=NF;i++) printf "%s ", $i; print ""}')
+            echo -e "  PID: ${CYAN}$pid${NC}  命令: $cmd"
+        done
+    else
+        echo -e "${CYAN}✗ 没有发现 tcp2udp 进程${NC}"
+    fi
+    
+    # 检查 udp2tcp 进程
+    echo -e "\n${CYAN}=== udp2tcp (客户端) ===${NC}"
+    udp2tcp_count=$(ps aux | grep -v grep | grep -c "udp2tcp")
+    if [ $udp2tcp_count -gt 0 ]; then
+        echo -e "${PINK}✓ 发现 $udp2tcp_count 个 udp2tcp 进程${NC}"
+        ps aux | grep -v grep | grep "udp2tcp" | while read line; do
+            pid=$(echo "$line" | awk '{print $2}')
+            cmd=$(echo "$line" | awk '{for(i=11;i<=NF;i++) printf "%s ", $i; print ""}')
+            echo -e "  PID: ${CYAN}$pid${NC}  命令: $cmd"
+        done
+    else
+        echo -e "${CYAN}✗ 没有发现 udp2tcp 进程${NC}"
+    fi
+    
+    # 检查二进制文件是否存在
+    echo -e "\n${CYAN}=== 二进制文件检查 ===${NC}"
+    if command -v tcp2udp &> /dev/null; then
+        echo -e "${PINK}✓ tcp2udp: $(which tcp2udp)${NC}"
+        tcp2udp --version 2>&1 | head -n 1
+    else
+        echo -e "${CYAN}✗ tcp2udp 未安装或不在 PATH 中${NC}"
+    fi
+    
+    if command -v udp2tcp &> /dev/null; then
+        echo -e "${PINK}✓ udp2tcp: $(which udp2tcp)${NC}"
+        udp2tcp --version 2>&1 | head -n 1
+    else
+        echo -e "${CYAN}✗ udp2tcp 未安装或不在 PATH 中${NC}"
+    fi
+    
+    # 检查 Mullvad TCP 模式配置
+    echo -e "\n${CYAN}=== Mullvad TCP 配置检查 ===${NC}"
+    mullvad_configs=$(grep -l '"mode"\s*:\s*"mullvad-tcp"' "$CONFIG_DIR"/*.json 2>/dev/null || true)
+    if [ -n "$mullvad_configs" ]; then
+        echo -e "${PINK}✓ 发现 Mullvad TCP 模式配置：${NC}"
+        for cfg in $mullvad_configs; do
+            iface=$(basename "$cfg" .json)
+            tcp_port=$(jq -r '.mullvad_tcp_port // 12581' "$cfg")
+            echo -e "  接口: ${CYAN}$iface${NC}  TCP端口: ${CYAN}$tcp_port${NC}"
+        done
+    else
+        echo -e "${CYAN}✗ 没有发现使用 Mullvad TCP 模式的配置${NC}"
+    fi
+    
+    # 端口监听检查
+    echo -e "\n${CYAN}=== 端口监听检查 ===${NC}"
+    echo -e "${PINK}TCP 监听端口：${NC}"
+    ss -tlnp 2>/dev/null | grep -E "tcp2udp|udp2tcp" | head -n 10 || echo -e "  ${CYAN}✗ 没有发现相关监听端口${NC}"
+    echo -e "${PINK}UDP 监听端口：${NC}"
+    ss -ulnp 2>/dev/null | grep -E "tcp2udp|udp2tcp" | head -n 10 || echo -e "  ${CYAN}✗ 没有发现相关监听端口${NC}"
+    
+    echo -e "\n${PINK}诊断完成喵！(〃'▽'〃)${NC}"
+}
+
+
 while true; do
     show_menu
     case $choice in
@@ -802,7 +876,8 @@ while true; do
                 2) set_all_tunnels_auto_mtu ;;
                 3) import_wgquick_config ;;
                 4) auto_optimize_kernel ;;
-                5) continue ;;
+                5) diagnose_mullvad_tcp ;;
+                6) continue ;;
                 *) echo "无效选择喵！" ;;
             esac
             ;;
