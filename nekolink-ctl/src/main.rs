@@ -756,8 +756,8 @@ async fn run_instance(state: NekoState, token: CancellationToken) -> Result<()> 
             
             println!("喵！检测到 Mullvad TCP 服务端模式，正在启动 tcp2udp...");
             let mut cmd = tokio::process::Command::new("tcp2udp");
-            cmd.arg("--bind-addr").arg(format!("0.0.0.0:{}", effective_port))
-               .arg("--dst-addr").arg(format!("127.0.0.1:{}", wg_port))
+            cmd.arg("--tcp-listen").arg(format!("0.0.0.0:{}", effective_port))
+               .arg("--udp-forward").arg(format!("127.0.0.1:{}", wg_port))
                .kill_on_drop(true);
             
             match cmd.spawn() {
@@ -1637,8 +1637,8 @@ async fn configure_peer(interface: &str, peer_pub_key: &str, mut endpoint: Strin
         println!("喵！正在建立 Mullvad TCP 桥接: 127.0.0.1:{} -> {}", bridge_port, remote_addr);
         
         let mut cmd = tokio::process::Command::new("udp2tcp");
-        cmd.arg("--bind-addr").arg(format!("127.0.0.1:{}", bridge_port))
-           .arg("--dst-addr").arg(&remote_addr)
+        cmd.arg("--udp-listen").arg(format!("127.0.0.1:{}", bridge_port))
+           .arg("--tcp-forward").arg(&remote_addr)
            .kill_on_drop(true);
         
         // 如果提供了 client_sidecar，就将进程句柄存储起来喵
