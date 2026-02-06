@@ -55,7 +55,7 @@ impl Default for GlobalConfig {
 
 static PEER_CACHE: OnceLock<Mutex<HashMap<(String, String), String>>> = OnceLock::new();
 static CONFIG_MUTEX: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-static SIDE_CARS: OnceLock<tokio::sync::Mutex<HashMap<(String, String), tokio::process::Child>>> = OnceLock::new();
+
 static PROBED_MTU_CACHE: OnceLock<tokio::sync::Mutex<HashMap<String, (u16, std::time::Instant)>>> = OnceLock::new();
 static DNS_CACHE: OnceLock<tokio::sync::Mutex<HashMap<String, (IpAddr, std::time::Instant)>>> = OnceLock::new();
 
@@ -1656,47 +1656,7 @@ async fn configure_peer(interface: &str, peer_pub_key: &str, mut endpoint: Strin
     // 保存原始探测地址喵（防止 TCP 模式下被 127.0.0.1 覆盖）
     let probe_address = endpoint.clone();
     
-    // 处理 FakeTCP 模式下的侧车逻辑喵
-    if mode == "fake-tcp" {
-        let pub_key_bytes = decode_base64(peer_pub_key).unwrap_or_default();
-        if pub_key_bytes.len() == 32 {
-            let key = (interface.to_string(), peer_pub_key.to_string());
-            let mut sidecars = SIDE_CARS.get_or_init(|| tokio::sync::Mutex::new(HashMap::new())).lock().await;
-            
-            if !sidecars.contains_key(&key) {
-                println!("喵！检测到新队友 {} (FakeTCP 模式)，正在启动本地 udp2raw 侧车...", peer_pub_key);
-                
-                // 自动分配一个本地 UDP 端口用于对接 WireGuard 喵
-                let local_udp_port = 30000 + (OsRng.next_u32() % 10000) as u16; 
-                let local_addr = format!("127.0.0.1:{}", local_udp_port);
-                
-                // 使用 PSK 的前 16 字符作为密码喵
-                let udp2raw_key = if _psk.len() >= 16 { &_psk[..16] } else { _psk };
 
-                let mut cmd = tokio::process::Command::new("udp2raw");
-                cmd.arg("-c") // 客户端模式
-                   .arg("-l").arg(&local_addr)
-                   .arg("-r").arg(&probe_address)
-                   .arg("-k").arg(udp2raw_key)
-                   .arg("--raw-mode").arg("faketcp")
-                   .kill_on_drop(true);
-
-                match cmd.spawn() {
-                    Ok(child) => {
-                        sidecars.insert(key, child);
-                        // 将 WireGuard 的 Endpoint 指向本地侧车端口喵
-                        endpoint = local_addr;
-                        println!("喵！侧车启动成功：本地 {} -> 远端 {}", local_addr, probe_address);
-                    }
-                    Err(e) => eprintln!("喵呜... 无法启动侧车: {:?}", e),
-                }
-            } else {
-                // 侧车已在运行，我们需要获取它的本地端口喵
-                // 这里简化处理：目前的 Sidecar 架构建议在握手成功后保持 Endpoint 不变
-                // 如果需要动态获取，可以在 SIDE_CARS 中存入 (Child, LocalPort) 喵
-            }
-        }
-    }
 
     let locker = CONFIG_MUTEX.get_or_init(|| tokio::sync::Mutex::new(()));
     let _guard = locker.lock().await;
@@ -1787,21 +1747,7 @@ async fn cleanup_interface_state(interface: &str) {
         cache.retain(|(iface, _), _| iface != interface);
     }
 
-    // 2. 清理 SIDE_CARS 喵 (杀死残留的 udp2raw 进程)
-    if let Some(sidecars_mutex) = SIDE_CARS.get() {
-        let mut sidecars = sidecars_mutex.lock().await;
-        let mut keys_to_remove = Vec::new();
-        for ((iface, pubkey), _) in sidecars.iter() {
-            if iface == interface {
-                keys_to_remove.push((iface.clone(), pubkey.clone()));
-            }
-        }
-        for key in keys_to_remove {
-            if let Some(mut child) = sidecars.remove(&key) {
-                let _ = child.kill().await;
-            }
-        }
-    }
+
     
     // 3. 清理 PROBED_MTU_CACHE 喵 (由于 MTU 缓存是以 Endpoint 为 Key 的，目前不需要按接口清理，
     // 但是考虑到热重载可能有网络变动，保持它一段时间自动过期即可喵)
@@ -1837,7 +1783,7 @@ async fn show_status() -> Result<()> {
         println!("【 接口: {} 】", config.interface);
         let mode_desc = match config.mode.as_str() {
             "ip" => format!("ip (协议={})", config.ip_protocol.unwrap_or(141)),
-            "tcp" => "fake-tcp + safe-signaling".to_string(),
+            "tcp" => "tcp (native signaling)".to_string(),
             _ => "udp".to_string(),
         };
         println!("模式: {}", mode_desc);
