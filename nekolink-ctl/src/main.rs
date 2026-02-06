@@ -1650,10 +1650,8 @@ async fn configure_peer(interface: &str, peer_pub_key: &str, mut endpoint: Strin
                 }
                 Err(e) => eprintln!("喵呜... 无法启动 udp2tcp: {:?}", e),
             }
-        } else {
-            // 降级模式：启动但不托管（会变成僵尸进程，但至少能工作）
-            let _ = cmd.spawn();
         }
+        // 服务端不会提供 client_sidecar，因此不会启动 udp2tcp 喵
         
         // 修改 WireGuard 的 Endpoint 为本地网桥喵
         endpoint = format!("127.0.0.1:{}", bridge_port);
