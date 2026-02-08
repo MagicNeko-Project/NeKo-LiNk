@@ -39,6 +39,9 @@ struct PeerConfig {
     /// 单独为此 Peer 设置的 Keepalive（覆盖全局设置）
     #[serde(default)]
     persistent_keepalive: Option<u16>,
+    /// 对端服务器的信令端口(客户端用,覆盖接口级和全局配置)喵
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signal_port: Option<u16>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -59,7 +62,7 @@ static CONFIG_MUTEX: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 static PROBED_MTU_CACHE: OnceLock<tokio::sync::Mutex<HashMap<String, (u16, std::time::Instant)>>> = OnceLock::new();
 static DNS_CACHE: OnceLock<tokio::sync::Mutex<HashMap<String, (IpAddr, std::time::Instant)>>> = OnceLock::new();
 
-async fn resolve_dns(host: &str, interface: Option<&str>) -> Result<IpAddr> {
+async fn resolve_dns(host: &str, interface: Option<&str>, prefer_ipv6: bool) -> Result<IpAddr> {
     {
         let cache_mutex = DNS_CACHE.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()));
         let cache = cache_mutex.lock().await;
@@ -75,19 +78,13 @@ async fn resolve_dns(host: &str, interface: Option<&str>) -> Result<IpAddr> {
         match resolve_via_tunnel(host, iface).await {
             Ok(ip) => ip,
             Err(_e) => {
-                // tracing::warn!("可信 DNS 解析失败，降级回系统解析: {:?}", _e);
-                 tokio::net::lookup_host(format!("{}:0", host)).await?
-                    .next()
-                    .map(|a| a.ip())
-                    .ok_or(anyhow::anyhow!("系统 DNS 解析结果为空"))?
+                // tracing::warn!("可信 DNS 解析失败,降级回系统解析: {:?}", _e);
+                resolve_with_preference(host, prefer_ipv6).await?
             }
         }
     } else {
-        // 没有指定接口，直接使用系统解析
-         tokio::net::lookup_host(format!("{}:0", host)).await?
-            .next()
-            .map(|a| a.ip())
-            .ok_or(anyhow::anyhow!("系统 DNS 解析结果为空"))?
+        // 没有指定接口,直接使用系统解析喵
+        resolve_with_preference(host, prefer_ipv6).await?
     };
 
     {
@@ -96,6 +93,30 @@ async fn resolve_dns(host: &str, interface: Option<&str>) -> Result<IpAddr> {
     }
     
     Ok(addr)
+}
+
+/// 根据 IPv6 优先级偏好解析主机名喵
+async fn resolve_with_preference(host: &str, prefer_ipv6: bool) -> Result<IpAddr> {
+    let addrs: Vec<IpAddr> = tokio::net::lookup_host(format!("{}:0", host))
+        .await?
+        .map(|addr| addr.ip())
+        .collect();
+    
+    if addrs.is_empty() {
+        return Err(anyhow::anyhow!("DNS 解析结果为空喵"));
+    }
+    
+    if prefer_ipv6 {
+        // 优先返回 IPv6
+        addrs.iter().find(|ip| ip.is_ipv6()).copied()
+            .or_else(|| addrs.first().copied())
+            .ok_or_else(|| anyhow::anyhow!("未找到合适的 IP 地址喵"))
+    } else {
+        // 优先返回 IPv4
+        addrs.iter().find(|ip| ip.is_ipv4()).copied()
+            .or_else(|| addrs.first().copied())
+            .ok_or_else(|| anyhow::anyhow!("未找到合适的 IP 地址喵"))
+    }
 }
 
 // 手动构造 DNS 查询包并通过隧道接口发送喵
@@ -143,6 +164,23 @@ async fn resolve_via_tunnel(host: &str, interface: &str) -> Result<IpAddr> {
 
     Err(anyhow::anyhow!("No A record found via tunnel"))
 }
+
+/// 统一的 endpoint 解析函数,支持 IP、域名和带端口的地址喵
+async fn resolve_endpoint_with_port(endpoint: &str, port: u16, prefer_ipv6: bool) -> Result<SocketAddr> {
+    if let Ok(mut sa) = endpoint.parse::<SocketAddr>() {
+        // 已经是 IP:Port 格式,替换端口喵
+        sa.set_port(port);
+        Ok(sa)
+    } else if let Ok(ip) = endpoint.parse::<IpAddr>() {
+        // 纯 IP 地址喵
+        Ok(SocketAddr::new(ip, port))
+    } else {
+        // 作为域名解析喵
+        let ip = resolve_dns(endpoint, None, prefer_ipv6).await?;
+        Ok(SocketAddr::new(ip, port))
+    }
+}
+
 
 async fn get_auto_mtu(endpoint: &str, mode: &str) -> u16 {
     let mut cache = PROBED_MTU_CACHE.get_or_init(|| tokio::sync::Mutex::new(HashMap::new())).lock().await;
@@ -217,6 +255,12 @@ struct NekoConfig {
     /// 是否开启 UDP GRO 接收卸载（默认开启，若遇到性能问题可关闭喵）
     #[serde(default = "default_true")]
     pub enable_udp_gro: bool,
+    /// 接口级信令端口(可选,覆盖全局配置)喵
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signal_port: Option<u16>,
+    /// 是否优先使用 IPv6(默认 false,优先 IPv4)喵
+    #[serde(default)]
+    pub prefer_ipv6: bool,
 }
 
 fn default_true() -> bool { true }
@@ -239,6 +283,8 @@ struct NekoState {
     pub_key: PublicKey,
     // 存储客户端模式下的 Mullvad sidecar 进程喵
     client_sidecar: Arc<parking_lot::Mutex<Option<tokio::process::Child>>>,
+    // 全局配置引用喵
+    global_config: GlobalConfig,
 }
 
 impl NekoState {
@@ -279,7 +325,7 @@ async fn main() -> Result<()> {
                     if let Ok(pid) = pid_str.trim().parse::<i32>() {
                         use nix::sys::signal::{kill, Signal};
                         use nix::unistd::Pid;
-                        if let Ok(_) = kill(Pid::from_raw(pid), Signal::SIGHUP) {
+                        if kill(Pid::from_raw(pid), Signal::SIGHUP).is_ok() {
                             println!("喵！已向主进程 (PID: {}) 发送重载信号。", pid);
                             return Ok(());
                         }
@@ -412,7 +458,7 @@ async fn main() -> Result<()> {
                 let (p_b64, _, p_k) = load_or_generate_keys(&iface)?;
                 (p_b64, p_k)
             };
-            let state = NekoState { config, priv_b64, pub_key, client_sidecar: Arc::new(parking_lot::Mutex::new(None)) };
+            let state = NekoState { config, priv_b64, pub_key, client_sidecar: Arc::new(parking_lot::Mutex::new(None)), global_config: current_global.clone() };
             let token = CancellationToken::new();
             let token_clone = token.clone();
             let state_clone = state.clone();
@@ -460,7 +506,7 @@ async fn main() -> Result<()> {
                     let new_token = CancellationToken::new();
                     start_signaling_tasks(new_global.clone(), Arc::clone(&active_instances), new_token.clone());
                     *signaling_token.lock().unwrap() = new_token;
-                    current_global = new_global;
+                    current_global = new_global.clone();
                 }
 
                 // 2. 更新接口喵
@@ -509,7 +555,7 @@ async fn main() -> Result<()> {
                             (p_b64, p_k)
                         };
 
-                        let state = NekoState { config: config.clone(), priv_b64, pub_key, client_sidecar: Arc::new(parking_lot::Mutex::new(None)) };
+                        let state = NekoState { config: config.clone(), priv_b64, pub_key, client_sidecar: Arc::new(parking_lot::Mutex::new(None)), global_config: new_global.clone() };
                         let token = CancellationToken::new();
                         let token_clone = token.clone();
                         let state_clone = state.clone();
@@ -573,8 +619,8 @@ async fn send_uapi(interface: &str, commands: &str) -> Result<()> {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     while reader.read_line(&mut line).await? > 0 {
-        if line.starts_with("errno=") {
-            let errno: i32 = line["errno=".len()..].trim().parse()?;
+        if let Some(stripped) = line.strip_prefix("errno=") {
+            let errno: i32 = stripped.trim().parse()?;
             if errno != 0 {
                 return Err(anyhow::anyhow!("UAPI 返回错误: {}", errno));
             }
@@ -983,7 +1029,7 @@ async fn parse_socks5_udp_header(buf: &[u8], interface: &str) -> Result<(usize, 
             let domain = String::from_utf8_lossy(&buf[5..5+len]).to_string();
             let port = u16::from_be_bytes([buf[5+len], buf[5+len+1]]);
             // 异步解析 DNS 喵 (使用可信隧道解析)
-            let ip = resolve_dns(&domain, Some(interface)).await?;
+            let ip = resolve_dns(&domain, Some(interface), false).await?;
             Ok((5 + len + 2, SocketAddr::new(ip, port)))
         }
         0x04 => { // IPv6
@@ -1023,7 +1069,7 @@ async fn connect_via_interface(interface: &str, target: &str, local_ip: Option<I
         parsed_ip
     } else {
         // TCP 模式下也使用可信解析喵
-        resolve_dns(host, Some(interface)).await?
+        resolve_dns(host, Some(interface), false).await?
     };
     let addr = SocketAddr::new(ip, port);
     
@@ -1057,7 +1103,7 @@ async fn connect_via_interface(interface: &str, target: &str, local_ip: Option<I
     let stream = TcpStream::from_std(socket.into())?;
     
     // 增加连接超时机制 (10秒)，防止被墙时无限等待喵
-    if let Err(_) = time::timeout(Duration::from_secs(10), stream.writable()).await {
+    if time::timeout(Duration::from_secs(10), stream.writable()).await.is_err() {
         return Err(anyhow::anyhow!("连接超时喵 (可能是被阻断或网络不通)"));
     }
     
@@ -1118,13 +1164,22 @@ async fn run_global_udp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                             get_interface_mtu(&state.config.interface).unwrap_or(1420)
                         };
 
-                        let addr_opt = if let Ok(mut sa) = peer.endpoint.parse::<SocketAddr>() {
-                            sa.set_port(signal_port);
-                            Some(sa)
-                        } else if let Ok(ip) = peer.endpoint.parse::<IpAddr>() {
-                            Some(SocketAddr::new(ip, signal_port))
-                        } else {
-                            None
+                        // 端口优先级: peer > interface > global 喵
+                        let target_port = peer.signal_port
+                            .or(state.config.signal_port)
+                            .unwrap_or(state.global_config.signal_port);
+
+                        // 使用统一的endpoint解析函数喵
+                        let addr_opt = match resolve_endpoint_with_port(
+                            &peer.endpoint,
+                            target_port,
+                            state.config.prefer_ipv6
+                        ).await {
+                            Ok(addr) => Some(addr),
+                            Err(e) => {
+                                eprintln!("警告喵: 无法解析 endpoint {}: {:?}", peer.endpoint, e);
+                                None
+                            }
                         };
 
                         if let Some(addr) = addr_opt {
@@ -1263,13 +1318,22 @@ async fn run_global_tcp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                     let interface = state.config.interface.clone();
                     
                     for peer in &state.config.peers {
-                        let addr_opt = if let Ok(mut sa) = peer.endpoint.parse::<SocketAddr>() {
-                            sa.set_port(signal_port);
-                            Some(sa)
-                        } else if let Ok(ip) = peer.endpoint.parse::<IpAddr>() {
-                            Some(SocketAddr::new(ip, signal_port))
-                        } else {
-                            None
+                        // 端口优先级: peer > interface > global 喵
+                        let target_port = peer.signal_port
+                            .or(state.config.signal_port)
+                            .unwrap_or(state.global_config.signal_port);
+
+                        // 使用统一的endpoint解析函数喵
+                        let addr_opt = match resolve_endpoint_with_port(
+                            &peer.endpoint,
+                            target_port,
+                            state.config.prefer_ipv6
+                        ).await {
+                            Ok(addr) => Some(addr),
+                            Err(e) => {
+                                eprintln!("警告喵: TCP 无法解析 endpoint {}: {:?}", peer.endpoint, e);
+                                None
+                            }
                         };
 
                         if let Some(addr) = addr_opt {
@@ -1477,7 +1541,14 @@ async fn run_global_raw_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                         } else if let Ok(sa) = peer.endpoint.parse::<SocketAddr>() {
                             Some(sa.ip())
                         } else {
-                            None
+                            // 使用统一的DNS解析函数喵
+                            match resolve_dns(&peer.endpoint, None, state.config.prefer_ipv6).await {
+                                Ok(ip) => Some(ip),
+                                Err(e) => {
+                                    eprintln!("警告喵: Raw IP 模式无法解析 {}: {:?}", peer.endpoint, e);
+                                    None
+                                }
+                            }
                         };
 
                         if let Some(ip) = ip_opt {

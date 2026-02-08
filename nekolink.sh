@@ -522,6 +522,22 @@ function create_config() {
         socks5_port="$s5_port"
     fi
 
+    read -p "是否优先使用 IPv6 解析? (y/n, 默认 n): " prefer_ipv6_choice
+    if [ "$prefer_ipv6_choice" == "y" ]; then
+        prefer_ipv6="true"
+    else
+        prefer_ipv6="false"
+    fi
+
+    # 客户端可以为peer指定独立的信令端口喵
+    peer_signal_port="null"
+    if [ "$role" == "client" ]; then
+        read -p "是否为对端指定独立信令端口? (直接回车使用全局端口, 输入端口号则使用指定端口): " psport
+        if [ -n "$psport" ]; then
+            peer_signal_port="$psport"
+        fi
+    fi
+
     # signal_port 统一迁移到 global.json 喵
 
     # 构建 JSON
@@ -541,15 +557,25 @@ function create_config() {
   "local_address": "$local_addr",
   "psk": "$psk",
   "socks5_port": $socks5_port,
+  "prefer_ipv6": $prefer_ipv6,
   "peers": [
 EOF
 
     if [ -n "$endpoint" ]; then
-        cat >> "$json_path" <<EOF
+        if [ "$peer_signal_port" != "null" ]; then
+            cat >> "$json_path" <<EOF
+    {
+      "endpoint": "$endpoint",
+      "signal_port": $peer_signal_port
+    }
+EOF
+        else
+            cat >> "$json_path" <<EOF
     {
       "endpoint": "$endpoint"
     }
 EOF
+        fi
     fi
 
     cat >> "$json_path" <<EOF
