@@ -2044,7 +2044,71 @@ async fn perform_tcp_mtu_probe(host: &str) -> Result<u16> {
     }
 }
 
+async fn perform_udp_mtu_probe(host: &str, port: u16) -> Result<u16> {
+    use std::os::unix::io::AsRawFd;
+    
+    // 尝试使用 UDP socket 探测 PMTU（适用于 NAT 映射端口场景）喵
+    let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+    
+    // 设置 IP_MTU_DISCOVER 为 IP_PMTUDISC_DO（强制路径 MTU 探测）喵
+    // IP_PMTUDISC_DO = 2
+    let pmtudisc_do: libc::c_int = 2;
+    unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::IPPROTO_IP,
+            libc::IP_MTU_DISCOVER,
+            &pmtudisc_do as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        );
+    }
+    
+    // 连接到目标地址（对于 UDP 这只是设置默认目标）喵
+    let addr: SocketAddr = format!("{}:{}", host, port).parse()
+        .unwrap_or_else(|_| format!("{}:12580", host).parse().unwrap());
+    let _ = socket.connect(&addr.into());
+    
+    // 发送一个小包来触发路径 MTU 探测喵
+    let probe_data = [0u8; 8];
+    let _ = socket.send(&probe_data);
+    
+    // 等待一小会儿让内核更新 MTU 缓存喵
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    
+    // 读取 IP_MTU 喵
+    let mut mtu: libc::c_int = 0;
+    let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    
+    let res = unsafe {
+        libc::getsockopt(
+            socket.as_raw_fd(),
+            libc::IPPROTO_IP,
+            libc::IP_MTU,
+            &mut mtu as *mut _ as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    
+    if res == 0 && mtu > 0 {
+        Ok(mtu as u16)
+    } else {
+        Err(anyhow::anyhow!("无法获取 UDP MTU"))
+    }
+}
+
 async fn perform_mtu_probe(host: &str) -> Result<u16> {
+    // 首先尝试使用 UDP 探测（适用于 NAT 环境）喵
+    // 使用信令端口 12580 作为默认探测目标
+    if let Ok(mtu) = perform_udp_mtu_probe(host, 12580).await {
+        if mtu >= 576 && mtu <= 1500 {
+            println!("喵！通过 UDP 套接字成功探测到 PMTU: {}", mtu);
+            return Ok(mtu);
+        }
+    }
+    
+    // 如果 UDP 探测失败，回退到 ICMP ping 二分法喵
+    println!("UDP MTU 探测受限喵，回退到 ICMP 二分法探测...");
+    
     // 使用 ping 二分法探测 PMTU
     // Linux 下使用 -M do 禁止分片，-s 指定包大小 (不含 IP/ICMP 头 28 字节)
     let mut low = 576;

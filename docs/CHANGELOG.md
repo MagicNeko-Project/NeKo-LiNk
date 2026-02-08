@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 
+## [3.2.0] - 2026-02-09
+
+### Added
+- **智能 MTU 穿透探测魔法**：引入基于 UDP Socket `IP_MTU` 选项的 PMTU 探测机制。即使在 NAT 映射端口或 ICMP 被阻挡的环境下，也能通过真实数据路径获取到真实的路径 MTU 喵。
+- **多级回退探测架构**：优先尝试连接级 MTU 获取 (TCP/UDP)，最后回退到 ICMP 二分法，大幅提升在复杂网络环境下的鲁棒性喵。
+
+### Fixed
+- 修复了由于 NAT 设备静默丢弃大包 ICMP 导致 MTU 自动协商无法收敛的历史遗留问题喵。
+
 ## [3.1.0] - 2026-02-04
 
 ### Changed
