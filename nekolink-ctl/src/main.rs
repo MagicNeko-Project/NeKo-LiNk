@@ -192,19 +192,26 @@ async fn get_auto_mtu(endpoint: &str, mode: &str) -> u16 {
     }
 
     // 执行探测喵
-    let host = if endpoint.contains(':') {
-        endpoint.split(':').next().unwrap()
-    } else {
-        endpoint
-    };
-
-    let pmtu = if mode == "tcp" {
-        match perform_tcp_mtu_probe(host).await {
-            Ok(val) => val,
-            Err(_) => perform_mtu_probe(host).await.unwrap_or(1500)
+    let (host, port) = if let Ok(addr) = endpoint.parse::<SocketAddr>() {
+        (addr.ip().to_string(), addr.port())
+    } else if endpoint.contains(':') {
+        let parts: Vec<&str> = endpoint.rsplitn(2, ':').collect();
+        if parts.len() == 2 {
+            (parts[1].trim_start_matches('[').trim_end_matches(']').to_string(), parts[0].parse().unwrap_or(0))
+        } else {
+            (endpoint.to_string(), 0)
         }
     } else {
-        perform_mtu_probe(host).await.unwrap_or(1500)
+        (endpoint.to_string(), 0)
+    };
+
+    let pmtu = if mode == "tcp" || mode == "mullvad-tcp" {
+        match perform_tcp_mtu_probe(&host).await {
+            Ok(val) => val,
+            Err(_) => perform_mtu_probe(&host).await.unwrap_or(1500)
+        }
+    } else {
+        perform_mtu_probe(&host).await.unwrap_or(1500)
     };
 
     // 检测是否为 IPv6 地址喵（IPv6 头比 IPv4 大 20 字节）
@@ -212,10 +219,20 @@ async fn get_auto_mtu(endpoint: &str, mode: &str) -> u16 {
     let ip_header_size: u16 = if is_ipv6 { 40 } else { 20 };
 
     let recommended = match mode {
-        "ip" => pmtu - (ip_header_size + 32),                      // IP + WG
-        "mullvad-tcp" => pmtu - (ip_header_size + 20 + 2 + 32),    // IP + TCP + 2 bytes framing + WG
-        _ => pmtu - (ip_header_size + 8 + 32),                     // IP + UDP + WG
+        "ip" => pmtu - (ip_header_size + 32),                       // IP + WG
+        "tcp" => pmtu - (ip_header_size + 20 + 2 + 32),             // IP + TCP + 2 bytes framing + WG
+        "mullvad-tcp" => pmtu - (ip_header_size + 20 + 2 + 32),     // IP + TCP + 2 bytes framing + WG
+        "fake-tcp" => pmtu - (ip_header_size + 20 + 12 + 20 + 32),  // udp2raw 大约 12-20 字节额外开销，保守算 84 喵
+        _ => pmtu - (ip_header_size + 8 + 32),                      // IP + UDP + WG
     };
+    
+    // 如果是 udp2raw (fake-tcp)，开销非常大，特殊处理下喵
+    let recommended = if mode == "fake-tcp" {
+        pmtu - 84 // 参考 CHANGELOG 里的 84 字节修正喵
+    } else {
+        recommended
+    };
+
     cache.insert(endpoint.to_string(), (recommended, std::time::Instant::now()));
     recommended
 }
@@ -1776,8 +1793,14 @@ async fn configure_peer(interface: &str, peer_pub_key: &str, mut endpoint: Strin
     println!("配置队友 {} (Endpoint: {}) 成功喵！", peer_pub_key, endpoint);
 
     if let Some(m) = peer_mtu {
-        if auto_sync_mtu {
-            let probed_mtu = Some(get_auto_mtu(&probe_address, mode).await);
+        // 智能同步逻辑喵：
+        // 1. 如果开启了 auto_sync_mtu (MTU=0)，则必须同步喵。
+        // 2. 如果没开启，但对端建议的值比我当前的 MTU 小，为了稳定性，我也应该“偷偷”同步一下喵（向下兼容逻辑）。
+        let current_mtu = get_interface_mtu(interface).unwrap_or(1420);
+        let should_sync = auto_sync_mtu || m < current_mtu;
+        
+        if should_sync {
+            let probed_mtu = if auto_sync_mtu { Some(get_auto_mtu(&probe_address, mode).await) } else { None };
             let _ = sync_mtu_if_needed(interface, m, probed_mtu).await;
         }
     }
@@ -1789,15 +1812,24 @@ async fn sync_mtu_if_needed(interface: &str, peer_mtu: u16, probed_mtu: Option<u
     
     let target_mtu = if let Some(p) = probed_mtu {
         // 全自动协商模式喵：取我方探测值和对方建议值的最小值
-        u16::min(p, peer_mtu)
+        let converged = u16::min(p, peer_mtu);
+        println!("喵！MTU 协商判定: [我方探测 {}] vs [对方建议 {}] -> 计算收敛值为 {}。", p, peer_mtu, converged);
+        converged
     } else {
         // 半自动模式喵：直接同步对方的值
         peer_mtu
     };
 
-    if current_mtu != target_mtu && target_mtu >= 1280 {
-        println!("接口 {} MTU 协商收敛中：[我方探测 {}] vs [对方建议 {}] -> 最终选用 {}喵！", interface, probed_mtu.unwrap_or(0), peer_mtu, target_mtu);
+    if target_mtu < 1280 {
+        // TCP/IP 最小 MTU 是 1280 喵，不能再低了
+        return Ok(());
+    }
+
+    if current_mtu != target_mtu {
+        println!("ฅ^•ﻌ•^ฅ 接口 {} 执行 MTU 魔法校准：{} -> {} (协商自队友建议)", interface, current_mtu, target_mtu);
         let _ = run_cmd(&format!("ip link set mtu {} dev {}", target_mtu, interface));
+    } else {
+        // println!("喵！接口 {} 的 MTU 已经是 {} 了，无需改动。", interface, current_mtu);
     }
     Ok(())
 }
