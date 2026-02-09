@@ -295,6 +295,9 @@ struct NekoConfig {
     /// 是否在全局 Loopback 接口监听 SOCKS5 (默认 false) 喵
     #[serde(default)]
     pub socks5_listen_loopback: bool,
+    /// 显式指定的 SOCKS5 绑定 IP（开启同端口多 IP 监听的关键喵！）
+    #[serde(default)]
+    pub socks5_bind_addr: Option<String>,
 }
 
 fn default_true() -> bool { true }
@@ -943,20 +946,30 @@ async fn run_socks5_server(state: NekoState, token: CancellationToken, local_ip:
     let global = &state.global_config;
     let mut listen_addrs = Vec::new();
 
-    // 1. 本地监听
-    if config.socks5_listen_local {
-        listen_addrs.push(SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)), config.socks5_port.unwrap()));
-    }
+    // 1. 检查是否有精准绑定地址喵 (支持逗号分隔多个 IP)
+    if let Some(ref bind_addr_str) = config.socks5_bind_addr {
+        let addr_list: Vec<&str> = bind_addr_str.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        for ip_str in addr_list {
+            if let Ok(ip) = ip_str.parse::<IpAddr>() {
+                listen_addrs.push(SocketAddr::new(ip, config.socks5_port.unwrap()));
+            } else {
+                eprintln!("警告：接口 {} 的 socks5_bind_addr 部分 '{}' 解析失败喵。", config.interface, ip_str);
+            }
+        }
+    } else {
+        // 2. 默认兼容逻辑：本地监听 + 环回池监听
+        if config.socks5_listen_local {
+            listen_addrs.push(SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)), config.socks5_port.unwrap()));
+        }
 
-    // 2. Loopback 接口监听
-    if config.socks5_listen_loopback {
-        if let Some(ref loopback_addrs) = global.loopback_address {
-            let addr_list: Vec<&str> = loopback_addrs.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
-            for addr_str in addr_list {
-                // 移除掩码部分喵 (例如 172.16.0.1/24 -> 172.16.0.1)
-                let ip_str = addr_str.split('/').next().unwrap();
-                if let Ok(ip) = ip_str.parse::<IpAddr>() {
-                    listen_addrs.push(SocketAddr::new(ip, config.socks5_port.unwrap()));
+        if config.socks5_listen_loopback {
+            if let Some(ref loopback_addrs) = global.loopback_address {
+                let addr_list: Vec<&str> = loopback_addrs.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+                for addr_str in addr_list {
+                    let ip_str = addr_str.split('/').next().unwrap();
+                    if let Ok(ip) = ip_str.parse::<IpAddr>() {
+                        listen_addrs.push(SocketAddr::new(ip, config.socks5_port.unwrap()));
+                    }
                 }
             }
         }
@@ -971,10 +984,10 @@ async fn run_socks5_server(state: NekoState, token: CancellationToken, local_ip:
     for addr in listen_addrs {
         match TcpListener::bind(addr).await {
             Ok(l) => {
-                println!("ฅ^•ﻌ•^ctl SOCKS5 代理监听中：{} -> {} (本地绑定: {:?}) 喵。", addr, config.interface, local_ip);
+                println!("ฅ^•ﻌ•^ctl SOCKS5 代理监听中：{} -> {} (出口绑定: {:?}) 喵。", addr, config.interface, local_ip);
                 listeners.push(l);
             },
-            Err(e) => eprintln!("警告：无法绑定 SOCKS5 监听地址 {}: {:?} 喵。", addr, e),
+            Err(e) => eprintln!("警告：连接网口 {} 失败，无法绑定 SOCKS5 监听地址 {}: {:?} 喵。", config.interface, addr, e),
         }
     }
 
@@ -990,7 +1003,6 @@ async fn run_socks5_server(state: NekoState, token: CancellationToken, local_ip:
 
         tokio::select! {
             _ = token.cancelled() => break,
-            // 使用 select_all 监听多个 listener 喵
             (res, _index, _remaining) = futures::future::select_all(futures) => {
                 if let Ok((mut client_stream, peer_addr)) = res {
                     let iface = config.interface.clone();
