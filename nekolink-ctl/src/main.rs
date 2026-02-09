@@ -48,11 +48,19 @@ struct PeerConfig {
 struct GlobalConfig {
     #[serde(default = "default_signal_port")]
     pub signal_port: u16,
+    /// 全局 Loopback 接口名称喵
+    pub loopback_interface: Option<String>,
+    /// 全局 Loopback 接口地址喵
+    pub loopback_address: Option<String>,
 }
 
 impl Default for GlobalConfig {
     fn default() -> Self {
-        Self { signal_port: 12580 }
+        Self { 
+            signal_port: 12580,
+            loopback_interface: None,
+            loopback_address: None,
+        }
     }
 }
 
@@ -192,7 +200,7 @@ async fn get_auto_mtu(endpoint: &str, mode: &str) -> u16 {
     }
 
     // 执行探测喵
-    let (host, port) = if let Ok(addr) = endpoint.parse::<SocketAddr>() {
+    let (host, _port) = if let Ok(addr) = endpoint.parse::<SocketAddr>() {
         (addr.ip().to_string(), addr.port())
     } else if endpoint.contains(':') {
         let parts: Vec<&str> = endpoint.rsplitn(2, ':').collect();
@@ -278,6 +286,12 @@ struct NekoConfig {
     /// 是否优先使用 IPv6(默认 false,优先 IPv4)喵
     #[serde(default)]
     pub prefer_ipv6: bool,
+    /// 是否在本地 127.0.0.1 监听 SOCKS5 (默认 true) 喵
+    #[serde(default = "default_true")]
+    pub socks5_listen_local: bool,
+    /// 是否在全局 Loopback 接口监听 SOCKS5 (默认 false) 喵
+    #[serde(default)]
+    pub socks5_listen_loopback: bool,
 }
 
 fn default_true() -> bool { true }
@@ -407,6 +421,11 @@ async fn main() -> Result<()> {
     let (mut current_global, initial_configs) = load_configs()?;
     println!("喵！成功加载初始配置，发现 {} 个接口喵。", initial_configs.len());
     
+    // 初始化全局 Loopback 接口喵
+    if let Err(e) = setup_loopback_interface(&current_global).await {
+        eprintln!("警告：设置全局 Loopback 接口失败喵: {:?}", e);
+    }
+
     let active_instances: Arc<tokio::sync::RwLock<HashMap<String, InstanceHandle>>> = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
     
     // 信号监听喵
@@ -523,6 +542,15 @@ async fn main() -> Result<()> {
                     let new_token = CancellationToken::new();
                     start_signaling_tasks(new_global.clone(), Arc::clone(&active_instances), new_token.clone());
                     *signaling_token.lock().unwrap() = new_token;
+                    current_global = new_global.clone();
+                }
+
+                // 检查 Loopback 配置变更喵
+                if new_global.loopback_interface != current_global.loopback_interface || new_global.loopback_address != current_global.loopback_address {
+                    println!("喵！检测到全局 Loopback 配置变更，正在重新魔法化...");
+                    if let Err(e) = setup_loopback_interface(&new_global).await {
+                        eprintln!("警告：重新设置 Loopback 接口失败喵: {:?}", e);
+                    }
                     current_global = new_global.clone();
                 }
 
@@ -836,17 +864,18 @@ async fn run_instance(state: NekoState, token: CancellationToken) -> Result<()> 
     
     // 启动 SOCKS5 代理服务喵
     let mut socks5_task: Option<(tokio::task::JoinHandle<Result<()>>, CancellationToken)> = None;
-    if let Some(s5_port) = config.socks5_port {
-        let iface = config.interface.clone();
+    if let Some(_s5_port) = config.socks5_port {
+        let _iface = config.interface.clone();
         let s5_token = CancellationToken::new();
         let s5_token_clone = s5_token.clone();
         
         // 尝试解析本地隧道 IP 用于绑定喵 (Source IP Binding)
         let local_ip = config.local_address.split('/').next().and_then(|s| s.parse::<IpAddr>().ok());
         
+        let state_clone = state.clone();
         let task = tokio::spawn(async move {
-            if let Err(e) = run_socks5_server(iface.clone(), s5_port, s5_token_clone, local_ip).await {
-                eprintln!("ฅ^•ﻌ•^ctl SOCKS5 服务 ({}) 启动失败喵: {:?}", iface, e);
+            if let Err(e) = run_socks5_server(state_clone.clone(), s5_token_clone, local_ip).await {
+                eprintln!("ฅ^•ﻌ•^ctl SOCKS5 服务 ({}) 启动失败喵: {:?}", state_clone.config.interface, e);
                 return Err(e);
             }
             Ok(())
@@ -889,20 +918,65 @@ async fn run_instance(state: NekoState, token: CancellationToken) -> Result<()> 
     Ok(())
 }
 
-async fn run_socks5_server(interface: String, port: u16, token: CancellationToken, local_ip: Option<IpAddr>) -> Result<()> {
-    let listener = TcpListener::bind(format!("127.0.0.1:{}", port)).await?;
-    println!("ฅ^•ﻌ•^ctl SOCKS5 代理已就绪：127.0.0.1:{} -> {} (本地绑定: {:?}) 喵。", port, interface, local_ip);
+async fn run_socks5_server(state: NekoState, token: CancellationToken, local_ip: Option<IpAddr>) -> Result<()> {
+    let config = &state.config;
+    let global = &state.global_config;
+    let mut listen_addrs = Vec::new();
+
+    // 1. 本地监听
+    if config.socks5_listen_local {
+        listen_addrs.push(SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)), config.socks5_port.unwrap()));
+    }
+
+    // 2. Loopback 接口监听
+    if config.socks5_listen_loopback {
+        if let Some(ref loopback_addrs) = global.loopback_address {
+            let addr_list: Vec<&str> = loopback_addrs.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+            for addr_str in addr_list {
+                // 移除掩码部分喵 (例如 172.16.0.1/24 -> 172.16.0.1)
+                let ip_str = addr_str.split('/').next().unwrap();
+                if let Ok(ip) = ip_str.parse::<IpAddr>() {
+                    listen_addrs.push(SocketAddr::new(ip, config.socks5_port.unwrap()));
+                }
+            }
+        }
+    }
+
+    if listen_addrs.is_empty() {
+        println!("警告：接口 {} 的 SOCKS5 服务未配置任何监听地址，跳过启动喵。", config.interface);
+        return Ok(());
+    }
+
+    let mut listeners = Vec::new();
+    for addr in listen_addrs {
+        match TcpListener::bind(addr).await {
+            Ok(l) => {
+                println!("ฅ^•ﻌ•^ctl SOCKS5 代理监听中：{} -> {} (本地绑定: {:?}) 喵。", addr, config.interface, local_ip);
+                listeners.push(l);
+            },
+            Err(e) => eprintln!("警告：无法绑定 SOCKS5 监听地址 {}: {:?} 喵。", addr, e),
+        }
+    }
+
+    if listeners.is_empty() {
+        return Err(anyhow::anyhow!("所有 SOCKS5 监听地址均绑定失败喵"));
+    }
 
     loop {
+        let mut futures = Vec::new();
+        for l in &listeners {
+            futures.push(l.accept());
+        }
+
         tokio::select! {
             _ = token.cancelled() => break,
-            accept_res = listener.accept() => {
-                if let Ok((mut client_stream, peer_addr)) = accept_res {
-                    let iface = interface.clone();
+            // 使用 select_all 监听多个 listener 喵
+            (res, _index, _remaining) = futures::future::select_all(futures) => {
+                if let Ok((mut client_stream, peer_addr)) = res {
+                    let iface = config.interface.clone();
                     let l_ip = local_ip;
                     tokio::spawn(async move {
                         if let Err(e) = handle_socks5(&iface, &mut client_stream, l_ip).await {
-                             // 静默处理普通连接断开，仅在 debug 时输出喵
                              tracing::debug!("SOCKS5 处理异常 (来自 {}): {:?} 喵", peer_addr, e);
                         }
                     });
@@ -910,7 +984,7 @@ async fn run_socks5_server(interface: String, port: u16, token: CancellationToke
             }
         }
     }
-    println!("ฅ^•ﻌ•^ctl SOCKS5 代理 ({}) 已关闭喵。", interface);
+    println!("ฅ^•ﻌ•^ctl SOCKS5 代理 ({}) 已关闭喵。", config.interface);
     Ok(())
 }
 
@@ -1862,6 +1936,35 @@ fn run_cmd(cmd: &str) -> Result<()> {
     let status = Command::new("sh").arg("-c").arg(cmd).status()?;
     if !status.success() {
         return Err(anyhow::anyhow!("命令失败: {}", cmd));
+    }
+    Ok(())
+}
+
+async fn setup_loopback_interface(global_config: &GlobalConfig) -> Result<()> {
+    if let Some(ref iface) = global_config.loopback_interface {
+        println!("ฅ^•ﻌ•^ctl 正在设置全局 Loopback 接口 {} 喵...", iface);
+        
+        // 如果接口不存在则创建 (dummy 类型)
+        let check_exists = Command::new("ip").arg("link").arg("show").arg(iface).status();
+        if check_exists.is_err() || !check_exists.unwrap().success() {
+            println!("正在创建 dummy 接口 {} 喵...", iface);
+            run_cmd(&format!("ip link add {} type dummy", iface))?;
+        }
+        
+        // 设置为 up
+        run_cmd(&format!("ip link set {} up", iface))?;
+        
+        // 配置地址
+        if let Some(ref addresses) = global_config.loopback_address {
+            let addr_list: Vec<&str> = addresses.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+            for addr in addr_list {
+                println!("正在配置地址 {} 到 {} 喵...", addr, iface);
+                // 尝试先清理旧地址，忽略错误
+                let _ = run_cmd(&format!("ip addr del {} dev {} 2>/dev/null", addr, iface));
+                run_cmd(&format!("ip addr add {} dev {}", addr, iface))?;
+            }
+        }
+        println!("ฅ^•ﻌ•^ctl Loopback 接口 {} 设置完成喵！", iface);
     }
     Ok(())
 }

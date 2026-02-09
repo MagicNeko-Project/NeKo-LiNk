@@ -50,12 +50,13 @@ function show_advanced_menu() {
     echo -e "\n${PINK}--- 高级设置探索偏殿 ---${NC}"
     echo -e "${CYAN}请选择高级魔法：${NC}"
     echo "1. 设置全局信令端口 (Global Signal Port)"
-    echo "2. 将所有隧道修改为 MTU 自动协商 (MTU Auto-Negotiation)"
-    echo "3. 导入 wg-quick 配置文件 (WireGuard 兼容模式)"
-    echo "4. 一键注入 SOCKS5 极速神力 (Auto-Optimize Kernel)"
-    echo "5. Mullvad TCP 组件诊断 (Diagnose tcp2udp/udp2tcp)"
-    echo "6. 返回主菜单"
-    read -p "请输入数字 [1-6]: " adv_choice
+    echo "2. 设置全局 Loopback 接口 (Loopback Interface)"
+    echo "3. 将所有隧道修改为 MTU 自动协商 (MTU Auto-Negotiation)"
+    echo "4. 导入 wg-quick 配置文件 (WireGuard 兼容模式)"
+    echo "5. 一键注入 SOCKS5 极速神力 (Auto-Optimize Kernel)"
+    echo "6. Mullvad TCP 组件诊断 (Diagnose tcp2udp/udp2tcp)"
+    echo "7. 返回主菜单"
+    read -p "请输入数字 [1-7]: " adv_choice
 }
 
 function import_wgquick_config() {
@@ -277,9 +278,10 @@ function edit_config() {
     curr_ka=$(jq -r '.persistent_keepalive // "null"' "$selected_cfg")
     curr_mtu=$(jq -r '.mtu // "null"' "$selected_cfg")
     curr_mss=$(jq -r '.clamp_mss' "$selected_cfg")
-    curr_mss=$(jq -r '.clamp_mss' "$selected_cfg")
     curr_ep=$(jq -r '.peers[0].endpoint // empty' "$selected_cfg")
     curr_s5=$(jq -r '.socks5_port // "null"' "$selected_cfg")
+    curr_s5_local=$(jq -r '.socks5_listen_local // true' "$selected_cfg")
+    curr_s5_loop=$(jq -r '.socks5_listen_loopback // false' "$selected_cfg")
 
     # 交互式修改
     read -p "传输模式 (当前: $curr_mode, [1] ip, [2] udp, [3] Mullvad TCP 模式, 直接回车保持不变): " m_choice
@@ -346,6 +348,25 @@ function edit_config() {
         *) socks5_port="$s5_c" ;;
     esac
 
+    if [ "$socks5_port" != "null" ]; then
+        read -p "是否在 127.0.0.1 监听 SOCKS5? (当前: $curr_s5_local, [y/n], 默认 y): " s5_l_c
+        case "$s5_l_c" in
+            y) s5_local="true" ;;
+            n) s5_local="false" ;;
+            *) s5_local="$curr_s5_local" ;;
+        esac
+
+        read -p "是否在全局 Loopback 接口监听 SOCKS5? (当前: $curr_s5_loop, [y/n], 默认 n): " s5_loop_c
+        case "$s5_loop_c" in
+            y) s5_loop="true" ;;
+            n) s5_loop="false" ;;
+            *) s5_loop="$curr_s5_loop" ;;
+        esac
+    else
+        s5_local="true"
+        s5_loop="false"
+    fi
+
     # signal_port 统一迁移到 global.json 喵
 
     # 使用 jq 构建新 JSON 并覆盖
@@ -362,6 +383,8 @@ function edit_config() {
         --arg addr "$local_addr" \
         --arg psk "$psk" \
         --argjson socks5_port "$socks5_port" \
+        --argjson s5_local "$s5_local" \
+        --argjson s5_loop "$s5_loop" \
         --arg ep "$endpoint" \
         '{
             interface: $iface,
@@ -375,6 +398,8 @@ function edit_config() {
             local_address: $addr,
             psk: $psk,
             socks5_port: $socks5_port,
+            socks5_listen_local: $s5_local,
+            socks5_listen_loopback: $s5_loop,
             peers: (if $ep != "" then [{endpoint: $ep}] else [] end)
         }' > "$tmp_cfg"
     
@@ -518,8 +543,14 @@ function create_config() {
     read -p "是否开启本地 SOCKS5 服务端? (输入端口号如 1080, 直接回车则不开启): " s5_port
     if [ -z "$s5_port" ]; then
         socks5_port="null"
+        s5_local="true"
+        s5_loop="false"
     else
         socks5_port="$s5_port"
+        read -p "是否在 127.0.0.1 监听 SOCKS5? (y/n, 默认 y): " s5_l_c
+        [ "$s5_l_c" == "n" ] && s5_local="false" || s5_local="true"
+        read -p "是否在全局 Loopback 接口监听 SOCKS5? (y/n, 默认 n): " s5_loop_c
+        [ "$s5_loop_c" == "y" ] && s5_loop="true" || s5_loop="false"
     fi
 
     read -p "是否优先使用 IPv6 解析? (y/n, 默认 n): " prefer_ipv6_choice
@@ -557,6 +588,8 @@ function create_config() {
   "local_address": "$local_addr",
   "psk": "$psk",
   "socks5_port": $socks5_port,
+  "socks5_listen_local": $s5_local,
+  "socks5_listen_loopback": $s5_loop,
   "prefer_ipv6": $prefer_ipv6,
   "peers": [
 EOF
@@ -739,9 +772,46 @@ function set_global_signal_port() {
     fi
     
     # 写入 global.json
-    echo "{\"signal_port\": $new_port}" > "$global_json"
+    tmp_g=$(mktemp)
+    jq --argjson port "$new_port" '.signal_port = $port' "$global_json" > "$tmp_g"
+    mv "$tmp_g" "$global_json"
     echo -e "${PINK}全局信令端口已更新为: $new_port 喵！${NC}"
     echo -e "${CYAN}提示：修改后请重启 nekolink 服务以生效喵。${NC}"
+}
+
+function set_global_loopback() {
+    echo -e "\n${PINK}--- 全局 Loopback 接口设置魔法 ---${NC}"
+    global_json="$CONFIG_DIR/global.json"
+    
+    # 确保 global.json 存在喵
+    if [ ! -f "$global_json" ]; then echo '{"signal_port": 12580}' > "$global_json"; fi
+    
+    curr_if=$(jq -r '.loopback_interface // "null"' "$global_json")
+    curr_addr=$(jq -r '.loopback_address // "null"' "$global_json")
+    
+    echo -e "${CYAN}当前 Loopback 接口: $curr_if${NC}"
+    echo -e "${CYAN}当前 Loopback 地址: $curr_addr${NC}"
+    
+    read -p "请输入 Loopback 接口名称 (例如 nekolo0, 输入 n 清除, 直接回车保持不变): " new_if
+    case "$new_if" in
+        n) loop_if="null" ;;
+        "") loop_if="$curr_if" ;;
+        *) loop_if="\"$new_if\"" ;;
+    esac
+    
+    read -p "请输入 Loopback 地址 (例如 172.16.0.1/24, 多地址用逗号分隔, 输入 n 清除, 直接回车保持不变): " new_addr
+    case "$new_addr" in
+        n) loop_addr="null" ;;
+        "") loop_addr="$curr_addr" ;;
+        *) loop_addr="\"$new_addr\"" ;;
+    esac
+    
+    tmp_g=$(mktemp)
+    jq --argjson lif $loop_if --argjson laddr $loop_addr '.loopback_interface = $lif | .loopback_address = $laddr' "$global_json" > "$tmp_g"
+    mv "$tmp_g" "$global_json"
+    
+    echo -e "${PINK}全局 Loopback 配置已更新喵！${NC}"
+    echo -e "${CYAN}提示：修改后需要重启 nekolink 或执行热重载喵。${NC}"
 }
 
 function auto_optimize_kernel() {
@@ -895,19 +965,24 @@ while true; do
         6) manage_keys ;;
         7) check_and_fix_configs ;;
         8) ls -l "$CONFIG_DIR"/*.json ;;
-        9) 
+        9)
             show_advanced_menu
-            case $adv_choice in
+            case "$adv_choice" in
                 1) set_global_signal_port ;;
-                2) set_all_tunnels_auto_mtu ;;
-                3) import_wgquick_config ;;
-                4) auto_optimize_kernel ;;
-                5) diagnose_mullvad_tcp ;;
-                6) continue ;;
-                *) echo "无效选择喵！" ;;
+                2) set_global_loopback ;;
+                3) set_all_tunnels_auto_mtu ;;
+                4) import_wgquick_config ;;
+                5) auto_optimize_kernel ;;
+                6) diagnose_mullvad_tcp ;;
+                *) continue ;;
             esac
             ;;
-        10) exit 0 ;;
-        *) echo "无效选择喵！" ;;
+        10)
+            echo -e "${PINK}下次再见喵！(〃'▽'〃)${NC}"
+            exit 0
+            ;;
+        *)
+            echo -e "${RED}喵？无效的选择。${NC}"
+            ;;
     esac
 done
