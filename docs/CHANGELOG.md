@@ -7,12 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 
+## [3.3.1] - 2026-02-09
+
+### Added
+- **全局 Loopback 接口管理**：支持自定义名称、IPv4/IPv6 多地址配置喵。
+- **设备 ID 支持**：设备标识记录于接口别名 (alias) 喵。
+- **SOCKS5 双独立开关控制**：支持分别控制本地 (127.0.0.1) 和环回接口的监听喵。
+- **信令监听端口智能绑定**：仅作为客户端时使用随机端口，避免端口冲突喵。
+- **交互式脚本全面适配**：`nekolink.sh` 已适配新功能与角色逻辑喵。
+
+---
+
 ## [3.3.0] - 2026-02-09
 
 ### Added
 - **全局 Loopback 虚拟网卡支持**：引入由 `GlobalConfig` 统一管理的全局 dummy 接口。支持在 `global.json` 中定义接口名与多 IPv4/IPv6 地址（如针对 Docker 内部共享场景）喵。
 - **SOCKS5 多地址监听控制**：每个接口现在可独立配置监听范围。新增 `socks5_listen_local` 和 `socks5_listen_loopback` 开关，支持在 127.0.0.1 和全局 Loopback 接口上灵活启停喵。
-- **配置助手 (nekolink.sh) 进化**：高级菜单新增“设置全局 Loopback 接口”功能，配置创建/修改流程已适配新的 SOCKS5 监听逻辑喵。
+- **配置助手 (nekolink.sh) 进化**：高级菜单新增"设置全局 Loopback 接口"功能，配置创建/修改流程已适配新的 SOCKS5 监听逻辑喵。
+
+---
 
 ## [3.2.1] - 2026-02-09
 

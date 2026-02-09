@@ -114,10 +114,12 @@ sudo systemctl enable/disable nekolink
 | `local_address` | 隧道内网 IP。 | 例如 `10.0.0.1/24` |
 | `psk` | 用于自动交换公钥的预共享密钥（必须两端一致）。这是魔法的源泉喵！ | 两端必须严格一致喵！ |
 | `peers` | 对端信息。只需填入对公网端点，猫娘会自动协商和启动侧车（如有）喵！ | 例如 `{"endpoint": "1.2.3.4"}` |
-| `socks5_port` | **本地 SOCKS5 监听端口**。开启后将在 `127.0.0.1` 启动代理服务，强制本地访问，安全满分喵！ | 例如 `1080` |
-| `persistent_keepalive` | **Keepalive 持续活动魔法间隔** (单位：秒)。开启后 WireGuard 会定期发送极小的心跳包以维持穿透与连接状态喵。配合智能信令停机使用效果更佳喵！ | 推荐设为 `25` |
-| `mtu` | **隧道接口 MTU**。如果未指定，默认会自动设为 `1420` 喵。 | 推荐 `1420` (标准物理层 1500 - 80) |
-| `signal_port` | **加密信令端口** (仅用于 `udp` 模式，默认为 5678)。在 `ip/tcp` 模式下，这个选项会被猫娘温柔地完全忽略喵！ | `ip/tcp` 模式下完全无需 UDP 端口喵 |
+| `socks5_port` | **本地 SOCKS5 监听端口**。开启后提供安全代理服务喵。 | 例如 `1080` |
+| `socks5_listen_local` | 是否在 `127.0.0.1` 监听 (默认 `true`)。 | 建议保持 `true` 喵 |
+| `socks5_listen_loopback` | 是否在**全局环回接口**的 IP 上监听 (默认 `false`)。 | 用于容器/局域网共享喵 |
+| `persistent_keepalive` | **Keepalive 持续活动魔法间隔** (单位：秒)。保持穿透与连接稳如磐石。 | 推荐设为 `25` |
+| `mtu` | **隧道接口 MTU**。设为 `0` 则启用自适应探测喵。 | 推荐 `1420` 或 `0` 喵 |
+| `signal_port` | **加密信令端口** (仅服务端需固定)。客户端模式下会自动使用随机端口。 | 默认 `12580` 喵 |
 
 ---
 
@@ -125,6 +127,16 @@ sudo systemctl enable/disable nekolink
 
 1. **防火墙配置**：请务必在机器的防护墙中同时开放你选定的 `ip_protocol` 号以及 `signal_port` (UDP 端口) 喵。
 2. **运行权限**：接口操作需要较高权限，建议使用 `sudo` 运行管理工具喵。
+
+---
+
+## 🧦 SOCKS5 代理魔法 (Advanced Proxy)
+
+NekoLink 内置了高性能 SOCKS5 服务端，配合 **3.3.1** 新增的环回接口管理，功能极其强大喵：
+
+- **快速使用**: 在配置中加入 `"socks5_port": 1080` 后，本地即可通过 `127.0.0.1:1080` 上网喵。
+- **内部共享与容器支持**: 开启 **全局 Loopback 接口** 后，你可以设置 `"socks5_listen_loopback": true`，让容器或虚拟机直接通过环回 IP 使用代理喵。
+- **双向独立开关**: 支持独立控制在 `127.0.0.1` 和环回接口 IP 上启停监听，安全满分喵。
 
 ---
 
@@ -153,8 +165,8 @@ sudo tcpdump -i eth0 proto 141 -n -v
 - **基于原项目修改**：本项目是基于官方 [Boringtun](https://github.com/cloudflare/boringtun) (by Cloudflare) 深度定制与二次开发的喵。感谢原作者们的优秀工作！
 - **开源协议**：本项目沿用 [3-Clause BSD License](./LICENSE.md)。
 - [架构方案](docs/ARCHITECTURE.md)
+- [设计分析与作用详解](docs/DESIGN_ANALYSIS_CN.md) ฅ^•ﻌ•^ฅ
 - [自动化发布指南](docs/CI_CD_GUIDE.md) (GitHub Actions)
-- [SOCKS5 使用指南](docs/SOCKS5_GUIDE_CN.md)
 - **商标声明**：WireGuard® 是 Jason A. Donenfeld 的注册商标。NekoLink 与其无官方合作关系。
 
 ---

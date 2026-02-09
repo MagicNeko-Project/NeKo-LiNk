@@ -1,0 +1,6 @@
+{
+  "signal_port": 12580,
+  "loopback_interface": "nekolo0",
+  "loopback_address": "172.16.0.1/24, fd00::1/64",
+  "device_id": "Neko-Primary-Node"
+}

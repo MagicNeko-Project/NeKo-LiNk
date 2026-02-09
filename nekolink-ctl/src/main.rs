@@ -52,6 +52,8 @@ struct GlobalConfig {
     pub loopback_interface: Option<String>,
     /// 全局 Loopback 接口地址喵
     pub loopback_address: Option<String>,
+    /// 设备唯一标识 ID 喵
+    pub device_id: Option<String>,
 }
 
 impl Default for GlobalConfig {
@@ -60,6 +62,7 @@ impl Default for GlobalConfig {
             signal_port: 12580,
             loopback_interface: None,
             loopback_address: None,
+            device_id: None,
         }
     }
 }
@@ -437,8 +440,25 @@ async fn main() -> Result<()> {
 
     // 内部函数：启动信令管理器喵
     let start_signaling_tasks = |global: GlobalConfig, instances: Arc<tokio::sync::RwLock<HashMap<String, InstanceHandle>>>, token: CancellationToken| {
-        println!("ฅ^•ﻌ•^ฅ 全局信令中枢计划启用端口：{}", global.signal_port);
         tokio::spawn(async move {
+            let mut port_to_use = global.signal_port;
+            
+            // 检查是否需要固定监听端口喵 (即是否存在服务端模式的接口)
+            let has_server = {
+                let lock = instances.read().await;
+                lock.values().any(|h| {
+                    let config = &h.state.config;
+                    config.peers.is_empty() || config.peers.iter().all(|p| p.endpoint.is_empty())
+                })
+            };
+
+            if !has_server {
+                println!("ฅ^•ﻌ•^ฅ 检测到当前仅作为客户端运行，信令监听将使用随机端口喵。");
+                port_to_use = 0;
+            } else {
+                println!("ฅ^•ﻌ•^ฅ 全局信令中枢计划启用端口：{}", port_to_use);
+            }
+
             tokio::select! {
                 _ = token.cancelled() => {
                     println!("ฅ^•ﻌ•^ฅ 全局信令中枢：正在因重载而停止端口 {} 的管线喵。", global.signal_port);
@@ -446,12 +466,12 @@ async fn main() -> Result<()> {
                 _ = async {
                     let i1 = Arc::clone(&instances);
                     let t1 = token.clone();
-                    tokio::spawn(async move { if let Err(e) = run_global_udp_signaling_dynamic(i1, global.signal_port, t1).await { eprintln!("UDP 信令管线异常退出喵: {:?}", e); } });
+                    tokio::spawn(async move { if let Err(e) = run_global_udp_signaling_dynamic(i1, port_to_use, t1).await { eprintln!("UDP 信令管线异常退出喵: {:?}", e); } });
 
                     println!("ฅ^•ﻌ•^ฅ 全局信令中枢：TCP 管线启动...");
                     let i2 = Arc::clone(&instances);
                     let t2 = token.clone();
-                    tokio::spawn(async move { if let Err(e) = run_global_tcp_signaling_dynamic(i2, global.signal_port, t2).await { eprintln!("TCP 信令管线异常退出喵: {:?}", e); } });
+                    tokio::spawn(async move { if let Err(e) = run_global_tcp_signaling_dynamic(i2, port_to_use, t2).await { eprintln!("TCP 信令管线异常退出喵: {:?}", e); } });
 
                     // 收集所有 Raw IP 使用的协议号并启动喵
                     // 注意：这里简化处理，只在信令启动时扫描一次协议号，或者可以后续动态扫描喵
@@ -965,7 +985,7 @@ async fn run_socks5_server(state: NekoState, token: CancellationToken, local_ip:
     loop {
         let mut futures = Vec::new();
         for l in &listeners {
-            futures.push(l.accept());
+            futures.push(Box::pin(l.accept()));
         }
 
         tokio::select! {
@@ -1377,6 +1397,12 @@ async fn run_global_udp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
 
 async fn run_global_tcp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<HashMap<String, InstanceHandle>>>, signal_port: u16, token: CancellationToken) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", signal_port)).await?;
+    let bound_port = listener.local_addr()?.port();
+    if signal_port == 0 {
+        println!("ฅ^•ﻌ•^ฅ TCP 信令管线就绪，已绑定到随机端口 {} 喵。", bound_port);
+    } else {
+        println!("ฅ^•ﻌ•^ฅ TCP 信令管线就绪，正在监听 {} 端口喵。", bound_port);
+    }
 
     println!("ฅ^•ﻌ•^ฅ TCP 信令管线就绪，正在监听 {} 端口喵。", signal_port);
 
@@ -1953,6 +1979,12 @@ async fn setup_loopback_interface(global_config: &GlobalConfig) -> Result<()> {
         
         // 设置为 up
         run_cmd(&format!("ip link set {} up", iface))?;
+
+        // 设置设备 ID 到接口别名喵 (alias)
+        if let Some(ref id) = global_config.device_id {
+            println!("正在将设备 ID '{}' 绑定到接口别名喵...", id);
+            run_cmd(&format!("ip link set dev {} alias \"DeviceID:{}\"", iface, id))?;
+        }
         
         // 配置地址
         if let Some(ref addresses) = global_config.loopback_address {
@@ -1961,7 +1993,9 @@ async fn setup_loopback_interface(global_config: &GlobalConfig) -> Result<()> {
                 println!("正在配置地址 {} 到 {} 喵...", addr, iface);
                 // 尝试先清理旧地址，忽略错误
                 let _ = run_cmd(&format!("ip addr del {} dev {} 2>/dev/null", addr, iface));
-                run_cmd(&format!("ip addr add {} dev {}", addr, iface))?;
+                if let Err(e) = run_cmd(&format!("ip addr add {} dev {}", addr, iface)) {
+                    eprintln!("警告：无法添加地址 {} 到 {}: {:?}", addr, iface, e);
+                }
             }
         }
         println!("ฅ^•ﻌ•^ctl Loopback 接口 {} 设置完成喵！", iface);
@@ -1969,7 +2003,24 @@ async fn setup_loopback_interface(global_config: &GlobalConfig) -> Result<()> {
     Ok(())
 }
 async fn show_status() -> Result<()> {
+    let config_dir = "/etc/neko-link";
+    let mut global_config = GlobalConfig::default();
+    let global_path = format!("{}/global.json", config_dir);
+    if let Ok(content) = fs::read_to_string(&global_path) {
+        if let Ok(conf) = serde_json::from_str::<GlobalConfig>(&content) {
+            global_config = conf;
+        }
+    }
+
     println!("ฅ^•ﻌ•^ฅ NekoLink 状态报告：\n");
+    if let Some(ref did) = global_config.device_id {
+        println!("【 全局设备 ID: {} 】喵！", did);
+    }
+    if let Some(ref lif) = global_config.loopback_interface {
+        let addr = global_config.loopback_address.as_deref().unwrap_or("未配置地址");
+        println!("【 全局 Loopback: {} ({}) 】喵！", lif, addr);
+    }
+    println!();
     let config_dir = "/etc/neko-link";
     let entries: Vec<_> = glob::glob(&format!("{}/*.json", config_dir))?.collect();
     

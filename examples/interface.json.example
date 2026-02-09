@@ -1,0 +1,14 @@
+{
+  "interface": "nekotun0",
+  "mode": "ip",
+  "ip_protocol": 141,
+  "listen_port": null,
+  "auto_route": false,
+  "local_address": "10.0.0.1/24",
+  "psk": "your-secret-key-here",
+  "socks5_port": 1080,
+  "socks5_listen_local": true,
+  "socks5_listen_loopback": true,
+  "persistent_keepalive": 25,
+  "mtu": 0
+}

@@ -49,7 +49,7 @@ function show_menu() {
 function show_advanced_menu() {
     echo -e "\n${PINK}--- 高级设置探索偏殿 ---${NC}"
     echo -e "${CYAN}请选择高级魔法：${NC}"
-    echo "1. 设置全局信令端口 (Global Signal Port)"
+    echo "1. 设置全局服务端监听端口 (Global Server Signaling Port)"
     echo "2. 设置全局 Loopback 接口 (Loopback Interface)"
     echo "3. 将所有隧道修改为 MTU 自动协商 (MTU Auto-Negotiation)"
     echo "4. 导入 wg-quick 配置文件 (WireGuard 兼容模式)"
@@ -438,16 +438,9 @@ function create_config() {
             read -p "客户端必须指定服务端 IP 喵！请重新输入: " server_ip
         done
         
-        # 读取全局信令端口作为默认值
-        global_json="$CONFIG_DIR/global.json"
-        if [ -f "$global_json" ]; then
-            default_signal_port=$(jq -r '.signal_port // 12580' "$global_json")
-        else
-            default_signal_port=12580
-        fi
-        
-        read -p "请输入服务端的信令端口 (默认 $default_signal_port): " server_signal_port
-        [ -z "$server_signal_port" ] && server_signal_port=$default_signal_port
+        # 提示用户，此时输入的端口是服务端的监听端口喵
+        read -p "请输入服务端的信令端口 (通常为 12580): " server_signal_port
+        [ -z "$server_signal_port" ] && server_signal_port=12580
         
         # 组合成 endpoint
         endpoint="${server_ip}:${server_signal_port}"
@@ -728,15 +721,24 @@ function check_and_fix_configs() {
     global_json="$CONFIG_DIR/global.json"
     if [ ! -f "$global_json" ]; then
         echo -e "${PINK}  创建缺失的 global.json ...${NC}"
-        echo '{"signal_port": 12580}' > "$global_json"
+        echo '{"signal_port": 12580, "loopback_interface": null, "loopback_address": null, "device_id": null}' > "$global_json"
     else
-        # 补全缺失，并强制移除冗余字段喵
+        # 补全缺失喵
         tmp_g=$(mktemp)
-        sig=$(jq -r '.signal_port // 12580' "$global_json")
-        echo "{\"signal_port\": $sig}" > "$tmp_g"
+        sig=$(jq '.signal_port // 12580' "$global_json")
+        lif=$(jq '.loopback_interface // null' "$global_json")
+        laddr=$(jq '.loopback_address // null' "$global_json")
+        did=$(jq '.device_id // null' "$global_json")
+        
+        jq -n \
+            --argjson sig "$sig" \
+            --argjson lif "$lif" \
+            --argjson laddr "$laddr" \
+            --argjson did "$did" \
+            '{signal_port: $sig, loopback_interface: $lif, loopback_address: $laddr, device_id: $did}' > "$tmp_g"
         
         if ! diff -q "$global_json" "$tmp_g" > /dev/null; then
-            echo -e "${PINK}  清理 global.json 中的冗余字段成功喵！${NC}"
+            echo -e "${PINK}  同步 global.json 配置成功喵！${NC}"
             mv "$tmp_g" "$global_json"
         else
             rm "$tmp_g"
@@ -747,7 +749,9 @@ function check_and_fix_configs() {
 }
 
 function set_global_signal_port() {
-    echo -e "\n${PINK}--- 全局信令端口设置魔法 ---${NC}"
+    echo -e "\n${PINK}--- 全局服务端信令监听设置 ---${NC}"
+    echo -e "${CYAN}提示：此端口仅在您的节点作为“服务端”（被动等待连接）时负责监听喵。${NC}"
+    echo -e "${CYAN}如果您仅作为客户端运行，NekoLink 将默认使用随机端口，无需配置此项喵。${NC}"
     global_json="$CONFIG_DIR/global.json"
     
     # 读取当前值
@@ -784,30 +788,44 @@ function set_global_loopback() {
     global_json="$CONFIG_DIR/global.json"
     
     # 确保 global.json 存在喵
-    if [ ! -f "$global_json" ]; then echo '{"signal_port": 12580}' > "$global_json"; fi
+    if [ ! -f "$global_json" ]; then echo '{"signal_port": 12580, "loopback_interface": null, "loopback_address": null, "device_id": null}' > "$global_json"; fi
     
     curr_if=$(jq -r '.loopback_interface // "null"' "$global_json")
     curr_addr=$(jq -r '.loopback_address // "null"' "$global_json")
+    curr_did=$(jq -r '.device_id // "null"' "$global_json")
     
     echo -e "${CYAN}当前 Loopback 接口: $curr_if${NC}"
     echo -e "${CYAN}当前 Loopback 地址: $curr_addr${NC}"
+    echo -e "${CYAN}当前 设备 ID: $curr_did${NC}"
     
     read -p "请输入 Loopback 接口名称 (例如 nekolo0, 输入 n 清除, 直接回车保持不变): " new_if
     case "$new_if" in
         n) loop_if="null" ;;
         "") loop_if="$curr_if" ;;
-        *) loop_if="\"$new_if\"" ;;
+        *) loop_if="\"$new_if\"" 
+           # 确保引用的变量正确喵
+           if [[ ! "$loop_if" =~ ^\".*\"$ && "$loop_if" != "null" ]]; then loop_if="\"$loop_if\""; fi ;;
     esac
     
-    read -p "请输入 Loopback 地址 (例如 172.16.0.1/24, 多地址用逗号分隔, 输入 n 清除, 直接回车保持不变): " new_addr
+    read -p "请输入 Loopback IP 地址 (例如 172.16.0.1/24, 多地址用逗号分隔, 输入 n 清除, 直接回车保持不变): " new_addr
     case "$new_addr" in
         n) loop_addr="null" ;;
         "") loop_addr="$curr_addr" ;;
         *) loop_addr="\"$new_addr\"" ;;
     esac
+
+    read -p "请输入设备 ID (用于接口标识, 输入 n 清除, 直接回车保持不变): " new_did
+    case "$new_did" in
+        n) loop_did="null" ;;
+        "") loop_did="$curr_did" ;;
+        *) loop_did="\"$new_did\"" ;;
+    esac
     
     tmp_g=$(mktemp)
-    jq --argjson lif $loop_if --argjson laddr $loop_addr '.loopback_interface = $lif | .loopback_address = $laddr' "$global_json" > "$tmp_g"
+    jq --argjson lif "$loop_if" \
+       --argjson laddr "$loop_addr" \
+       --argjson ldid "$loop_did" \
+       '.loopback_interface = $lif | .loopback_address = $laddr | .device_id = $ldid' "$global_json" > "$tmp_g"
     mv "$tmp_g" "$global_json"
     
     echo -e "${PINK}全局 Loopback 配置已更新喵！${NC}"
