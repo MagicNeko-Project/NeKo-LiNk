@@ -151,7 +151,7 @@ async fn resolve_via_tunnel(host: &str, interface: &str) -> Result<IpAddr> {
     let msg_bytes = msg.to_vec()?;
 
     // 绑定到隧道接口
-    let socket = connect_via_interface_udp(interface, None).await?;
+    let socket = connect_via_interface_udp(interface, &[]).await?;
     
     // 发送给 8.8.8.8:53
     let target = "8.8.8.8:53".parse::<SocketAddr>().unwrap();
@@ -892,12 +892,16 @@ async fn run_instance(state: NekoState, token: CancellationToken) -> Result<()> 
         let s5_token = CancellationToken::new();
         let s5_token_clone = s5_token.clone();
         
-        // 尝试解析本地隧道 IP 用于绑定喵 (Source IP Binding)
-        let local_ip = config.local_address.split('/').next().and_then(|s| s.parse::<IpAddr>().ok());
+        // 尝试解析本地隧道 IP 用于绑定喵 (支持 IPv4 和 IPv6)
+        let local_ips: Vec<IpAddr> = config.local_address
+            .split(',')
+            .filter_map(|s| s.split('/').next())
+            .filter_map(|s| s.parse::<IpAddr>().ok())
+            .collect();
         
         let state_clone = state.clone();
         let task = tokio::spawn(async move {
-            if let Err(e) = run_socks5_server(state_clone.clone(), s5_token_clone, local_ip).await {
+            if let Err(e) = run_socks5_server(state_clone.clone(), s5_token_clone, local_ips).await {
                 eprintln!("ฅ^•ﻌ•^ctl SOCKS5 服务 ({}) 启动失败喵: {:?}", state_clone.config.interface, e);
                 return Err(e);
             }
@@ -941,7 +945,7 @@ async fn run_instance(state: NekoState, token: CancellationToken) -> Result<()> 
     Ok(())
 }
 
-async fn run_socks5_server(state: NekoState, token: CancellationToken, local_ip: Option<IpAddr>) -> Result<()> {
+async fn run_socks5_server(state: NekoState, token: CancellationToken, local_ips: Vec<IpAddr>) -> Result<()> {
     let config = &state.config;
     let global = &state.global_config;
     let mut listen_addrs = Vec::new();
@@ -984,7 +988,7 @@ async fn run_socks5_server(state: NekoState, token: CancellationToken, local_ip:
     for addr in listen_addrs {
         match TcpListener::bind(addr).await {
             Ok(l) => {
-                println!("ฅ^•ﻌ•^ctl SOCKS5 代理监听中：{} -> {} (出口绑定: {:?}) 喵。", addr, config.interface, local_ip);
+                println!("ฅ^•ﻌ•^ctl SOCKS5 代理监听中：{} -> {} (出口绑定: {:?}) 喵。", addr, config.interface, local_ips);
                 listeners.push(l);
             },
             Err(e) => eprintln!("警告：连接网口 {} 失败，无法绑定 SOCKS5 监听地址 {}: {:?} 喵。", config.interface, addr, e),
@@ -1006,10 +1010,10 @@ async fn run_socks5_server(state: NekoState, token: CancellationToken, local_ip:
             (res, _index, _remaining) = futures::future::select_all(futures) => {
                 if let Ok((mut client_stream, peer_addr)) = res {
                     let iface = config.interface.clone();
-                    let l_ip = local_ip;
+                    let l_ips = local_ips.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_socks5(&iface, &mut client_stream, l_ip).await {
-                             tracing::debug!("SOCKS5 处理异常 (来自 {}): {:?} 喵", peer_addr, e);
+                        if let Err(e) = handle_socks5(&iface, &mut client_stream, l_ips).await {
+                             tracing::warn!("SOCKS5 处理异常 (接口 {}, 来源 {}): {:?} 喵", iface, peer_addr, e);
                         }
                     });
                 }
@@ -1020,7 +1024,7 @@ async fn run_socks5_server(state: NekoState, token: CancellationToken, local_ip:
     Ok(())
 }
 
-async fn handle_socks5(interface: &str, client: &mut TcpStream, local_ip: Option<IpAddr>) -> Result<()> {
+async fn handle_socks5(interface: &str, client: &mut TcpStream, local_ips: Vec<IpAddr>) -> Result<()> {
     let _ = client.set_nodelay(true); // 提升交互响应速度喵
     let mut buf = [0u8; 512];
     
@@ -1064,7 +1068,7 @@ async fn handle_socks5(interface: &str, client: &mut TcpStream, local_ip: Option
         };
 
         // 3. Connect to target through interface
-        let mut target_stream = match connect_via_interface(interface, &target_addr, local_ip).await {
+        let mut target_stream = match connect_via_interface(interface, &target_addr, &local_ips).await {
             Ok(s) => {
                 // SOCKS5 响应: 成功
                 client.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await?;
@@ -1073,7 +1077,7 @@ async fn handle_socks5(interface: &str, client: &mut TcpStream, local_ip: Option
             Err(_e) => {
                 // SOCKS5 响应: 失败
                 let _ = client.write_all(&[0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
-                return Err(anyhow::anyhow!("Connect failed to {}: {:?}", target_addr, _e));
+                return Err(anyhow::anyhow!("Connect failed to {} via {}: {:?} 喵", target_addr, interface, _e));
             }
         };
 
@@ -1081,7 +1085,7 @@ async fn handle_socks5(interface: &str, client: &mut TcpStream, local_ip: Option
         let _ = copy_bidirectional(client, &mut target_stream).await;
     } else if cmd == 0x03 { // UDP ASSOCIATE
         // 绑定一个用于中转的 UDP 端口喵
-        let relay_socket = UdpSocket::bind("127.0.0.1:0").await?;
+        let relay_socket = UdpSocket::bind("0.0.0.0:0").await?;
         let relay_port = relay_socket.local_addr()?.port();
         
         // 解析客户端可能提供的源地址（通常忽略，但由于协议要求需要读取喵）
@@ -1093,10 +1097,10 @@ async fn handle_socks5(interface: &str, client: &mut TcpStream, local_ip: Option
         };
 
         // 响应客户端：服务端监听的 UDP 端口喵
-        client.write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, (relay_port >> 8) as u8, (relay_port & 0xFF) as u8]).await?;
+        client.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, (relay_port >> 8) as u8, (relay_port & 0xFF) as u8]).await?;
 
         // 开启 UDP 中转逻辑喵
-        let tunnel_socket = connect_via_interface_udp(interface, local_ip).await?;
+        let tunnel_socket = connect_via_interface_udp(interface, &local_ips).await?;
         let mut client_relay_buf = [0u8; 2048];
         let mut tunnel_relay_buf = [0u8; 2048];
         let mut client_udp_addr: Option<SocketAddr> = None;
@@ -1120,7 +1124,19 @@ async fn handle_socks5(interface: &str, client: &mut TcpStream, local_ip: Option
                 Ok((n, addr)) = tunnel_socket.recv_from(&mut tunnel_relay_buf) => {
                     if let Some(c_addr) = client_udp_addr {
                         let mut resp = Vec::with_capacity(n + 32);
-                        append_socks5_udp_header(&mut resp, addr);
+                        // SOCKS5 UDP Header: RSV(2) FRAG(1) ATYP(1) ADDR(v) PORT(2)
+                        resp.extend_from_slice(&[0x00, 0x00, 0x00]);
+                        match addr {
+                            SocketAddr::V4(a) => {
+                                resp.push(0x01);
+                                resp.extend_from_slice(&a.ip().octets());
+                            }
+                            SocketAddr::V6(a) => {
+                                resp.push(0x04);
+                                resp.extend_from_slice(&a.ip().octets());
+                            }
+                        }
+                        resp.extend_from_slice(&addr.port().to_be_bytes());
                         resp.extend_from_slice(&tunnel_relay_buf[..n]);
                         let _ = relay_socket.send_to(&resp, c_addr).await;
                     }
@@ -1183,7 +1199,7 @@ fn append_socks5_udp_header(buf: &mut Vec<u8>, addr: SocketAddr) {
     }
 }
 
-async fn connect_via_interface(interface: &str, target: &str, local_ip: Option<IpAddr>) -> Result<TcpStream> {
+async fn connect_via_interface(interface: &str, target: &str, local_ips: &[IpAddr]) -> Result<TcpStream> {
     // 异步 DNS 解析喵
     let (host, port_str) = target.rsplit_once(':').ok_or(anyhow::anyhow!("不合法的目标地址: {}", target))?;
     let port: u16 = port_str.parse()?;
@@ -1202,11 +1218,11 @@ async fn connect_via_interface(interface: &str, target: &str, local_ip: Option<I
     // Bind to device (SO_BINDTODEVICE)
     socket.bind_device(Some(interface.as_bytes()))?;
     
-    // 如果指定了本地 IP，则进行显式绑定喵
-    if let Some(lip) = local_ip {
-        if (lip.is_ipv4() && addr.is_ipv4()) || (lip.is_ipv6() && addr.is_ipv6()) {
-            let bind_addr: SocketAddr = SocketAddr::new(lip, 0);
-            let _ = socket.bind(&bind_addr.into());
+    // 自动匹配最合适的本地源 IP 进行绑定喵
+    if let Some(lip) = local_ips.iter().find(|lip| lip.is_ipv4() == addr.is_ipv4()) {
+        let bind_addr: SocketAddr = SocketAddr::new(*lip, 0);
+        if let Err(e) = socket.bind(&bind_addr.into()) {
+            eprintln!("警告：接口 {} 尝试绑定源 IP {} 失败: {:?} 喵", interface, lip, e);
         }
     }
 
@@ -1227,7 +1243,7 @@ async fn connect_via_interface(interface: &str, target: &str, local_ip: Option<I
     
     // 增加连接超时机制 (10秒)，防止被墙时无限等待喵
     if time::timeout(Duration::from_secs(10), stream.writable()).await.is_err() {
-        return Err(anyhow::anyhow!("连接超时喵 (可能是被阻断或网络不通)"));
+        return Err(anyhow::anyhow!("连接 {} 超时喵 (接口: {})", target, interface));
     }
     
     if let Some(e) = stream.take_error()? {
@@ -1236,16 +1252,18 @@ async fn connect_via_interface(interface: &str, target: &str, local_ip: Option<I
     Ok(stream)
 }
 
-async fn connect_via_interface_udp(interface: &str, local_ip: Option<IpAddr>) -> Result<UdpSocket> {
-    let domain = if local_ip.map_or(true, |ip| ip.is_ipv4()) { Domain::IPV4 } else { Domain::IPV6 };
+async fn connect_via_interface_udp(interface: &str, local_ips: &[IpAddr]) -> Result<UdpSocket> {
+    // 默认使用第一个 IP 的协议族，如果没有指定 IP 则默认 IPv4
+    let is_v4 = local_ips.get(0).map_or(true, |ip| ip.is_ipv4());
+    let domain = if is_v4 { Domain::IPV4 } else { Domain::IPV6 };
     let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
     
     // Bind to device (SO_BINDTODEVICE)
     socket.bind_device(Some(interface.as_bytes()))?;
     
-    // 如果指定了本地 IP，则进行显式绑定喵
-    if let Some(lip) = local_ip {
-        let bind_addr: SocketAddr = SocketAddr::new(lip, 0);
+    // 绑定第一个匹配的源 IP 喵
+    if let Some(lip) = local_ips.iter().find(|lip| lip.is_ipv4() == is_v4) {
+        let bind_addr: SocketAddr = SocketAddr::new(*lip, 0);
         let _ = socket.bind(&bind_addr.into());
     }
 
