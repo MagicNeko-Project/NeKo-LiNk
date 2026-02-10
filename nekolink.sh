@@ -796,13 +796,6 @@ function check_and_fix_configs() {
             fi
         done
 
-        # 移除过时的 signal_port 字段喵
-        if jq -e 'has("signal_port")' "$tmp_cfg" > /dev/null; then
-            echo -e "${PINK}  发现并迁移过时的 signal_port 字段...${NC}"
-            new_tmp=$(mktemp)
-            jq 'del(.signal_port)' "$tmp_cfg" > "$new_tmp"
-            mv "$new_tmp" "$tmp_cfg"
-        fi
 
         # 特殊逻辑修复：确保 listen_port 和 ip_protocol 在某些模式下合法
         # 暂时只做基础补全，如果主人需要更复杂的逻辑可以后续追加喵
