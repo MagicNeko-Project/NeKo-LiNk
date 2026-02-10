@@ -572,10 +572,6 @@ function create_config() {
             mode="mullvad-tcp"
             echo -e "${PINK}... 使用 Mullvad TCP 模式喵！${NC}"
             proto="null"
-        3)
-            mode="mullvad-tcp"
-            echo -e "${PINK}... 使用 Mullvad TCP 模式喵！${NC}"
-            proto="null"
             dual_stack="false"
             raw_ip_protocol="null"
             read -p "请输入 TCP 监听端口 ( 默认 12581 ): " listen_port
