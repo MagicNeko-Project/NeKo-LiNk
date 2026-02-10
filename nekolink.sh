@@ -383,6 +383,11 @@ function edit_config() {
         *) mesh_mode="$curr_mesh" ;;
     esac
 
+    read -p "是否修改本地信令监听端口? (当前在 global.json 配置, [y/n], 默认 n): " change_sig
+    if [ "$change_sig" == "y" ]; then
+        set_global_signal_port
+    fi
+
     # signal_port 统一迁移到 global.json 喵
 
     # 使用 jq 构建新 JSON 并覆盖
@@ -439,30 +444,41 @@ function create_config() {
     [ -z "$iface" ] && iface="nekotun0"
 
     echo -e "\n${CYAN}请选择节点角色：${NC}"
-    echo "1. 服务端 (拥有公钥 IP，等待连接)"
-    echo "2. 客户端 (连接到服务端)"
-    read -p "请选择 [1-2]: " role_choice
+    echo "1. 服务端 (拥有公用 IP，仅等待连接)"
+    echo "2. 客户端 (连接到上游服务端)"
+    echo "3. 中转/Mesh 节点 (既连接上游，也等待下游连接，适用于 A-B-C 链式拓扑)"
+    read -p "请选择 [1-3]: " role_choice
 
     if [ "$role_choice" == "1" ]; then
         role="server"
         echo -e "${PINK}提示：作为服务端，请确保你的信令通道和数据协议号在防火墙已放行喵！${NC}"
-        server_ip=""
-        server_signal_port=""
         endpoint=""
+    elif [ "$role_choice" == "3" ]; then
+        role="relay"
+        echo -e "${PINK}--- 魔法中转站配置开始喵！ ---${NC}"
+        read -p "请输入上游服务端 (节点 A) 的 IP 地址: " server_ip
+        while [ -z "$server_ip" ]; do
+            read -p "中转节点必须指定上游 IP 喵！请重新输入: " server_ip
+        done
+        read -p "请输入上游服务端的信令端口 (通常为 12580): " server_signal_port
+        [ -z "$server_signal_port" ] && server_signal_port=12580
+        endpoint="${server_ip}:${server_signal_port}"
+        
+        echo -e "${CYAN}已配置上游目标: $endpoint${NC}"
+        echo -e "${PINK}现在请配置本地监听端口，以便下游节点 (节点 C) 连接喵！${NC}"
+        set_global_signal_port
     else
         role="client"
-        echo -e "${PINK}--- 请分别输入服务端的连接信息 ---${NC}"
+        echo -e "${PINK}--- 请输入服务端的连接信息 ---${NC}"
         
-        read -p "请输入服务端的公网 IP 地址 (例如 1.2.3.4): " server_ip
+        read -p "请输入服务端的 IP 地址 (例如 1.2.3.4): " server_ip
         while [ -z "$server_ip" ]; do
             read -p "客户端必须指定服务端 IP 喵！请重新输入: " server_ip
         done
         
-        # 提示用户，此时输入的端口是服务端的监听端口喵
         read -p "请输入服务端的信令端口 (通常为 12580): " server_signal_port
         [ -z "$server_signal_port" ] && server_signal_port=12580
         
-        # 组合成 endpoint
         endpoint="${server_ip}:${server_signal_port}"
         echo -e "${CYAN}已配置连接目标: $endpoint${NC}"
     fi
@@ -500,7 +516,9 @@ function create_config() {
     read -p "请选择 [1-2]: " tmode_choice
     [ "$tmode_choice" == "2" ] && transport_mode="tap" || transport_mode="tun"
 
-    read -p "是否开启 P2P Mesh 全网状模式? (y/n, 默认 n): " mesh_choice
+    [ "$role" == "relay" ] && def_mesh="y" || def_mesh="n"
+    read -p "是否开启 P2P Mesh 全网状模式? (y/n, 默认 $def_mesh): " mesh_choice
+    [ -z "$mesh_choice" ] && mesh_choice="$def_mesh"
     [ "$mesh_choice" == "y" ] && mesh_mode="true" || mesh_mode="false"
 
     read -p "请输入本地隧道接口 IP 地址 ( 示例 10.0.0.1/24 ): " local_addr
