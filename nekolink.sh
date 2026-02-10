@@ -402,7 +402,6 @@ function edit_config() {
 
     read -p "预共享密钥 PSK (当前: $psk, 直接回车保持不变): " p_sk
     [ -z "$p_sk" ] && psk="$psk" || psk="$p_sk"
-产出物：
 
     read -p "自动系统路由? (当前: $auto_route, [y/n], 直接回车保持不变): " ar_c
     case "$ar_c" in
@@ -417,7 +416,6 @@ function edit_config() {
         "") socks5_port="$socks5_port" ;;
         *) socks5_port="$s5_c" ;;
     esac
-产出物：
 
     if [ "$socks5_port" != "null" ]; then
         read -p "是否在 127.0.0.1 监听 SOCKS5? (当前: $s5_local, [y/n], 默认 y): " s5_l_c
