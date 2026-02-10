@@ -29,7 +29,7 @@ pub mod tun;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use libc::{iovec, mmsghdr, msghdr, recvmmsg, sendmmsg, sockaddr_storage, MSG_DONTWAIT, cmsghdr, c_void, c_int, setsockopt};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::io::{self, Write as _};
 use std::io::Write;
@@ -181,6 +181,7 @@ pub struct Device {
     peers: HashMap<x25519::PublicKey, Arc<Mutex<Peer>>>,
     peers_by_ip: AllowedIps<Arc<Mutex<Peer>>>,
     peers_by_mac: Mutex<HashMap<[u8; 6], Arc<Mutex<Peer>>>>,
+    local_macs: Mutex<HashSet<[u8; 6]>>,
     peers_by_idx: HashMap<u32, Arc<Mutex<Peer>>>,
     next_index: IndexLfsr,
 
@@ -433,6 +434,7 @@ impl Device {
             peers_by_idx: Default::default(),
             peers_by_ip: AllowedIps::new(),
             peers_by_mac: Mutex::new(HashMap::new()),
+            local_macs: Mutex::new(HashSet::new()),
             udp4: Default::default(),
             udp6: Default::default(),
             tcp_listener: Default::default(),
@@ -616,6 +618,7 @@ impl Device {
         self.peers_by_idx.clear();
         self.peers_by_ip.clear();
         self.peers_by_mac.lock().clear();
+        self.local_macs.lock().clear();
     }
 
     /// NekoLink: 将载荷封装并发送给指定的 Peers 喵
@@ -662,19 +665,28 @@ impl Device {
     fn switch_tap_frame(&self, frame: &[u8], source_peer: Option<Arc<Mutex<Peer>>>, t: &mut ThreadData) {
         if frame.len() < 14 { return; }
 
-        // 1. 学习阶段 (MAC Learning) 喵
+        let dest_mac: [u8; 6] = frame[0..6].try_into().unwrap();
         let src_mac: [u8; 6] = frame[6..12].try_into().unwrap();
+        let is_broadcast = (dest_mac[0] & 1) == 1;
+
+        // 1. 学习阶段 (MAC Learning) 喵
         if let Some(ref peer) = source_peer {
+            // 如果 MAC 曾被认为是本地的，现在漂移到了 Peer，则从本地表中移除 喵
+            self.local_macs.lock().remove(&src_mac);
             self.peers_by_mac.lock().insert(src_mac, Arc::clone(peer));
+        } else {
+            // 来自本地接口的报文：学习本地 MAC，并确保它不出现在 Peer 表中 喵
+            self.local_macs.lock().insert(src_mac);
+            self.peers_by_mac.lock().remove(&src_mac);
         }
 
         // 2. 确定目标与转发逻辑 喵
-        let dest_mac: [u8; 6] = frame[0..6].try_into().unwrap();
-        let is_broadcast = dest_mac == [0xff; 6] || (dest_mac[0] & 1) == 1;
-
         if is_broadcast {
-            // 广播包：传给本地内核 + 淹没给所有其他 Peer 喵
-            self.iface.write(frame);
+            // 广播包：如果是来自网络，则传给本地一份喵
+            if source_peer.is_some() {
+                self.iface.write(frame);
+            }
+            // 淹没给所有 *其他* Peer 喵
             let mut targets = Vec::new();
             for p in self.peers.values() {
                 if let Some(ref src) = source_peer {
@@ -684,16 +696,22 @@ impl Device {
             }
             self.send_payload_to_peers(frame, targets, t);
         } else {
-            // 单播包 喵
+            // 检查是否是发给本地的单播 喵
+            if self.local_macs.lock().contains(&dest_mac) {
+                if source_peer.is_some() {
+                    self.iface.write(frame);
+                }
+                return;
+            }
+
+            // 单播包：查询目标 Peer 喵
             let target_peer = self.peers_by_mac.lock().get(&dest_mac).cloned();
             
             match target_peer {
                 Some(peer) => {
-                    // 已知单播：根据目标 Peer 转发 喵
                     if let Some(ref src) = source_peer {
                         if Arc::ptr_eq(&peer, src) {
-                            // 目标就是来源？如果是发给本地接口的包 喵
-                            self.iface.write(frame);
+                            // 环路：不发回原始端口 喵
                             return;
                         }
                     }
@@ -701,8 +719,11 @@ impl Device {
                     self.send_payload_to_peers(frame, vec![peer], t);
                 }
                 None => {
-                    // 未知单播：本地一份 + 淹没给所有其他 Peer (类似交换机泛洪) 喵
-                    self.iface.write(frame);
+                    // 未知单播：如果是来自网络，则传给本地一份喵
+                    if source_peer.is_some() {
+                        self.iface.write(frame);
+                    }
+                    // 淹没给所有 *其他* Peer (泛洪) 喵
                     let mut targets = Vec::new();
                     for p in self.peers.values() {
                         if let Some(ref src) = source_peer {
@@ -1394,7 +1415,7 @@ impl Device {
 
                 let peers = &d.peers_by_ip;
                 for _ in 0..MAX_ITR {
-                    let pkt_len = match iface.read(&mut t.src_buf[..mtu]) {
+                    let pkt_len = match iface.read(&mut t.src_buf[..]) {
                         Ok(src) => src.len(),
                         Err(Error::IfaceRead(e)) => {
                             let ek = e.kind();
