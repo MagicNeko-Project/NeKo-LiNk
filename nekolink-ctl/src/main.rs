@@ -1882,9 +1882,8 @@ async fn run_global_raw_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                                  };
 
                                   for state in current_states {
-                                     let st_proto = state.config.ip_protocol.unwrap_or(141);
+                                     let st_proto = state.config.raw_ip_protocol.or(state.config.ip_protocol).unwrap_or(141);
                                      // 跳过协议不匹配、以及 WireGuard 兼容模式的接口喵
-                                     // 注意：即使全局 mode 不是 "ip"，只要协议对得上，就尝试解密喵 (为了支持混合 Peer)
                                      if st_proto != proto || state.config.native_wg_compat { continue; }
                                      let cipher = derive_cipher(&state.config.psk);
                                      if let Ok(decrypted) = cipher.decrypt(nonce, encrypted) {
