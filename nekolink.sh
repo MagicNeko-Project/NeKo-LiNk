@@ -23,7 +23,7 @@ if [ -f "/usr/local/share/nekolink/VERSION" ]; then
 elif [ -f "VERSION" ]; then
     VERSION=$(cat VERSION)
 else
-    VERSION="3.4.1"
+    VERSION="3.4.2"
 fi
 echo -e "${PINK}ฅ^•ﻌ•^ฅ 欢迎使用 NekoLink 交互式配置助手 v$VERSION！${NC}"
 echo -e "${CYAN}--- 全局信令通道 [12580] (一按我帮您) 已就绪 ---${NC}"
@@ -487,8 +487,8 @@ function edit_config() {
 
 function print_peers() {
     local peer_json="$1"
-    echo -e "${CYAN}当前已配置对端清单：${NC}"
-    echo "$peer_json" | jq -r 'if . == null then empty else to_entries | .[] | "\(.key + 1). [\(.value.mode // "默认")] \(.value.endpoint) (信令端口: \(.value.signal_port // "默认"))" end'
+    echo -e "${CYAN}当前已配置对端清单：${NC}" >&2
+    echo "$peer_json" | jq -r 'if . == null then empty else to_entries | .[] | "\(.key + 1). [\(.value.mode // "默认")] \(.value.endpoint) (信令端口: \(.value.signal_port // "默认"))" end' >&2
 }
 
 function add_peers_interactively() {
@@ -497,17 +497,17 @@ function add_peers_interactively() {
     [ "$peers" == "null" ] && peers="[]"
     
     while true; do
-        echo -e "\n${PINK}--- 对端 (Peer) 管理中心喵 ---${NC}"
+        echo -e "\n${PINK}--- 对端 (Peer) 管理中心喵 ---${NC}" >&2
         if [ "$peers" == "[]" ] || [ -z "$peers" ]; then
-            echo -e "${CYAN}( 目前还没有配置任何对端喵 )${NC}"
+            echo -e "${CYAN}( 目前还没有配置任何对端喵 )${NC}" >&2
         else
             print_peers "$peers"
         fi
         
-        echo -e "\n${CYAN}请选择操作：${NC}"
-        echo "1. 添加新对端 (Add)"
-        echo "2. 删除对端 (Delete)"
-        echo "3. 完成并保存 (Save & Exit)"
+        echo -e "\n${CYAN}请选择操作：${NC}" >&2
+        echo "1. 添加新对端 (Add)" >&2
+        echo "2. 删除对端 (Delete)" >&2
+        echo "3. 完成并保存 (Save & Exit)" >&2
         read -p "请选择 [1-3]: " peer_op
         
         case "$peer_op" in
@@ -536,13 +536,13 @@ function add_peers_interactively() {
                     '{endpoint: $ep, signal_port: $sport, mode: (if $mode == "null" then null else $mode end)}')
                 
                 peers=$(echo "$peers" | jq ". += [$new_peer]")
-                echo -e "${PINK}对端已成功捕获！喵呜～${NC}"
+                echo -e "${PINK}对端已成功捕获！喵呜～${NC}" >&2
                 ;;
             2)
-                if [ "$peers" == "[]" ]; then echo "没有对端可以删掉喵！"; continue; fi
+                if [ "$peers" == "[]" ]; then echo "没有对端可以删掉喵！" >&2; continue; fi
                 read -p "请输入要删除的对端编号: " p_idx
                 peers=$(echo "$peers" | jq "del(.[$((p_idx-1))])")
-                echo -e "${PINK}已成功放生对端 $p_idx 喵！${NC}"
+                echo -e "${PINK}已成功放生对端 $p_idx 喵！${NC}" >&2
                 ;;
             3)
                 break
