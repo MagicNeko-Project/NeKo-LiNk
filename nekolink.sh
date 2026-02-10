@@ -23,7 +23,7 @@ if [ -f "/usr/local/share/nekolink/VERSION" ]; then
 elif [ -f "VERSION" ]; then
     VERSION=$(cat VERSION)
 else
-    VERSION="3.4.2"
+    VERSION="3.4.3"
 fi
 echo -e "${PINK}ฅ^•ﻌ•^ฅ 欢迎使用 NekoLink 交互式配置助手 v$VERSION！${NC}"
 echo -e "${CYAN}--- 全局信令通道 [12580] (一按我帮您) 已就绪 ---${NC}"
@@ -512,18 +512,18 @@ function add_peers_interactively() {
         
         case "$peer_op" in
             1)
-                echo -e "\n${PINK}--- 添加对端信息 ---${NC}"
+                echo -e "\n${PINK}--- 添加对端信息 ---${NC}" >&2
                 read -p "请输入对端 IP 地址 (例如 1.2.3.4): " p_ip
-                if [ -z "$p_ip" ]; then echo "IP 不能为空喵！"; continue; fi
+                if [ -z "$p_ip" ]; then echo "IP 不能为空喵！" >&2; continue; fi
                 
                 read -p "请输入对端信令端口 (默认 12580): " p_sig_port
                 [ -z "$p_sig_port" ] && p_sig_port=12580
                 
-                echo -e "${CYAN}请选择该对端的传输协议：${NC}"
-                echo "1. 使用全局默认 (Global Default)"
-                echo "2. 强制使用 UDP"
-                echo "3. 强制使用 RawIP (ip)"
-                echo "4. 强制使用 TCP (mullvad-tcp)"
+                echo -e "${CYAN}请选择该对端的传输协议：${NC}" >&2
+                echo "1. 使用全局默认 (Global Default)" >&2
+                echo "2. 强制使用 UDP" >&2
+                echo "3. 强制使用 RawIP (ip)" >&2
+                echo "4. 强制使用 TCP (mullvad-tcp)" >&2
                 read -p "请选择 [1-4]: " p_mode_choice
                 p_mode="null"
                 case "$p_mode_choice" in
@@ -548,7 +548,7 @@ function add_peers_interactively() {
                 break
                 ;;
             *)
-                echo "不正确的指令喵！"
+                echo "不正确的指令喵！" >&2
                 ;;
         esac
     done
