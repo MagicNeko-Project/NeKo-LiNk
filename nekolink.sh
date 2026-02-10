@@ -285,6 +285,31 @@ function edit_config() {
     curr_mesh=$(jq -r '.mesh_mode // false' "$selected_cfg")
     curr_tmode=$(jq -r '.transport_mode // "tun"' "$selected_cfg")
 
+    # 智能角色识别喵
+    global_json="$CONFIG_DIR/global.json"
+    global_sig_port=$( [ -f "$global_json" ] && jq -r '.signal_port // empty' "$global_json" || echo "" )
+    
+    if [ -n "$curr_ep" ] && [ -n "$global_sig_port" ]; then
+        role_label="中转/Mesh 节点 (Relay)"
+    elif [ -n "$curr_ep" ]; then
+        role_label="纯客户端 (Client Only)"
+    else
+        role_label="纯服务端 (Server Only)"
+    fi
+    echo -e "${CYAN}当前节点角色识别为: ${PINK}$role_label${NC}"
+
+    if [ -n "$curr_ep" ] && [ -z "$global_sig_port" ]; then
+        read -p "想把这个客户端升级为中转节点吗喵？(允许 C -> B -> A 拓扑) [y/n, 默认 n]: " upgrade_c
+        if [ "$upgrade_c" == "y" ]; then
+            echo -e "${PINK}正在施展身份转化魔法...${NC}"
+            set_global_signal_port
+            # 重新读取
+            global_sig_port=$(jq -r '.signal_port // empty' "$global_json")
+            curr_mesh=true
+            echo -e "${CYAN}已为您预热 Mesh 转发魔法喵！(后续步骤请确认开启)${NC}"
+        fi
+    fi
+
     # 交互式修改
     read -p "传输模式 (当前: $curr_mode, [1] ip, [2] udp, [3] Mullvad TCP 模式, 直接回车保持不变): " m_choice
     case "$m_choice" in
