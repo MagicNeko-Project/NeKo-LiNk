@@ -359,6 +359,7 @@ impl Device {
         allowed_ips: &[AllowedIP],
         keepalive: Option<u16>,
         preshared_key: Option<[u8; 32]>,
+        transport_mode: Option<TransportMode>,
     ) {
         if remove {
             // Completely remove a peer
@@ -397,7 +398,8 @@ impl Device {
             }
         }
 
-        let peer = Peer::new(tunn, next_index, endpoint, allowed_ips, preshared_key, self.config.transport_mode, self.config.is_tap);
+        let mode = transport_mode.unwrap_or(self.config.transport_mode);
+        let peer = Peer::new(tunn, next_index, endpoint, allowed_ips, preshared_key, mode, self.config.is_tap);
 
         let peer = Arc::new(Mutex::new(peer));
         self.peers.insert(pub_key, Arc::clone(&peer));

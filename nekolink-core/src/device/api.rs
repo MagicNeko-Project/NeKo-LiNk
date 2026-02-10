@@ -307,6 +307,7 @@ fn api_set_peer(
     let mut keepalive = None;
     let mut public_key = pub_key;
     let mut preshared_key = None;
+    let mut transport_mode = None;
     let mut allowed_ips: Vec<AllowedIP> = vec![];
     while reader.read_line(&mut cmd).is_ok() {
         cmd.pop(); // remove newline if any
@@ -319,6 +320,7 @@ fn api_set_peer(
                 allowed_ips.as_slice(),
                 keepalive,
                 preshared_key,
+                transport_mode,
             );
             allowed_ips.clear(); //clear the vector content after update
             return 0; // Done
@@ -371,13 +373,20 @@ fn api_set_peer(
                         allowed_ips.as_slice(),
                         keepalive,
                         preshared_key,
+                        transport_mode,
                     );
-                    allowed_ips.clear(); //clear the vector content after update
+                    transport_mode = None; // Reset for next peer
                     match val.parse::<KeyBytes>() {
                         Ok(key_bytes) => public_key = key_bytes.0.into(),
                         Err(_) => return EINVAL,
                     }
                 }
+                "transport_mode" => match val {
+                    "udp" => transport_mode = Some(TransportMode::Udp),
+                    "rawip" => transport_mode = Some(TransportMode::RawIp),
+                    "tcp" => transport_mode = Some(TransportMode::Tcp),
+                    _ => return EINVAL,
+                },
                 "protocol_version" => match val.parse::<u32>() {
                     Ok(1) => {} // Only version 1 is legal
                     _ => return EINVAL,

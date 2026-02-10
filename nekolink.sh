@@ -443,51 +443,35 @@ function edit_config() {
         fi
     fi
 
-    # signal_port 统一迁移到 global.json 喵
+    # 对端管理
+    curr_peers=$(jq -c '.peers // []' "$selected_cfg")
+    echo -e "\n${PINK}--- 对端 (Peers) 管理魔法 ---${NC}"
+    read -p "是否需要管理对端列表? (y/n, 默认 n): " manage_p_choice
+    if [ "$manage_p_choice" == "y" ]; then
+        peers_json=$(add_peers_interactively "$curr_peers")
+    else
+        peers_json="$curr_peers"
+    fi
 
     # 使用 jq 构建新 JSON 并覆盖
     tmp_cfg=$(mktemp)
     jq -n \
-        --arg iface "$iface" \
-        --arg mode "$mode" \
-        --argjson proto "$proto" \
-        --argjson listen_port "$listen_port" \
-        --argjson auto_route "$auto_route" \
-        --argjson keepalive "$keepalive" \
-        --argjson mtu "$mtu" \
-        --argjson clamp_mss "$clamp_mss" \
-        --arg addr "$local_addr" \
-        --arg psk "$psk" \
-        --argjson socks5_port "$socks5_port" \
-        --argjson s5_local "$s5_local" \
-        --argjson s5_loop "$s5_loop" \
-        --arg ep "$endpoint" \
-        --argjson mesh "$mesh_mode" \
-        --arg tmode "$transport_mode" \
+        --arg iface "$iface" --arg mode "$mode" --argjson proto "$proto" \
+        --argjson listen_port "$listen_port" --argjson auto_route "$auto_route" \
+        --argjson keepalive "$keepalive" --argjson mtu "$mtu" --argjson clamp_mss "$clamp_mss" \
+        --arg addr "$local_addr" --arg psk "$psk" --argjson socks5_port "$socks5_port" \
+        --argjson s5l "$s5_local" --argjson s5loop "$s5_loop" \
         --argjson sig_port "$local_signal_port" \
-        --argjson dual_stack "$dual_stack" \
-        --argjson raw_proto "$raw_ip_protocol" \
+        --argjson mm "$mesh_mode" --arg tm "$transport_mode" \
+        --argjson ds "$dual_stack" --argjson rip "$raw_ip_protocol" \
+        --argjson peers "$peers_json" \
         '{
-            interface: $iface,
-            mode: $mode,
-            transport_mode: $tmode,
-            mesh_mode: $mesh,
-            ip_protocol: $proto,
-            listen_port: $listen_port,
-            auto_route: $auto_route,
-            persistent_keepalive: $keepalive,
-            mtu: $mtu,
-            clamp_mss: $clamp_mss,
-            local_address: $addr,
-            psk: $psk,
-            socks5_port: $socks5_port,
-            socks5_listen_local: $s5_local,
-            socks5_listen_loopback: $s5_loop,
-            socks5_listen_loopback: $s5_loop,
-            signal_port: $sig_port,
-            dual_stack: $dual_stack,
-            raw_ip_protocol: $raw_proto,
-            peers: (if $ep != "" then [{endpoint: $ep}] else [] end)
+            interface: $iface, mode: $mode, ip_protocol: $proto, listen_port: $listen_port,
+            auto_route: $auto_route, persistent_keepalive: $keepalive, mtu: $mtu,
+            clamp_mss: $clamp_mss, local_address: $addr, psk: $psk,
+            socks5_port: $socks5_port, socks5_listen_local: $s5l, socks5_listen_loopback: $s5loop,
+            signal_port: $sig_port, mesh_mode: $mm, transport_mode: $tm,
+            dual_stack: $ds, raw_ip_protocol: $rip, peers: $peers
         }' > "$tmp_cfg"
     
     mv "$tmp_cfg" "$selected_cfg"
@@ -499,53 +483,112 @@ function edit_config() {
     fi
 }
 
+function print_peers() {
+    local peer_json="$1"
+    echo -e "${CYAN}当前已配置对端清单：${NC}"
+    echo "$peer_json" | jq -r 'if . == null then empty else to_entries | .[] | "\(.key + 1). [\(.value.mode // "默认")] \(.value.endpoint) (信令端口: \(.value.signal_port // "默认"))" end'
+}
+
+function add_peers_interactively() {
+    local existing_peers="${1:-[]}"
+    local peers="$existing_peers"
+    [ "$peers" == "null" ] && peers="[]"
+    
+    while true; do
+        echo -e "\n${PINK}--- 对端 (Peer) 管理中心喵 ---${NC}"
+        if [ "$peers" == "[]" ] || [ -z "$peers" ]; then
+            echo -e "${CYAN}( 目前还没有配置任何对端喵 )${NC}"
+        else
+            print_peers "$peers"
+        fi
+        
+        echo -e "\n${CYAN}请选择操作：${NC}"
+        echo "1. 添加新对端 (Add)"
+        echo "2. 删除对端 (Delete)"
+        echo "3. 完成并保存 (Save & Exit)"
+        read -p "请选择 [1-3]: " peer_op
+        
+        case "$peer_op" in
+            1)
+                echo -e "\n${PINK}--- 添加对端信息 ---${NC}"
+                read -p "请输入对端 IP 地址 (例如 1.2.3.4): " p_ip
+                if [ -z "$p_ip" ]; then echo "IP 不能为空喵！"; continue; fi
+                
+                read -p "请输入对端信令端口 (默认 12580): " p_sig_port
+                [ -z "$p_sig_port" ] && p_sig_port=12580
+                
+                echo -e "${CYAN}请选择该对端的传输协议：${NC}"
+                echo "1. 使用全局默认 (Global Default)"
+                echo "2. 强制使用 UDP"
+                echo "3. 强制使用 RawIP (ip)"
+                echo "4. 强制使用 TCP (mullvad-tcp)"
+                read -p "请选择 [1-4]: " p_mode_choice
+                p_mode="null"
+                case "$p_mode_choice" in
+                    2) p_mode="udp" ;;
+                    3) p_mode="ip" ;;
+                    4) p_mode="mullvad-tcp" ;;
+                esac
+                
+                new_peer=$(jq -n --arg ep "$p_ip:$p_sig_port" --arg mode "$p_mode" --argjson sport "$p_sig_port" \
+                    '{endpoint: $ep, signal_port: $sport, mode: (if $mode == "null" then null else $mode end)}')
+                
+                peers=$(echo "$peers" | jq ". += [$new_peer]")
+                echo -e "${PINK}对端已成功捕获！喵呜～${NC}"
+                ;;
+            2)
+                if [ "$peers" == "[]" ]; then echo "没有对端可以删掉喵！"; continue; fi
+                read -p "请输入要删除的对端编号: " p_idx
+                peers=$(echo "$peers" | jq "del(.[$((p_idx-1))])")
+                echo -e "${PINK}已成功放生对端 $p_idx 喵！${NC}"
+                ;;
+            3)
+                break
+                ;;
+            *)
+                echo "不正确的指令喵！"
+                ;;
+        esac
+    done
+    echo "$peers"
+}
+
 function create_config() {
     echo -e "\n${PINK}--- 开始创建 NekoLink 配置 ---${NC}"
     
     read -p "请输入接口名称 ( 默认 nekotun0 ): " iface
     [ -z "$iface" ] && iface="nekotun0"
 
-    echo -e "\n${CYAN}请选择节点角色：${NC}"
+    echo -e "\n${CYAN}选择网络层级：${NC}"
+    echo "1. 三层模式 (TUN, 标准 IP 隧道, 默认)"
+    echo "2. 二层模式 (TAP, 透明桥接/交换机模式, 推荐用于 Mesh)"
+    read -p "请选择 [1-2]: " tmode_choice
+    [ "$tmode_choice" == "2" ] && transport_mode="tap" || transport_mode="tun"
+
+    echo -e "\n${CYAN}选择节点角色：${NC}"
     echo "1. 服务端 (拥有公用 IP，仅等待连接)"
     echo "2. 客户端 (连接到上游服务端)"
-    echo "3. 中转/Mesh 节点 (既连接上游，也等待下游连接，适用于 A-B-C 链式拓扑)"
+    echo "3. 中转/Mesh 节点 (既连接上游，也等待下游连接)"
     read -p "请选择 [1-3]: " role_choice
 
-    if [ "$role_choice" == "1" ]; then
-        role="server"
-        echo -e "${PINK}提示：作为服务端，请确保你的信令通道和数据协议号在防火墙已放行喵！${NC}"
-        endpoint=""
-    elif [ "$role_choice" == "3" ]; then
-        role="relay"
-        echo -e "${PINK}--- 魔法中转站配置开始喵！ ---${NC}"
-        read -p "请输入上游服务端 (节点 A) 的 IP 地址: " server_ip
-        while [ -z "$server_ip" ]; do
-            read -p "中转节点必须指定上游 IP 喵！请重新输入: " server_ip
-        done
-        read -p "请输入上游服务端的信令端口 (通常为 12580): " server_signal_port
-        [ -z "$server_signal_port" ] && server_signal_port=12580
-        endpoint="${server_ip}:${server_signal_port}"
-        
-        echo -e "${CYAN}已配置上游目标: $endpoint${NC}"
-        echo -e "${PINK}现在请配置本地监听端口，以便下游节点 (节点 C) 连接喵！${NC}"
-        set_global_signal_port
-    else
-        role="client"
-        echo -e "${PINK}--- 请输入服务端的连接信息 ---${NC}"
-        
-        read -p "请输入服务端的 IP 地址 (例如 1.2.3.4): " server_ip
-        while [ -z "$server_ip" ]; do
-            read -p "客户端必须指定服务端 IP 喵！请重新输入: " server_ip
-        done
-        
-        read -p "请输入服务端的信令端口 (通常为 12580): " server_signal_port
-        [ -z "$server_signal_port" ] && server_signal_port=12580
-        
-        endpoint="${server_ip}:${server_signal_port}"
-        echo -e "${CYAN}已配置连接目标: $endpoint${NC}"
-    fi
+    peers_json="[]"
+    case "$role_choice" in
+        1)
+            role="server"
+            echo -e "${PINK}提示：作为服务端，请确保你的信令通道和数据协议号在防火墙已放行喵！${NC}"
+            ;;
+        2|3)
+            [ "$role_choice" == "3" ] && role="relay" || role="client"
+            echo -e "${PINK}--- 配置上游对端 (Peers) ---${NC}"
+            peers_json=$(add_peers_interactively "[]")
+            if [ "$role" == "relay" ]; then
+                echo -e "${PINK}现在请配置本地监听端口，以便下游节点连接喵！${NC}"
+                set_global_signal_port
+            fi
+            ;;
+    esac
 
-    echo -e "\n${CYAN}选择数据传输模式：${NC}"
+    echo -e "\n${CYAN}选择全局默认数据传输模式：${NC}"
     echo "1. IP 协议模式 (绕过 UDP 限制，推荐)"
     echo "2. UDP 模式 (标准协议)"
     echo "3. Mullvad TCP 模式 (稳定穿透)"
@@ -557,12 +600,11 @@ function create_config() {
             [ -z "$proto" ] && proto=141
             listen_port="null"
             
-            read -p "是否同时监听 UDP 协议 (开启双栈模式，兼容性更好)? [y/n] (默认 y): " dual_c
+            read -p "是否同时监听 UDP 协议 (开启双栈模式)? [y/n] (默认 y): " dual_c
             [ -z "$dual_c" ] && dual_c="y"
             if [ "$dual_c" == "y" ]; then
                 dual_stack="true"
                 raw_ip_protocol="$proto"
-                echo -e "${PINK}已开启双栈监听模式 (UDP + RawIP $proto) 喵！${NC}"
             else
                 dual_stack="false"
                 raw_ip_protocol="null"
@@ -570,7 +612,6 @@ function create_config() {
             ;;
         3)
             mode="mullvad-tcp"
-            echo -e "${PINK}... 使用 Mullvad TCP 模式喵！${NC}"
             proto="null"
             dual_stack="false"
             raw_ip_protocol="null"
@@ -587,168 +628,65 @@ function create_config() {
             ;;
     esac
 
-    echo -e "\n${CYAN}选择网络层级：${NC}"
-    echo "1. 三层模式 (TUN, 标准 IP 隧道, 默认)"
-    echo "2. 二层模式 (TAP, 透明桥接/交换机模式, 推荐用于 Mesh)"
-    read -p "请选择 [1-2]: " tmode_choice
-    [ "$tmode_choice" == "2" ] && transport_mode="tap" || transport_mode="tun"
-
     [ "$role" == "relay" ] && def_mesh="y" || def_mesh="n"
     read -p "是否开启 P2P Mesh 全网状模式? (y/n, 默认 $def_mesh): " mesh_choice
     [ -z "$mesh_choice" ] && mesh_choice="$def_mesh"
     [ "$mesh_choice" == "y" ] && mesh_mode="true" || mesh_mode="false"
 
     read -p "请输入本地隧道接口 IP 地址 ( 示例 10.0.0.1/24 ): " local_addr
-    
-    # MTU 自动探测逻辑喵
-    rec_mtu=1420
-    if [ "$role" == "client" ] && [ -n "$endpoint" ]; then
-        echo -e "${PINK}正在为您探测最佳 MTU 推荐值，请稍等喵...${NC}"
-        # 尝试调用 nekolink-ctl mtu-probe
-        probe_res=$(nekolink-ctl mtu-probe "$endpoint" "$mode" 2>/dev/null | grep "RECOMMENDED_MTU=" | cut -d'=' -f2)
-        if [ -n "$probe_res" ]; then
-            rec_mtu=$probe_res
-            echo -e "${PINK}探测成功！根据当前链路，建议 MTU 为: $rec_mtu${NC}"
-        else
-            echo -e "${CYAN}探测魔法失败了喵，可能是网络波动。将使用默认推荐值 1420。${NC}"
-        fi
-    fi
-
-    echo -e "MTU 模式选择喵："
-    echo "1. 使用探测推荐值 (固定: $rec_mtu)"
-    echo "2. 手动输入自定义值 (固定)"
-    echo "3. 开启自动同步 (Auto Sync, 推荐服务端使用)"
-    read -p "请输入选项 [1-3, 默认 1]: " mtu_mode
-
-    mtu="null"
-    case "$mtu_mode" in
-        2)
-            read -p "请输入 MTU 值 ( 建议 1280-1420 ): " mtu_val
-            [ -z "$mtu_val" ] && mtu_val=$rec_mtu
-            mtu=$mtu_val
-            ;;
-        3)
-            mtu=0
-            echo -e "${PINK}已为您开启动态 MTU 同步魔法喵！将会自动跟随客户端的 MTU。${NC}"
-            ;;
-        *)
-            mtu=$rec_mtu
-            ;;
-    esac
-
-    read -p "是否开启 TCP MSS 自动修复 ( 建议开启以防止握手成功但无法网页浏览 )？( y/n, 默认 y ): " mss_enable
-    [ -z "$mss_enable" ] && mss_enable="y"
-    clamp_mss="false"
-    if [ "$mss_enable" == "y" ]; then
-        clamp_mss="true"
-    fi
     [ -z "$local_addr" ] && local_addr="10.0.0.1/24"
 
-    read -p "请输入 Keepalive 持续活动间隔 (秒, 0 为禁用, 默认 25): " keepalive
+    mtu=0
+    read -p "MTU 配置：(1. 固定 1420, 2. 手动, 3. 自动同步, 默认 3): " mtu_m
+    case "$mtu_m" in
+        1) mtu=1420 ;;
+        2) read -p "值: " mtu ;;
+        *) mtu=0 ;;
+    esac
+
+    read -p "是否开启 MSS 自动修复? (y/n, 默认 y): " mss_c
+    [ "$mss_c" == "n" ] && clamp_mss="false" || clamp_mss="true"
+
+    read -p "Keepalive 间隔 (秒, 默认 25): " keepalive
     [ -z "$keepalive" ] && keepalive=25
 
-    read -p "请输入预共享密钥 (PSK, 用于自动交换公钥，两端必须一致): " psk
+    read -p "预共享密钥 (PSK): " psk
     [ -z "$psk" ] && psk="NekoMagic_Default_PSK"
 
-    read -p "是否自动配置系统路由？(默认 n) [y/n]: " auto_route_choice
-    if [ "$auto_route_choice" == "y" ]; then
-        auto_route="true"
-    else
-        auto_route="false"
-    fi
+    read -p "是否配置本地信令监听端口? (留空不开启): " lsig_port
+    [ -z "$lsig_port" ] && local_signal_port="null" || local_signal_port="$lsig_port"
 
-    read -p "是否开启本地 SOCKS5 服务端? (输入端口号如 1080, 直接回车则不开启): " s5_port
+    read -p "是否开启 SOCKS5 本端服务? (输入端口号, 留空不开启): " s5_port
     if [ -z "$s5_port" ]; then
-        socks5_port="null"
-        s5_local="true"
-        s5_loop="false"
+        socks5_port="null"; s5_local="true"; s5_loop="false"
     else
         socks5_port="$s5_port"
-        read -p "是否在 127.0.0.1 监听 SOCKS5? (y/n, 默认 y): " s5_l_c
+        read -p "127.0.0.1 监听? (y/n, 默认 y): " s5_l_c
         [ "$s5_l_c" == "n" ] && s5_local="false" || s5_local="true"
-        read -p "是否在全局 Loopback 接口监听 SOCKS5? (y/n, 默认 n): " s5_loop_c
+        read -p "Loopback 监听? (y/n, 默认 n): " s5_loop_c
         [ "$s5_loop_c" == "y" ] && s5_loop="true" || s5_loop="false"
     fi
 
-    read -p "是否优先使用 IPv6 解析? (y/n, 默认 n): " prefer_ipv6_choice
-    if [ "$prefer_ipv6_choice" == "y" ]; then
-        prefer_ipv6="true"
-    else
-        prefer_ipv6="false"
-    fi
-
-    # 客户端可以为peer指定独立的信令端口喵
-    peer_signal_port="null"
-    if [ "$role" == "client" ]; then
-        read -p "是否为对端指定独立信令端口? (直接回车使用全局端口, 输入端口号则使用指定端口): " psport
-        if [ -n "$psport" ]; then
-            peer_signal_port="$psport"
-        fi
-    fi
-
-    # 本地信令端口配置 (用于 Mesh 中转或多级级联喵)
-    local_signal_port="null"
-    read -p "是否开启本地信令监听 (作为服务端或中转节点)? (y/n, 默认 n): " enable_sig_listen
-    if [ "$enable_sig_listen" == "y" ]; then
-        read -p "请输入本地信令监听端口 (例如 12580, 直接回车使用全局默认): " lsig_port
-        if [ -n "$lsig_port" ]; then
-            local_signal_port="$lsig_port"
-        fi
-    fi
-
-    # signal_port 统一迁移到 global.json 喵
-
     # 构建 JSON
     json_path="$CONFIG_DIR/$iface.json"
-    
-    # 构建基础 JSON
-    cat > "$json_path" <<EOF
-{
-  "interface": "$iface",
-  "mode": "$mode",
-  "ip_protocol": $proto,
-  "listen_port": $listen_port,
-  "auto_route": $auto_route,
-  "persistent_keepalive": $keepalive,
-  "mtu": $mtu,
-  "clamp_mss": $clamp_mss,
-  "local_address": "$local_addr",
-  "psk": "$psk",
-  "socks5_port": $socks5_port,
-  "socks5_listen_local": $s5_local,
-  "socks5_listen_loopback": $s5_loop,
-  "prefer_ipv6": $prefer_ipv6,
-  "signal_port": $local_signal_port,
-  "mesh_mode": $mesh_mode,
-  "transport_mode": "$transport_mode",
-  "dual_stack": $dual_stack,
-  "raw_ip_protocol": $raw_ip_protocol,
-  "peers": [
-EOF
+    jq -n \
+        --arg iface "$iface" --arg mode "$mode" --argjson proto "$proto" \
+        --argjson lp "$listen_port" --argjson mtu "$mtu" --argjson cm "$clamp_mss" \
+        --arg la "$local_addr" --arg psk "$psk" --argjson s5p "$socks5_port" \
+        --argjson s5l "$s5_local" --argjson s5loop "$s5_loop" --argjson sp "$local_signal_port" \
+        --argjson mm "$mesh_mode" --arg tm "$transport_mode" \
+        --argjson ds "$dual_stack" --argjson rip "$raw_ip_protocol" \
+        --argjson keepalive "$keepalive" --argjson peers "$peers_json" \
+        '{
+            interface: $iface, mode: $mode, ip_protocol: $proto, listen_port: $lp,
+            mtu: $mtu, clamp_mss: $cm, local_address: $la, psk: $psk,
+            socks5_port: $s5p, socks5_listen_local: $s5l, socks5_listen_loopback: $s5loop,
+            signal_port: $sp, mesh_mode: $mm, transport_mode: $tm,
+            dual_stack: $ds, raw_ip_protocol: $rip, persistent_keepalive: $keepalive,
+            peers: $peers
+        }' > "$json_path"
 
-    if [ -n "$endpoint" ]; then
-        if [ "$peer_signal_port" != "null" ]; then
-            cat >> "$json_path" <<EOF
-    {
-      "endpoint": "$endpoint",
-      "signal_port": $peer_signal_port
-    }
-EOF
-        else
-            cat >> "$json_path" <<EOF
-    {
-      "endpoint": "$endpoint"
-    }
-EOF
-        fi
-    fi
-
-    cat >> "$json_path" <<EOF
-  ]
-}
-EOF
-
-    echo -e "${PINK}配置已成功保存到 $json_path 喵！${NC}"
+    echo -e "${PINK}配置创建成功： $json_path 喵！${NC}"
 }
 
 function manage_keys() {

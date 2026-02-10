@@ -21,7 +21,9 @@
 - **⚖️ 全网 MTU 动态协商**: 告别手动配置喵！在 Mesh 或自动 MTU 模式下，猫娘会自动探测并同步所有邻居的最低 MTU 值，确保全网通讯顺滑无阻喵。
 - **📡 多端口并发信令**: 强大的监听能力喵！控制面支持同时在多个端口或协议号上监听信令，让你在复杂的网络环境下更容易连接到小伙伴喵。
 - **🦀 全 Rust 实现**: 从核心驱动到控制平面，全部使用 Rust 编写，内存安全且性能炸裂喵。
-- **📡 自适应 MTU 探测**: 自动识别物理链路的 PMTU，并为隧道推荐最佳 MTU 值，告别手动尝试喵！
+- **� 多上游 & 独立协议支持 (Multi-UP & Per-Peer Mode)**: 灵活变身喵！现在一个接口可以同时连接多个上游节点，并且可以为**每个对端独立配置传输模式**（如对端 A 用 Raw IP，对端 B 用 UDP，对端 C 用 TCP）。再复杂的拓扑也能轻松 Hold 住喵！
+- **🛰️ 自适应 MTU 探测**: 自动识别物理链路的 PMTU，并为隧道推荐最佳 MTU 值，告别手动尝试喵！
+- **🧦 强化版 SOCKS5 联动**: 基于信令的智能联动。在 Mesh 模式下自动移除 `127.0.0.1` 监听，转而绑定至 NekoLink 接口 IP，实现更安全的网络隔离喵。
 
 ---
 
@@ -101,25 +103,21 @@ sudo systemctl enable/disable nekolink
   "auto_route": false,
   "mesh_mode": true,
   "mtu": 0,
-  "local_address": "10.0.0.1/24",
   "psk": "猫娘的秘密密钥",
   "peers": [
-    { "endpoint": "对端公网IP:5678" }
+    { "endpoint": "上游IP1:12580", "mode": "ip" },
+    { "endpoint": "上游IP2:12580", "mode": "udp" }
   ],
-  "signal_port": 5678
+  "signal_port": 12580
 }
 ```
 
 | 参数 | 说明 | 建议喵 |
 | :--- | :--- | :--- |
 | `interface` | 虚拟网卡接口名称 | 默认为 `nekotun0` |
-| `mode` | `ip` (Raw IP), `udp` (标准), `tcp` (原生 TCP) 或 `fake-tcp` (udp2raw 伪装)。这是数据传输的主要协议喵。 | 性能：`ip` > `tcp` > `fake-tcp` |
-| `ip_protocol` | 当模式为 `ip` 时指定的协议号。 | 建议 143 到 252 之间喵。 |
-| `listen_port` | 当模式为 `udp` 时指定 WireGuard 监听端口。在 `ip/tcp/fake-tcp` 模式下会被忽略喵。 | `ip/tcp` 模式下设为 `null` 喵 |
-| `auto_route` | `true` 或 `false` (默认 `false`)。当设置为 `false` 时，即使 `AllowedIPs` 是 `0.0.0.0/0`，猫娘也**不会**自动修改系统的路由表。这能防止因为路由冲突导致你的机器彻底断网，就像 `wg-quick` 的 `Table=off` 配置一样安全喵！ | 默认 `false` 以防断连 (类似 Table=off) |
-| `local_address` | 隧道内网 IP。 | 例如 `10.0.0.1/24` |
-| `psk` | 用于自动交换公钥的预共享密钥（必须两端一致）。这是魔法的源泉喵！ | 两端必须严格一致喵！ |
-| `peers` | 对端信息。只需填入对公网端点，猫娘会自动协商和启动侧车（如有）喵！ | 例如 `{"endpoint": "1.2.3.4"}` |
+| `mode` | 全局默认数据模式：`ip`, `udp`, `mullvad-tcp`。 | 性能：`ip` > `tcp` |
+| `peers` | **对端清单 (重要喵！)**。现在支持配置多个对端。 | 示例：`{"endpoint": "1.2.3.4", "mode": "ip"}` |
+| `peers[*].mode` | **对端独立传输模式**。可选 `ip`, `udp`, `rawip` 或 `mullvad-tcp`。留空则跟随全局 `mode`。 | **3.4.0 新特性喵！** |
 | `socks5_port` | **本地 SOCKS5 监听端口**。开启后提供安全代理服务喵。 | 例如 `1080` |
 | `socks5_listen_local` | 是否在 `127.0.0.1` 监听 (默认 `true`)。 | 建议保持 `true` 喵 |
 | `socks5_listen_loopback` | 是否在**全局环回接口**的 IP 上监听 (默认 `false`)。 | 用于容器/局域网共享喵 |
