@@ -510,9 +510,15 @@ async fn main() -> Result<()> {
                         for peer in &config.peers {
                             if let Some(p) = peer.signal_port { ports.insert(p); }
                         }
-                        // Raw IP 协议号
+                        // Raw IP 协议号检测喵
                         if config.mode == "ip" {
                             protos.insert(config.ip_protocol.unwrap_or(141));
+                        }
+                        // 即使全局不是 ip 模式，也要检查 Peer 是否需要 Raw IP 喵！
+                        for peer in &config.peers {
+                            if peer.mode.as_deref() == Some("ip") {
+                                protos.insert(config.ip_protocol.unwrap_or(141));
+                            }
                         }
                     }
                     
@@ -1875,10 +1881,11 @@ async fn run_global_raw_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                                      lock.values().map(|h| h.state.clone()).collect()
                                  };
 
-                                 for state in current_states {
+                                  for state in current_states {
                                      let st_proto = state.config.ip_protocol.unwrap_or(141);
-                                     // 跳过非 Raw IP 模式、协议不匹配、以及 WireGuard 兼容模式的接口喵
-                                     if state.config.mode != "ip" || st_proto != proto || state.config.native_wg_compat { continue; }
+                                     // 跳过协议不匹配、以及 WireGuard 兼容模式的接口喵
+                                     // 注意：即使全局 mode 不是 "ip"，只要协议对得上，就尝试解密喵 (为了支持混合 Peer)
+                                     if st_proto != proto || state.config.native_wg_compat { continue; }
                                      let cipher = derive_cipher(&state.config.psk);
                                      if let Ok(decrypted) = cipher.decrypt(nonce, encrypted) {
                                          let ip_addr = addr.as_socket().map(|s| s.ip()).unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));

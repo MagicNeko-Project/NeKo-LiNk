@@ -580,8 +580,8 @@ impl Device {
         }
 
         // 2. Raw IP Sockets (If configured or dual stack)
-        if self.config.ip_protocol.is_some() || self.config.dual_stack {
-            let proto_id = self.config.ip_protocol.or(self.config.raw_ip_protocol).unwrap_or(141);
+        if self.config.ip_protocol.is_some() || self.config.raw_ip_protocol.is_some() || self.config.dual_stack {
+            let proto_id = self.config.raw_ip_protocol.or(self.config.ip_protocol).unwrap_or(141);
             tracing::info!("喵！绑定 RawIP 协议: {}", proto_id);
             
             let sock_type = Type::RAW;

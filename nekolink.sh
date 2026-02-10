@@ -23,7 +23,7 @@ if [ -f "/usr/local/share/nekolink/VERSION" ]; then
 elif [ -f "VERSION" ]; then
     VERSION=$(cat VERSION)
 else
-    VERSION="3.4.6"
+    VERSION="3.4.7"
 fi
 echo -e "${PINK}ฅ^•ﻌ•^ฅ 欢迎使用 NekoLink 交互式配置助手 v$VERSION！${NC}"
 echo -e "${CYAN}--- 全局信令通道 [12580] (一按我帮您) 已就绪 ---${NC}"
@@ -373,7 +373,22 @@ function edit_config() {
     else
         read -p "WireGuard 监听端口 (当前: $curr_lport, 直接回车保持不变): " listen_port
         [ -z "$listen_port" ] && listen_port=$curr_lport
-        proto="null"
+        
+        # 即使是 UDP 模式，也允许开启辅助 RawIP 协议以支持混合 Peer 喵！
+        read -p "是否同时开启辅助 RawIP 监听? (当前: $dual_stack, [y/n], 默认 n): " dual_c
+        case "$dual_c" in
+            y) 
+                dual_stack="true"
+                read -p "请输入辅助 RawIP 协议号 (默认 141): " proto_choice
+                [ -z "$proto_choice" ] && raw_ip_protocol=141 || raw_ip_protocol="$proto_choice"
+                proto="null" # 主监听还是 UDP
+                ;;
+            *)
+                dual_stack="$dual_stack"
+                raw_ip_protocol="$raw_ip_protocol"
+                proto="null"
+                ;;
+        esac
     fi
 
     read -p "本地隧道 IP (当前: $local_addr, 直接回车保持不变): " l_addr
