@@ -55,14 +55,14 @@ impl AsRawFd for TunSocket {
 }
 
 impl TunSocket {
-    fn write(&self, buf: &[u8]) -> usize {
+    pub fn write(&self, buf: &[u8]) -> usize {
         match unsafe { write(self.fd, buf.as_ptr() as _, buf.len() as _) } {
             -1 => 0,
             n => n as usize,
         }
     }
 
-    pub fn new(name: &str, multiqueue: bool) -> Result<TunSocket, Error> {
+    pub fn new(name: &str, multiqueue: bool, is_tap: bool) -> Result<TunSocket, Error> {
         // If the provided name appears to be a FD, use that.
         let provided_fd = name.parse::<i32>();
         if let Ok(fd) = provided_fd {
@@ -77,7 +77,7 @@ impl TunSocket {
             fd => fd,
         };
         let iface_name = name.as_bytes();
-        let mut flags = IFF_TUN | IFF_NO_PI;
+        let mut flags = if is_tap { IFF_TAP } else { IFF_TUN } | IFF_NO_PI;
         if multiqueue {
             flags |= IFF_MULTI_QUEUE;
         }

@@ -282,6 +282,8 @@ function edit_config() {
     curr_s5=$(jq -r '.socks5_port // "null"' "$selected_cfg")
     curr_s5_local=$(jq -r '.socks5_listen_local // true' "$selected_cfg")
     curr_s5_loop=$(jq -r '.socks5_listen_loopback // false' "$selected_cfg")
+    curr_mesh=$(jq -r '.mesh_mode // false' "$selected_cfg")
+    curr_tmode=$(jq -r '.transport_mode // "tun"' "$selected_cfg")
 
     # 交互式修改
     read -p "传输模式 (当前: $curr_mode, [1] ip, [2] udp, [3] Mullvad TCP 模式, 直接回车保持不变): " m_choice
@@ -367,6 +369,20 @@ function edit_config() {
         s5_loop="false"
     fi
 
+    read -p "开启二层透明桥接 (TAP) 模式? (当前: $curr_tmode, [y/n], 直接回车保持不变): " tap_c
+    case "$tap_c" in
+        y) transport_mode="tap" ;;
+        n) transport_mode="tun" ;;
+        *) transport_mode="$curr_tmode" ;;
+    esac
+
+    read -p "开启 P2P Mesh 全网状模式? (当前: $curr_mesh, [y/n], 直接回车保持不变): " mesh_c
+    case "$mesh_c" in
+        y) mesh_mode="true" ;;
+        n) mesh_mode="false" ;;
+        *) mesh_mode="$curr_mesh" ;;
+    esac
+
     # signal_port 统一迁移到 global.json 喵
 
     # 使用 jq 构建新 JSON 并覆盖
@@ -386,9 +402,13 @@ function edit_config() {
         --argjson s5_local "$s5_local" \
         --argjson s5_loop "$s5_loop" \
         --arg ep "$endpoint" \
+        --argjson mesh "$mesh_mode" \
+        --arg tmode "$transport_mode" \
         '{
             interface: $iface,
             mode: $mode,
+            transport_mode: $tmode,
+            mesh_mode: $mesh,
             ip_protocol: $proto,
             listen_port: $listen_port,
             auto_route: $auto_route,
@@ -473,6 +493,15 @@ function create_config() {
             [ -z "$listen_port" ] && listen_port=0
             ;;
     esac
+
+    echo -e "\n${CYAN}选择网络层级：${NC}"
+    echo "1. 三层模式 (TUN, 标准 IP 隧道, 默认)"
+    echo "2. 二层模式 (TAP, 透明桥接/交换机模式, 推荐用于 Mesh)"
+    read -p "请选择 [1-2]: " tmode_choice
+    [ "$tmode_choice" == "2" ] && transport_mode="tap" || transport_mode="tun"
+
+    read -p "是否开启 P2P Mesh 全网状模式? (y/n, 默认 n): " mesh_choice
+    [ "$mesh_choice" == "y" ] && mesh_mode="true" || mesh_mode="false"
 
     read -p "请输入本地隧道接口 IP 地址 ( 示例 10.0.0.1/24 ): " local_addr
     
@@ -584,6 +613,8 @@ function create_config() {
   "socks5_listen_local": $s5_local,
   "socks5_listen_loopback": $s5_loop,
   "prefer_ipv6": $prefer_ipv6,
+  "mesh_mode": $mesh_mode,
+  "transport_mode": "$transport_mode",
   "peers": [
 EOF
 
@@ -674,7 +705,9 @@ function check_and_fix_configs() {
             "clamp_mss|true"
             "local_address|\"10.0.0.1/24\""
             "psk|\"NekoMagic_Default_PSK\""
-            "socks5_port|null"
+            "socks5_port|null",
+            "mesh_mode|false",
+            "transport_mode|\"tun\"",
             "peers|[]"
         )
 

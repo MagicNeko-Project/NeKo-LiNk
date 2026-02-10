@@ -25,6 +25,7 @@ pub struct Peer {
     allowed_ips: AllowedIps<()>,
     preshared_key: Option<[u8; 32]>,
     pub transport_mode: TransportMode,
+    pub is_tap: bool,
 }
 
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, Debug)]
@@ -53,13 +54,17 @@ impl FromStr for AllowedIP {
 
 impl Peer {
     pub fn new(
-        tunnel: Tunn,
+        mut tunnel: Tunn,
         index: u32,
         endpoint: Option<SocketAddr>,
         allowed_ips: &[AllowedIP],
         preshared_key: Option<[u8; 32]>,
         transport_mode: TransportMode,
+        is_tap: bool,
     ) -> Peer {
+        if is_tap {
+            tunnel.is_tap = true;
+        }
         Peer {
             tunnel,
             index,
@@ -70,6 +75,7 @@ impl Peer {
             allowed_ips: allowed_ips.iter().map(|ip| (ip, ())).collect(),
             preshared_key,
             transport_mode,
+            is_tap,
         }
     }
 

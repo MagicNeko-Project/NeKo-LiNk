@@ -160,6 +160,10 @@ fn api_get(writer: &mut BufWriter<&UnixStream>, d: &Device) -> i32 {
         writeln!(writer, "own_public_key={}", encode_hex(k.1.as_bytes()));
     }
 
+    if d.config.is_tap {
+        writeln!(writer, "protocol=tap").ok();
+    }
+
     match d.config.transport_mode {
         TransportMode::Udp => {
             writeln!(writer, "protocol=udp").ok();

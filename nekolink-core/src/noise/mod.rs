@@ -48,6 +48,7 @@ pub enum TunnResult<'a> {
     WriteToNetwork(&'a mut [u8]),
     WriteToTunnelV4(&'a mut [u8], Ipv4Addr),
     WriteToTunnelV6(&'a mut [u8], Ipv6Addr),
+    WriteToTunnelTap(&'a mut [u8]),
 }
 
 impl<'a> From<WireGuardError> for TunnResult<'a> {
@@ -71,6 +72,7 @@ pub struct Tunn {
     tx_bytes: usize,
     rx_bytes: usize,
     rate_limiter: Arc<RateLimiter>,
+    pub is_tap: bool,
 }
 
 type MessageType = u32;
@@ -213,7 +215,7 @@ impl Tunn {
             current: Default::default(),
             tx_bytes: Default::default(),
             rx_bytes: Default::default(),
-
+            is_tap: false,
             packet_queue: VecDeque::new(),
             timers: Timers::new(persistent_keepalive, rate_limiter.is_none()),
 
@@ -462,6 +464,14 @@ impl Tunn {
     /// Check if an IP packet is v4 or v6, truncate to the length indicated by the length field
     /// Returns the truncated packet and the source IP as TunnResult
     fn validate_decapsulated_packet<'a>(&mut self, packet: &'a mut [u8]) -> TunnResult<'a> {
+        if self.is_tap {
+            if packet.is_empty() {
+                return TunnResult::Done;
+            }
+            self.timer_tick(TimerName::TimeLastDataPacketReceived);
+            self.rx_bytes += packet.len();
+            return TunnResult::WriteToTunnelTap(packet);
+        }
         let (computed_len, src_ip_address) = match packet.len() {
             0 => return TunnResult::Done, // This is keepalive, and not an error
             _ if packet[0] >> 4 == 4 && packet.len() >= IPV4_MIN_HEADER_SIZE => {

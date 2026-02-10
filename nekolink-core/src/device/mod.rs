@@ -30,7 +30,9 @@ pub mod tun;
 use libc::{iovec, mmsghdr, msghdr, recvmmsg, sendmmsg, sockaddr_storage, MSG_DONTWAIT, cmsghdr, c_void, c_int, setsockopt};
 
 use std::collections::HashMap;
+use std::convert::TryInto;
 use std::io::{self, Write as _};
+use std::io::Write;
 use std::mem::MaybeUninit;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::os::unix::io::AsRawFd;
@@ -127,6 +129,7 @@ pub struct DeviceConfig {
     pub uapi_fd: i32,
     pub ip_protocol: Option<u8>,
     pub transport_mode: TransportMode,
+    pub is_tap: bool,
     #[cfg(any(target_os = "linux", target_os = "android"))]
     pub enable_udp_gro: bool,
 }
@@ -149,6 +152,7 @@ impl Default for DeviceConfig {
             uapi_fd: -1,
             ip_protocol: None,
             transport_mode: TransportMode::Udp,
+            is_tap: false,
             #[cfg(target_os = "linux")]
             enable_udp_gro: true,
             #[cfg(target_os = "android")]
@@ -176,6 +180,7 @@ pub struct Device {
 
     peers: HashMap<x25519::PublicKey, Arc<Mutex<Peer>>>,
     peers_by_ip: AllowedIps<Arc<Mutex<Peer>>>,
+    peers_by_mac: Mutex<HashMap<[u8; 6], Arc<Mutex<Peer>>>>,
     peers_by_idx: HashMap<u32, Arc<Mutex<Peer>>>,
     next_index: IndexLfsr,
 
@@ -251,8 +256,9 @@ impl DeviceHandle {
                 Arc::clone(&device.read().iface)
             } else {
                 // For for the rest create a new iface queue
+                let is_tap = device.read().config.is_tap;
                 let iface_local = Arc::new(
-                    TunSocket::new(&device.read().iface.name().unwrap(), true)
+                    TunSocket::new(&device.read().iface.name().unwrap(), true, is_tap)
                         .unwrap()
                         .set_non_blocking()
                         .unwrap(),
@@ -386,7 +392,7 @@ impl Device {
             }
         }
 
-        let peer = Peer::new(tunn, next_index, endpoint, allowed_ips, preshared_key, self.config.transport_mode);
+        let peer = Peer::new(tunn, next_index, endpoint, allowed_ips, preshared_key, self.config.transport_mode, self.config.is_tap);
 
         let peer = Arc::new(Mutex::new(peer));
         self.peers.insert(pub_key, Arc::clone(&peer));
@@ -404,7 +410,8 @@ impl Device {
         let poll = EventPoll::<Handler>::new()?;
 
         // Create a tunnel device
-        let iface = Arc::new(TunSocket::new(name, config.use_multi_queue)?.set_non_blocking()?);
+        let is_tap = config.is_tap;
+        let iface = Arc::new(TunSocket::new(name, config.use_multi_queue, is_tap)?.set_non_blocking()?);
         let mtu = iface.mtu()?;
 
         #[cfg(not(target_os = "linux"))]
@@ -425,6 +432,7 @@ impl Device {
             peers: Default::default(),
             peers_by_idx: Default::default(),
             peers_by_ip: AllowedIps::new(),
+            peers_by_mac: Mutex::new(HashMap::new()),
             udp4: Default::default(),
             udp6: Default::default(),
             tcp_listener: Default::default(),
@@ -607,6 +615,105 @@ impl Device {
         self.peers.clear();
         self.peers_by_idx.clear();
         self.peers_by_ip.clear();
+        self.peers_by_mac.lock().clear();
+    }
+
+    /// NekoLink: 将载荷封装并发送给指定的 Peers 喵
+    fn send_payload_to_peers(&self, payload: &[u8], target_peers: Vec<Arc<Mutex<Peer>>>, t: &mut ThreadData) {
+        let udp4 = self.udp4.as_ref();
+        let udp6 = self.udp6.as_ref();
+
+        for peer_arc in target_peers {
+            let mut peer = peer_arc.lock();
+            match peer.tunnel.encapsulate(payload, &mut t.dst_buf[..]) {
+                TunnResult::Done => {}
+                TunnResult::Err(e) => {
+                    tracing::error!(message = "Encapsulate error", error = ?e)
+                }
+                TunnResult::WriteToNetwork(packet) => {
+                    if self.config.transport_mode == TransportMode::Tcp {
+                        if let Some(endpoint) = peer.endpoint().addr {
+                            if let Some(stream_mutex) = self.maybe_connect_tcp(endpoint) {
+                                let mut stream = stream_mutex.lock();
+                                let len = packet.len() as u16;
+                                let _ = stream.write(&len.to_be_bytes());
+                                let _ = stream.write(packet);
+                                let _ = stream.flush();
+                            }
+                        }
+                    } else {
+                        let mut endpoint = peer.endpoint_mut();
+                        if let Some(conn) = endpoint.conn.as_mut() {
+                            let _: Result<_, _> = conn.write(packet);
+                        } else if let Some(addr) = endpoint.addr {
+                            match addr {
+                                SocketAddr::V4(_) => { if let Some(s) = udp4 { let _ = s.send_to(packet, &addr.into()); } }
+                                SocketAddr::V6(_) => { if let Some(s) = udp6 { let _ = s.send_to(packet, &addr.into()); } }
+                            }
+                        }
+                    }
+                }
+                _ => panic!("Unexpected result from encapsulate"),
+            };
+        }
+    }
+
+    /// NekoLink: 核心二层交换逻辑 (Switch Mode) 喵
+    fn switch_tap_frame(&self, frame: &[u8], source_peer: Option<Arc<Mutex<Peer>>>, t: &mut ThreadData) {
+        if frame.len() < 14 { return; }
+
+        // 1. 学习阶段 (MAC Learning) 喵
+        let src_mac: [u8; 6] = frame[6..12].try_into().unwrap();
+        if let Some(ref peer) = source_peer {
+            self.peers_by_mac.lock().insert(src_mac, Arc::clone(peer));
+        }
+
+        // 2. 确定目标与转发逻辑 喵
+        let dest_mac: [u8; 6] = frame[0..6].try_into().unwrap();
+        let is_broadcast = dest_mac == [0xff; 6] || (dest_mac[0] & 1) == 1;
+
+        if is_broadcast {
+            // 广播包：传给本地内核 + 淹没给所有其他 Peer 喵
+            self.iface.write(frame);
+            let mut targets = Vec::new();
+            for p in self.peers.values() {
+                if let Some(ref src) = source_peer {
+                    if Arc::ptr_eq(p, src) { continue; }
+                }
+                targets.push(Arc::clone(p));
+            }
+            self.send_payload_to_peers(frame, targets, t);
+        } else {
+            // 单播包 喵
+            let target_peer = self.peers_by_mac.lock().get(&dest_mac).cloned();
+            
+            match target_peer {
+                Some(peer) => {
+                    // 已知单播：根据目标 Peer 转发 喵
+                    if let Some(ref src) = source_peer {
+                        if Arc::ptr_eq(&peer, src) {
+                            // 目标就是来源？如果是发给本地接口的包 喵
+                            self.iface.write(frame);
+                            return;
+                        }
+                    }
+                    // 转发给目标 Peer 喵
+                    self.send_payload_to_peers(frame, vec![peer], t);
+                }
+                None => {
+                    // 未知单播：本地一份 + 淹没给所有其他 Peer (类似交换机泛洪) 喵
+                    self.iface.write(frame);
+                    let mut targets = Vec::new();
+                    for p in self.peers.values() {
+                        if let Some(ref src) = source_peer {
+                            if Arc::ptr_eq(p, src) { continue; }
+                        }
+                        targets.push(Arc::clone(p));
+                    }
+                    self.send_payload_to_peers(frame, targets, t);
+                }
+            }
+        }
     }
 
     fn register_notifiers(&mut self) -> Result<(), Error> {
@@ -677,7 +784,9 @@ impl Device {
                                 SocketAddr::V6(_) => { if let Some(s) = udp6 { let _ = s.send_to(packet, &endpoint_addr.into()); } }
                             };
                         }
-                        _ => panic!("Unexpected result from update_timers"),
+                        TunnResult::WriteToTunnelV4(..) | TunnResult::WriteToTunnelV6(..) | TunnResult::WriteToTunnelTap(..) => {
+                             panic!("Unexpected result from update_timers")
+                        }
                     };
                 }
                 Action::Continue
@@ -871,7 +980,7 @@ impl Device {
 
                                 let mut offset = 0;
                                 // NekoLink: 处理 IP 层头部 (Raw IP 模式) 喵
-                                if d.config.ip_protocol.is_some() && addr.is_ipv4() {
+                                if d.config.ip_protocol.is_some() && addr.ip().is_ipv4() {
                                     if this_len < 20 { continue; }
                                     let ihl = (segment_buf[0] & 0x0f) as usize * 4;
                                     if this_len < ihl { continue; }
@@ -1000,7 +1109,14 @@ impl Device {
                                         t.iface.write6(packet);
                                     }
                                 }
-                                } // match res
+                                TunnResult::WriteToTunnelTap(packet) => {
+                                    if packet.len() >= 14 {
+                                        let src_mac: [u8; 6] = packet[6..12].try_into().unwrap();
+                                        d.peers_by_mac.lock().insert(src_mac, Arc::clone(peer));
+                                    }
+                                    t.iface.write(packet);
+                                }
+                            } // match res
                                 
                                 if flush {
                                     while let TunnResult::WriteToNetwork(packet) =
@@ -1063,13 +1179,13 @@ impl Device {
                 {
                     // Safety: the `recv_from` implementation promises not to write uninitialised
                     // bytes to the buffer, so this casting is safe.
-                    let src_buf =
-                        unsafe { &mut *(&mut t.src_buf[..] as *mut [u8] as *mut [MaybeUninit<u8>]) };
-                    while let Ok((packet_len, addr)) = udp.recv_from(src_buf) {
+                    let mut iter = MAX_ITR;
+
+                    while let Ok((packet_len, addr)) = udp.recv_from(unsafe { &mut *(&mut t.src_buf[..] as *mut [u8] as *mut [MaybeUninit<u8>]) }) {
                         let mut offset = 0;
                         
                         // NekoLink: 处理 IP 层头部 (Raw IP 模式) 喵
-                        if d.config.ip_protocol.is_some() && addr.as_socket().unwrap().is_ipv4() {
+                        if d.config.ip_protocol.is_some() && addr.as_socket().map_or(false, |s| s.is_ipv4()) {
                             if packet_len < 20 { continue; }
                             let ihl = (t.src_buf[0] & 0x0f) as usize * 4;
                             if packet_len < ihl { continue; }
@@ -1150,6 +1266,12 @@ impl Device {
                                     t.iface.write6(packet);
                                 }
                             }
+                            TunnResult::WriteToTunnelTap(packet) => {
+                                let frame = packet.to_vec();
+                                drop(p);
+                                d.switch_tap_frame(&frame, Some(Arc::clone(peer)), t);
+                                p = peer.lock();
+                            }
                         };
 
                         if flush {
@@ -1186,15 +1308,11 @@ impl Device {
                 // The conn_handler handles packet received from a connected UDP socket, associated
                 // with a known peer, this saves us the hustle of finding the right peer. If another
                 // peer gets the same ip, it will be ignored until the socket does not expire.
-                let iface = &t.iface;
                 let mut iter = MAX_ITR;
 
                 // Safety: the `recv_from` implementation promises not to write uninitialised
                 // bytes to the buffer, so this casting is safe.
-                let src_buf =
-                    unsafe { &mut *(&mut t.src_buf[..] as *mut [u8] as *mut [MaybeUninit<u8>]) };
-
-                while let Ok(read_bytes) = udp.recv(src_buf) {
+                while let Ok(read_bytes) = udp.recv(unsafe { &mut *(&mut t.src_buf[..] as *mut [u8] as *mut [MaybeUninit<u8>]) }) {
                     let mut offset = 0;
                     if d.config.ip_protocol.is_some() && peer_addr.is_ipv4() {
                         if read_bytes < 20 { continue; }
@@ -1225,13 +1343,19 @@ impl Device {
                         }
                         TunnResult::WriteToTunnelV4(packet, addr) => {
                             if p.is_allowed_ip(addr) {
-                                iface.write4(packet);
+                                t.iface.write4(packet);
                             }
                         }
                         TunnResult::WriteToTunnelV6(packet, addr) => {
                             if p.is_allowed_ip(addr) {
-                                iface.write6(packet);
+                                t.iface.write6(packet);
                             }
+                        }
+                        TunnResult::WriteToTunnelTap(packet) => {
+                            let frame = packet.to_vec();
+                            drop(p);
+                            d.switch_tap_frame(&frame, Some(Arc::clone(&peer)), t);
+                            p = peer.lock();
                         }
                     };
 
@@ -1268,13 +1392,10 @@ impl Device {
                 tracing::debug!("喵！TUN 接口接收到原始报文");
                 let mtu = d.mtu.load(Ordering::Relaxed);
 
-                let udp4 = d.udp4.as_ref();
-                let udp6 = d.udp6.as_ref();
-
                 let peers = &d.peers_by_ip;
                 for _ in 0..MAX_ITR {
-                    let src = match iface.read(&mut t.src_buf[..mtu]) {
-                        Ok(src) => src,
+                    let pkt_len = match iface.read(&mut t.src_buf[..mtu]) {
+                        Ok(src) => src.len(),
                         Err(Error::IfaceRead(e)) => {
                             let ek = e.kind();
                             if ek == io::ErrorKind::Interrupted || ek == io::ErrorKind::WouldBlock {
@@ -1289,53 +1410,22 @@ impl Device {
                         }
                     };
 
-                    let dst_addr = match Tunn::dst_address(src) {
-                        Some(addr) => addr,
-                        None => continue,
-                    };
+                    let frame = t.src_buf[..pkt_len].to_vec();
+                    let mut target_peers = Vec::new();
+                    let peers = &d.peers_by_ip;
 
-                    let mut peer = match peers.find(dst_addr) {
-                        Some(peer) => peer.lock(),
-                        None => continue,
-                    };
-
-                    match peer.tunnel.encapsulate(src, &mut t.dst_buf[..]) {
-                        TunnResult::Done => {}
-                        TunnResult::Err(e) => {
-                            tracing::error!(message = "Encapsulate error", error = ?e)
+                    if d.config.is_tap {
+                        d.switch_tap_frame(&frame, None, t);
+                    } else {
+                        let dst_addr = match Tunn::dst_address(&frame) {
+                            Some(addr) => addr,
+                            None => continue,
+                        };
+                        if let Some(peer_arc) = peers.find(dst_addr) {
+                            target_peers.push(Arc::clone(peer_arc));
                         }
-                        TunnResult::WriteToNetwork(packet) => {
-                            // NekoLink TCP Mode
-                            if d.config.transport_mode == TransportMode::Tcp {
-                                if let Some(endpoint) = peer.endpoint().addr {
-                                    // 尝试连接或获取现有连接喵
-                                    if let Some(stream_mutex) = d.maybe_connect_tcp(endpoint) {
-                                         let mut stream = stream_mutex.lock();
-                                         use std::io::Write;
-                                         let len = packet.len() as u16;
-                                         let len_bytes = len.to_be_bytes();
-                                         let _ = stream.write(&len_bytes);
-                                         let _ = stream.write(packet);
-                                         let _ = stream.flush(); // 确保发出喵
-                                    }
-                                }
-                            } else {
-                                let mut endpoint = peer.endpoint_mut();
-                                if let Some(conn) = endpoint.conn.as_mut() {
-                                    // Prefer to send using the connected socket
-                                    let _: Result<_, _> = conn.write(packet);
-                                } else if let Some(addr) = endpoint.addr {
-                                    match addr {
-                                        SocketAddr::V4(_) => { if let Some(s) = udp4 { let _ = s.send_to(packet, &addr.into()); } }
-                                        SocketAddr::V6(_) => { if let Some(s) = udp6 { let _ = s.send_to(packet, &addr.into()); } }
-                                    }
-                                } else {
-                                    tracing::error!("No endpoint");
-                                }
-                            }
-                        }
-                        _ => panic!("Unexpected result from encapsulate"),
-                    };
+                        d.send_payload_to_peers(&frame, target_peers, t);
+                    }
                 }
                 Action::Continue
             }),
@@ -1459,6 +1549,12 @@ impl Device {
                             },
                             TunnResult::WriteToTunnelV6(tun_pkt, addr) => {
                                  if p.is_allowed_ip(addr) { t.iface.write6(tun_pkt); }
+                            },
+                            TunnResult::WriteToTunnelTap(tun_pkt) => {
+                                let frame = tun_pkt.to_vec();
+                                drop(p);
+                                d.switch_tap_frame(&frame, Some(Arc::clone(peer_arc)), t);
+                                p = peer_arc.lock();
                             }
                         }
                         

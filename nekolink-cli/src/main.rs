@@ -94,6 +94,9 @@ fn main() {
             Arg::new("tcp")
                 .long("tcp")
                 .help("Use native TCP transport mode"),
+            Arg::new("tap")
+                .long("tap")
+                .help("Use TAP (Layer 2) interface mode"),
         ])
         .get_matches();
 
@@ -171,6 +174,7 @@ fn main() {
         } else {
             TransportMode::Udp
         },
+        is_tap: matches.is_present("tap"),
         #[cfg(any(target_os = "linux", target_os = "android"))]
         enable_udp_gro: !matches.is_present("disable-udp-gro"),
     };
