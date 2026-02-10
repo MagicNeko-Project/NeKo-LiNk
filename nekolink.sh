@@ -23,7 +23,7 @@ if [ -f "/usr/local/share/nekolink/VERSION" ]; then
 elif [ -f "VERSION" ]; then
     VERSION=$(cat VERSION)
 else
-    VERSION="3.4.4"
+    VERSION="3.4.5"
 fi
 echo -e "${PINK}ฅ^•ﻌ•^ฅ 欢迎使用 NekoLink 交互式配置助手 v$VERSION！${NC}"
 echo -e "${CYAN}--- 全局信令通道 [12580] (一按我帮您) 已就绪 ---${NC}"
@@ -270,16 +270,16 @@ function edit_config() {
     iface=$(jq -r '.interface' "$selected_cfg")
     echo -e "${PINK}正在修改接口: $iface${NC}"
 
-    # 提取现有值
+    # 提取现有值并赋予初始灵力
     curr_mode=$(jq -r '.mode' "$selected_cfg")
     curr_proto=$(jq -r '.ip_protocol // 141' "$selected_cfg")
     curr_lport=$(jq -r '.listen_port // 51820' "$selected_cfg")
     curr_addr=$(jq -r '.local_address' "$selected_cfg")
     curr_psk=$(jq -r '.psk' "$selected_cfg")
-    curr_aroute=$(jq -r '.auto_route' "$selected_cfg")
+    curr_aroute=$(jq -r '.auto_route // false' "$selected_cfg")
     curr_ka=$(jq -r '.persistent_keepalive // "null"' "$selected_cfg")
     curr_mtu=$(jq -r '.mtu // "null"' "$selected_cfg")
-    curr_mss=$(jq -r '.clamp_mss' "$selected_cfg")
+    curr_mss=$(jq -r '.clamp_mss // true' "$selected_cfg")
     curr_ep=$(jq -r '.peers[0].endpoint // empty' "$selected_cfg")
     curr_s5=$(jq -r '.socks5_port // "null"' "$selected_cfg")
     curr_s5_local=$(jq -r '.socks5_listen_local // true' "$selected_cfg")
@@ -287,21 +287,43 @@ function edit_config() {
     curr_mesh=$(jq -r '.mesh_mode // false' "$selected_cfg")
     curr_tmode=$(jq -r '.transport_mode // "tun"' "$selected_cfg")
     curr_sig_port=$(jq -r '.signal_port // "null"' "$selected_cfg")
+    curr_dual=$(jq -r '.dual_stack // false' "$selected_cfg")
+    curr_rip=$(jq -r '.raw_ip_protocol // "null"' "$selected_cfg")
+
+    # 准备魔法变量
+    mode="$curr_mode"
+    proto="$curr_proto"
+    listen_port="$curr_lport"
+    local_addr="$curr_addr"
+    endpoint="$curr_ep"
+    keepalive="$curr_ka"
+    mtu="$curr_mtu"
+    clamp_mss="$curr_mss"
+    psk="$curr_psk"
+    auto_route="$curr_aroute"
+    socks5_port="$curr_s5"
+    s5_local="$curr_s5_local"
+    s5_loop="$curr_s5_loop"
+    transport_mode="$curr_tmode"
+    mesh_mode="$curr_mesh"
+    local_signal_port="$curr_sig_port"
+    dual_stack="$curr_dual"
+    raw_ip_protocol="$curr_rip"
 
     # 智能角色识别喵
     global_json="$CONFIG_DIR/global.json"
     global_sig_port=$( [ -f "$global_json" ] && jq -r '.signal_port // empty' "$global_json" || echo "" )
     
-    if [ -n "$curr_ep" ] && [ -n "$global_sig_port" ]; then
+    if [ -n "$endpoint" ] && [ -n "$global_sig_port" ]; then
         role_label="中转/Mesh 节点 (Relay)"
-    elif [ -n "$curr_ep" ]; then
+    elif [ -n "$endpoint" ]; then
         role_label="纯客户端 (Client Only)"
     else
         role_label="纯服务端 (Server Only)"
     fi
     echo -e "${CYAN}当前节点角色识别为: ${PINK}$role_label${NC}"
 
-    if [ -n "$curr_ep" ] && [ -z "$global_sig_port" ]; then
+    if [ -n "$endpoint" ] && [ -z "$global_sig_port" ]; then
         read -p "想把这个客户端升级为中转节点吗喵？(允许 C -> B -> A 拓扑) [y/n, 默认 n]: " upgrade_c
         if [ "$upgrade_c" == "y" ]; then
             echo -e "${PINK}正在施展身份转化魔法...${NC}"
@@ -314,7 +336,7 @@ function edit_config() {
     fi
 
     # 交互式修改
-    read -p "传输模式 (当前: $curr_mode, [1] ip, [2] udp, [3] Mullvad TCP 模式, 直接回车保持不变): " m_choice
+    read -p "传输模式 (当前: $mode, [1] ip, [2] udp, [3] Mullvad TCP 模式, 直接回车保持不变): " m_choice
     case "$m_choice" in
         1) mode="ip" ;;
         2) mode="udp" ;;
@@ -329,8 +351,7 @@ function edit_config() {
         listen_port="null"
         
         # 读取当前双栈状态喵
-        curr_dual=$(jq -r '.dual_stack // "false"' "$selected_cfg")
-        read -p "是否同时监听 UDP 协议? (当前: $curr_dual, [y/n], 直接回车保持不变): " dual_c
+        read -p "是否同时监听 UDP 协议? (当前: $dual_stack, [y/n], 直接回车保持不变): " dual_c
         case "$dual_c" in
             y) 
                 dual_stack="true"
@@ -355,82 +376,83 @@ function edit_config() {
         proto="null"
     fi
 
-    read -p "本地隧道 IP (当前: $curr_addr, 直接回车保持不变): " local_addr
-    [ -z "$local_addr" ] && local_addr="$curr_addr"
+    read -p "本地隧道 IP (当前: $local_addr, 直接回车保持不变): " l_addr
+    [ -z "$l_addr" ] && local_addr="$local_addr" || local_addr="$l_addr"
 
     if [ "$mode" == "ip" ]; then
-        read -p "对端公网 IP (当前: $curr_ep, 直接回车保持不变): " endpoint
+        read -p "对端公网 IP (当前: $endpoint, 直接回车保持不变): " ep
     else
         echo -e "${PINK}提示：对端端点应为 IP:服务端信令端口 (通常为 12580) 喵！${NC}"
-        read -p "对端 Endpoint (当前: $curr_ep, 直接回车保持不变): " endpoint
+        read -p "对端 Endpoint (当前: $endpoint, 直接回车保持不变): " ep
     fi
-    [ -z "$endpoint" ] && endpoint="$curr_ep"
+    [ -z "$ep" ] && endpoint="$endpoint" || endpoint="$ep"
 
-    read -p "Keepalive 间隔 (当前: $curr_ka, 直接回车保持不变): " keepalive
-    [ -z "$keepalive" ] && keepalive=$curr_ka
+    read -p "Keepalive 间隔 (当前: $keepalive, 直接回车保持不变): " ka
+    [ -z "$ka" ] && keepalive="$keepalive" || keepalive="$ka"
 
-    read -p "MTU (当前: $curr_mtu, 直接回车保持不变): " mtu
-    [ -z "$mtu" ] && mtu=$curr_mtu
+    read -p "MTU (当前: $mtu, 直接回车保持不变): " m
+    [ -z "$m" ] && mtu="$mtu" || mtu="$m"
 
-    read -p "开启 MSS 修复? (当前: $curr_mss, [y/n], 直接回车保持不变): " mss_c
+    read -p "开启 MSS 修复? (当前: $clamp_mss, [y/n], 直接回车保持不变): " mss_c
     case "$mss_c" in
         y) clamp_mss="true" ;;
         n) clamp_mss="false" ;;
-        *) clamp_mss="$curr_mss" ;;
+        *) clamp_mss="$clamp_mss" ;;
     esac
 
-    read -p "预共享密钥 PSK (当前: $curr_psk, 直接回车保持不变): " psk
-    [ -z "$psk" ] && psk="$curr_psk"
+    read -p "预共享密钥 PSK (当前: $psk, 直接回车保持不变): " p_sk
+    [ -z "$p_sk" ] && psk="$psk" || psk="$p_sk"
+产出物：
 
-    read -p "自动系统路由? (当前: $curr_aroute, [y/n], 直接回车保持不变): " ar_c
+    read -p "自动系统路由? (当前: $auto_route, [y/n], 直接回车保持不变): " ar_c
     case "$ar_c" in
         y) auto_route="true" ;;
         n) auto_route="false" ;;
-        *) auto_route="$curr_aroute" ;;
+        *) auto_route="$auto_route" ;;
     esac
 
-    read -p "开启本地 SOCKS5 服务端? (当前端口: $curr_s5, 输入端口号开启如 1080, 输入 n 关闭, 直接回车保持不变): " s5_c
+    read -p "开启本地 SOCKS5 服务端? (当前端口: $socks5_port, 输入端口号开启如 1080, 输入 n 关闭, 直接回车保持不变): " s5_c
     case "$s5_c" in
         n) socks5_port="null" ;;
-        "") socks5_port="$curr_s5" ;;
+        "") socks5_port="$socks5_port" ;;
         *) socks5_port="$s5_c" ;;
     esac
+产出物：
 
     if [ "$socks5_port" != "null" ]; then
-        read -p "是否在 127.0.0.1 监听 SOCKS5? (当前: $curr_s5_local, [y/n], 默认 y): " s5_l_c
+        read -p "是否在 127.0.0.1 监听 SOCKS5? (当前: $s5_local, [y/n], 默认 y): " s5_l_c
         case "$s5_l_c" in
             y) s5_local="true" ;;
             n) s5_local="false" ;;
-            *) s5_local="$curr_s5_local" ;;
+            *) s5_local="$s5_local" ;;
         esac
 
-        read -p "是否在全局 Loopback 接口监听 SOCKS5? (当前: $curr_s5_loop, [y/n], 默认 n): " s5_loop_c
+        read -p "是否在全局 Loopback 接口监听 SOCKS5? (当前: $s5_loop, [y/n], 默认 n): " s5_loop_c
         case "$s5_loop_c" in
             y) s5_loop="true" ;;
             n) s5_loop="false" ;;
-            *) s5_loop="$curr_s5_loop" ;;
+            *) s5_loop="$s5_loop" ;;
         esac
     else
         s5_local="true"
         s5_loop="false"
     fi
 
-    read -p "开启二层透明桥接 (TAP) 模式? (当前: $curr_tmode, [y/n], 直接回车保持不变): " tap_c
+    read -p "开启二层透明桥接 (TAP) 模式? (当前: $transport_mode, [y/n], 直接回车保持不变): " tap_c
     case "$tap_c" in
         y) transport_mode="tap" ;;
         n) transport_mode="tun" ;;
-        *) transport_mode="$curr_tmode" ;;
+        *) transport_mode="$transport_mode" ;;
     esac
 
-    read -p "开启 P2P Mesh 全网状模式? (当前: $curr_mesh, [y/n], 直接回车保持不变): " mesh_c
+    read -p "开启 P2P Mesh 全网状模式? (当前: $mesh_mode, [y/n], 直接回车保持不变): " mesh_c
     case "$mesh_c" in
         y) mesh_mode="true" ;;
         n) mesh_mode="false" ;;
-        *) mesh_mode="$curr_mesh" ;;
+        *) mesh_mode="$mesh_mode" ;;
     esac
 
-    local_signal_port="$curr_sig_port"
-    read -p "是否修改本地信令监听端口? (当前接口: $curr_sig_port, 全局: $global_sig_port, [y/n], 默认 n): " change_sig
+    read -p "是否修改本地信令监听端口? (当前接口: $local_signal_port, 全局: $global_sig_port, [y/n], 默认 n): " change_sig
     if [ "$change_sig" == "y" ]; then
         echo "1. 修改全局端口 (影响所有接口)"
         echo "2. 修改当前接口专属端口 (覆盖全局)"
