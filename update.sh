@@ -20,7 +20,7 @@ fi
 echo -e "\n${CYAN}[1/5] 正在从星辰大海采集最新的魔法代码 (Git Pull)...${NC}"
 if [ -d ".git" ]; then
     git fetch origin
-    git reset --hard origin/rust-wireguard-rawtunnel
+    git reset --hard origin/rwr-mesh
 else
     echo -e "${RED}警告：当前目录不是一个有效的 Git 仓库，跳过拉取更新喵。${NC}"
 fi
