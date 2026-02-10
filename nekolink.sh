@@ -23,7 +23,7 @@ if [ -f "/usr/local/share/nekolink/VERSION" ]; then
 elif [ -f "VERSION" ]; then
     VERSION=$(cat VERSION)
 else
-    VERSION="3.1.0"
+    VERSION="3.4.1"
 fi
 echo -e "${PINK}ฅ^•ﻌ•^ฅ 欢迎使用 NekoLink 交互式配置助手 v$VERSION！${NC}"
 echo -e "${CYAN}--- 全局信令通道 [12580] (一按我帮您) 已就绪 ---${NC}"
@@ -35,15 +35,17 @@ function show_menu() {
     echo -e "${CYAN}请选择操作：${NC}"
     echo "1. 创建新配置文件 (Node Config)"
     echo "2. 修改现有配置文件 (Edit Config)"
-    echo "3. 热重载配置 (Hot Reload)"
-    echo "4. 完全重启 NekoLink 服务 (Systemd Restart)"
-    echo "5. 查看运行状态 (Status)"
-    echo "6. 管理密钥与公钥 (Key Management)"
-    echo "7. 配置文件一键检查与修复 (Fix Configs)"
-    echo "8. 查看配置文件列表"
-    echo "9. 高级设置 (Advanced Settings)"
-    echo "10. 退出"
-    read -p "请输入数字 [1-10]: " choice
+    echo "3. 重命名接口 (Rename Interface)"
+    echo "4. 删除接口 (Delete Interface)"
+    echo "5. 热重载配置 (Hot Reload)"
+    echo "6. 完全重启 NekoLink 服务 (Systemd Restart)"
+    echo "7. 查看运行状态 (Status)"
+    echo "8. 管理密钥与公钥 (Key Management)"
+    echo "9. 配置文件一键检查与修复 (Fix Configs)"
+    echo "10. 查看配置文件列表"
+    echo "11. 高级设置 (Advanced Settings)"
+    echo "12. 退出"
+    read -p "请输入数字 [1-12]: " choice
 }
 
 function show_advanced_menu() {
@@ -963,6 +965,106 @@ function auto_optimize_kernel() {
     echo -e "${CYAN}提示：部分 limits 设置需要注销重登录或重启系统后才能完全生效喵。${NC}"
 }
 
+function rename_config() {
+    echo -e "\n${PINK}--- 正在启动接口重命名魔法 ---${NC}"
+    configs=("$CONFIG_DIR"/*.json)
+    if [ ! -e "${configs[0]}" ]; then
+        echo -e "${RED}喵？没有找到任何配置文件。${NC}"
+        return
+    fi
+
+    echo -e "${CYAN}请选择要重命名的配置：${NC}"
+    for i in "${!configs[@]}"; do
+        ifname=$(basename "${configs[$i]}" .json)
+        if [ "$ifname" == "global" ]; then continue; fi
+        echo "$((i+1)). $ifname"
+    done
+    read -p "请输入编号: " cfg_idx
+    
+    selected_cfg="${configs[$((cfg_idx-1))]}"
+    if [ -z "$selected_cfg" ] || [ ! -f "$selected_cfg" ]; then
+        echo -e "${RED}无效的选择喵！${NC}"
+        return
+    fi
+
+    old_iface=$(basename "$selected_cfg" .json)
+    echo -e "${CYAN}当前接口名称: ${PINK}$old_iface${NC}"
+    read -p "请输入新的接口名称: " new_iface
+    
+    if [ -z "$new_iface" ]; then
+        echo -e "${RED}名称不能为空喵！${NC}"
+        return
+    fi
+    
+    if [ -f "$CONFIG_DIR/$new_iface.json" ]; then
+        echo -e "${RED}警告：名称 $new_iface 已存在喵！${NC}"
+        return
+    fi
+
+    echo -e "${PINK}正在施展重命名咒语...${NC}"
+    
+    # 1. 更新 JSON 内部字段
+    tmp_cfg=$(mktemp)
+    jq --arg new_name "$new_iface" '.interface = $new_name' "$selected_cfg" > "$tmp_cfg"
+    mv "$tmp_cfg" "$CONFIG_DIR/$new_iface.json"
+    rm -f "$selected_cfg"
+
+    # 2. 重命名配套的密钥文件
+    [ -f "$CONFIG_DIR/$old_iface.key" ] && mv "$CONFIG_DIR/$old_iface.key" "$CONFIG_DIR/$new_iface.key"
+    [ -f "$CONFIG_DIR/$old_iface.pub" ] && mv "$CONFIG_DIR/$old_iface.pub" "$CONFIG_DIR/$new_iface.pub"
+
+    echo -e "${PINK}重命名成功！$old_iface -> $new_iface 喵！${NC}"
+    read -p "是否立即重载服务？(y/n, 默认 n): " reload_now
+    if [ "$reload_now" == "y" ]; then
+        nekolink-ctl reload
+        echo -e "${PINK}已发送重载指令喵！${NC}"
+    fi
+}
+
+function delete_config() {
+    echo -e "\n${PINK}--- 正在进入接口驱逐仪式 (删除) ---${NC}"
+    configs=("$CONFIG_DIR"/*.json)
+    if [ ! -e "${configs[0]}" ]; then
+        echo -e "${RED}喵？目录里已经是空的了喵。${NC}"
+        return
+    fi
+
+    echo -e "${CYAN}请选择要删除的配置：${NC}"
+    for i in "${!configs[@]}"; do
+        ifname=$(basename "${configs[$i]}" .json)
+        if [ "$ifname" == "global" ]; then continue; fi
+        echo "$((i+1)). $ifname"
+    done
+    read -p "请输入编号: " cfg_idx
+    
+    selected_cfg="${configs[$((cfg_idx-1))]}"
+    if [ -z "$selected_cfg" ] || [ ! -f "$selected_cfg" ]; then
+        echo -e "${RED}无效的选择喵！${NC}"
+        return
+    fi
+
+    iface=$(basename "$selected_cfg" .json)
+    echo -e "${RED}⚠ 警告：您即将删除接口 $iface 及其所有关联密钥！此操作不可逆喵！${NC}"
+    read -p "确定要继续吗？请输入 '$iface' 以确认: " confirm
+    
+    if [ "$confirm" != "$iface" ]; then
+        echo -e "${PINK}呼... 驱逐仪式已取消。${NC}"
+        return
+    fi
+
+    echo -e "${PINK}正在抹除 $iface 的存在...${NC}"
+    rm -f "$selected_cfg"
+    rm -f "$CONFIG_DIR/$iface.key"
+    rm -f "$CONFIG_DIR/$iface.pub"
+
+    echo -e "${PINK}接口 $iface 已被成功驱逐喵！(〃'▽'〃)${NC}"
+    read -p "是否立即重载服务以彻底清除状态？(y/n, 默认 n): " reload_now
+    if [ "$reload_now" == "y" ]; then
+        nekolink-ctl reload
+        echo -e "${PINK}由于删除了配置，服务已重载喵！${NC}"
+    fi
+}
+
 function diagnose_mullvad_tcp() {
     echo -e "\n${PINK}--- Mullvad TCP 组件诊断工具 ---${NC}"
     echo -e "${CYAN}正在检查 tcp2udp 和 udp2tcp 运行状态喵...${NC}\n"
@@ -1041,21 +1143,23 @@ while true; do
     case $choice in
         1) create_config ;;
         2) edit_config ;;
-        3)
+        3) rename_config ;;
+        4) delete_config ;;
+        5)
             echo -e "${PINK}正在通过 SIGHUP 施展热重载魔法...${NC}"
             nekolink-ctl reload
-            echo -e "${PINK}热重载指令已发送喵！可以使用选项 5 查看最新状态。${NC}"
+            echo -e "${PINK}热重载指令已发送喵！可以使用选项 7 查看最新状态。${NC}"
             ;;
-        4) 
+        6) 
             echo -e "${PINK}正在通过 Systemd 重启 NekoLink 魔法...${NC}"
             systemctl restart nekolink
-            echo -e "${PINK}重启指令已发送喵！可以使用选项 5 查看最新状态。${NC}"
+            echo -e "${PINK}重启指令已发送喵！可以使用选项 7 查看最新状态。${NC}"
             ;;
-        5) nekolink status ;;
-        6) manage_keys ;;
-        7) check_and_fix_configs ;;
-        8) ls -l "$CONFIG_DIR"/*.json ;;
-        9)
+        7) nekolink status ;;
+        8) manage_keys ;;
+        9) check_and_fix_configs ;;
+        10) ls -l "$CONFIG_DIR"/*.json ;;
+        11)
             show_advanced_menu
             case "$adv_choice" in
                 1) set_global_signal_port ;;
@@ -1067,7 +1171,7 @@ while true; do
                 *) continue ;;
             esac
             ;;
-        10)
+        12)
             echo -e "${PINK}下次再见喵！(〃'▽'〃)${NC}"
             exit 0
             ;;
