@@ -284,6 +284,7 @@ function edit_config() {
     curr_s5_loop=$(jq -r '.socks5_listen_loopback // false' "$selected_cfg")
     curr_mesh=$(jq -r '.mesh_mode // false' "$selected_cfg")
     curr_tmode=$(jq -r '.transport_mode // "tun"' "$selected_cfg")
+    curr_sig_port=$(jq -r '.signal_port // "null"' "$selected_cfg")
 
     # 智能角色识别喵
     global_json="$CONFIG_DIR/global.json"
@@ -408,9 +409,20 @@ function edit_config() {
         *) mesh_mode="$curr_mesh" ;;
     esac
 
-    read -p "是否修改本地信令监听端口? (当前在 global.json 配置, [y/n], 默认 n): " change_sig
+    local_signal_port="$curr_sig_port"
+    read -p "是否修改本地信令监听端口? (当前接口: $curr_sig_port, 全局: $global_sig_port, [y/n], 默认 n): " change_sig
     if [ "$change_sig" == "y" ]; then
-        set_global_signal_port
+        echo "1. 修改全局端口 (影响所有接口)"
+        echo "2. 修改当前接口专属端口 (覆盖全局)"
+        read -p "请选择喵 [1-2]: " sig_choice
+        if [ "$sig_choice" == "1" ]; then
+            set_global_signal_port
+        elif [ "$sig_choice" == "2" ]; then
+           read -p "请输入当前接口信令端口 (输入 null 清除): " lsig
+           if [ -n "$lsig" ]; then
+               local_signal_port="$lsig"
+           fi
+        fi
     fi
 
     # signal_port 统一迁移到 global.json 喵
@@ -434,6 +446,7 @@ function edit_config() {
         --arg ep "$endpoint" \
         --argjson mesh "$mesh_mode" \
         --arg tmode "$transport_mode" \
+        --argjson sig_port "$local_signal_port" \
         '{
             interface: $iface,
             mode: $mode,
@@ -450,6 +463,7 @@ function edit_config() {
             socks5_port: $socks5_port,
             socks5_listen_local: $s5_local,
             socks5_listen_loopback: $s5_loop,
+            signal_port: $sig_port,
             peers: (if $ep != "" then [{endpoint: $ep}] else [] end)
         }' > "$tmp_cfg"
     
@@ -634,6 +648,16 @@ function create_config() {
         fi
     fi
 
+    # 本地信令端口配置 (用于 Mesh 中转或多级级联喵)
+    local_signal_port="null"
+    read -p "是否开启本地信令监听 (作为服务端或中转节点)? (y/n, 默认 n): " enable_sig_listen
+    if [ "$enable_sig_listen" == "y" ]; then
+        read -p "请输入本地信令监听端口 (例如 12580, 直接回车使用全局默认): " lsig_port
+        if [ -n "$lsig_port" ]; then
+            local_signal_port="$lsig_port"
+        fi
+    fi
+
     # signal_port 统一迁移到 global.json 喵
 
     # 构建 JSON
@@ -656,6 +680,7 @@ function create_config() {
   "socks5_listen_local": $s5_local,
   "socks5_listen_loopback": $s5_loop,
   "prefer_ipv6": $prefer_ipv6,
+  "signal_port": $local_signal_port,
   "mesh_mode": $mesh_mode,
   "transport_mode": "$transport_mode",
   "peers": [

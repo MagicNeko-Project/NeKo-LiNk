@@ -202,15 +202,21 @@ async fn sync_lowest_mtu(interface: &str) -> Result<()> {
 
 /// 统一的 endpoint 解析函数,支持 IP、域名和带端口的地址喵
 async fn resolve_endpoint_with_port(endpoint: &str, port: u16, prefer_ipv6: bool) -> Result<SocketAddr> {
-    if let Ok(mut sa) = endpoint.parse::<SocketAddr>() {
-        // 已经是 IP:Port 格式,替换端口喵
-        sa.set_port(port);
+    if let Ok(sa) = endpoint.parse::<SocketAddr>() {
+        // 已经是 IP:Port 格式, 直接使用它喵 (不准霸道地覆盖主人的设置喵！)
         Ok(sa)
     } else if let Ok(ip) = endpoint.parse::<IpAddr>() {
-        // 纯 IP 地址喵
+        // 纯 IP 地址喵, 使用默认端口
         Ok(SocketAddr::new(ip, port))
     } else {
         // 作为域名解析喵
+        // 检查域名是否自带端口 (例如 example.com:12580)
+        if let Some((host, port_str)) = endpoint.rsplit_once(':') {
+            if let Ok(p) = port_str.parse::<u16>() {
+                let ip = resolve_dns(host, None, prefer_ipv6).await?;
+                return Ok(SocketAddr::new(ip, p));
+            }
+        }
         let ip = resolve_dns(endpoint, None, prefer_ipv6).await?;
         Ok(SocketAddr::new(ip, port))
     }
@@ -1351,6 +1357,10 @@ async fn run_global_udp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                             .or(state.config.signal_port)
                             .unwrap_or(state.global_config.signal_port);
 
+                        if target_port != signal_port {
+                            continue;
+                        }
+
                         // 使用统一的endpoint解析函数喵
                         let addr_opt = match resolve_endpoint_with_port(
                             &peer.endpoint,
@@ -1519,6 +1529,10 @@ async fn run_global_tcp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                         let target_port = peer.signal_port
                             .or(state.config.signal_port)
                             .unwrap_or(state.global_config.signal_port);
+
+                        if target_port != signal_port {
+                            continue;
+                        }
 
                         // 使用统一的endpoint解析函数喵
                         let addr_opt = match resolve_endpoint_with_port(
