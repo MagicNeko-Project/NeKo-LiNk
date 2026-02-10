@@ -330,6 +330,11 @@ struct NekoConfig {
     /// 显式指定的 SOCKS5 绑定 IP（开启同端口多 IP 监听的关键喵！）
     #[serde(default)]
     pub socks5_bind_addr: Option<String>,
+    /// 是否同时监听 UDP 和 RawIP 两个协议 (双栈模式) 喵
+    #[serde(default)]
+    pub dual_stack: bool,
+    /// RawIP 模式下的协议号 (默认 141) 喵
+    pub raw_ip_protocol: Option<u8>,
 }
 
 fn default_true() -> bool { true }
@@ -770,6 +775,14 @@ async fn run_instance(state: NekoState, token: CancellationToken) -> Result<()> 
     if !config.enable_udp_gro {
         cmd.arg("--disable-udp-gro");
     }
+
+    if config.dual_stack {
+        cmd.arg("--dual-stack");
+    }
+    if let Some(raw_proto) = config.raw_ip_protocol {
+        cmd.arg("--raw-ip-protocol").arg(raw_proto.to_string());
+    }
+
     if config.mode == "tcp" || config.mode == "mullvad-tcp" {
         cmd.arg("--tcp");
     }

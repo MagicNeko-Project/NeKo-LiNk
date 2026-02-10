@@ -321,10 +321,28 @@ function edit_config() {
         *) mode="$curr_mode" ;;
     esac
 
-    if [ "$mode" == "ip" ]; then
+        if [ "$mode" == "ip" ]; then
         read -p "IP 协议号 (当前: $curr_proto, 直接回车保持不变): " proto
         [ -z "$proto" ] && proto=$curr_proto
         listen_port="null"
+        
+        # 读取当前双栈状态喵
+        curr_dual=$(jq -r '.dual_stack // "false"' "$selected_cfg")
+        read -p "是否同时监听 UDP 协议? (当前: $curr_dual, [y/n], 直接回车保持不变): " dual_c
+        case "$dual_c" in
+            y) 
+                dual_stack="true"
+                raw_ip_protocol="$proto"
+                ;;
+            n)
+                dual_stack="false"
+                raw_ip_protocol="null"
+                ;;
+            *)
+                dual_stack="$curr_dual"
+                if [ "$dual_stack" == "true" ]; then raw_ip_protocol="$proto"; else raw_ip_protocol="null"; fi
+                ;;
+        esac
     elif [ "$mode" == "tcp" ] || [ "$mode" == "mullvad-tcp" ]; then
         proto="null"
         read -p "TCP 监听端口 (当前: $curr_lport, 直接回车保持不变): " listen_port
@@ -447,6 +465,8 @@ function edit_config() {
         --argjson mesh "$mesh_mode" \
         --arg tmode "$transport_mode" \
         --argjson sig_port "$local_signal_port" \
+        --argjson dual_stack "$dual_stack" \
+        --argjson raw_proto "$raw_ip_protocol" \
         '{
             interface: $iface,
             mode: $mode,
@@ -463,7 +483,10 @@ function edit_config() {
             socks5_port: $socks5_port,
             socks5_listen_local: $s5_local,
             socks5_listen_loopback: $s5_loop,
+            socks5_listen_loopback: $s5_loop,
             signal_port: $sig_port,
+            dual_stack: $dual_stack,
+            raw_ip_protocol: $raw_proto,
             peers: (if $ep != "" then [{endpoint: $ep}] else [] end)
         }' > "$tmp_cfg"
     
@@ -533,17 +556,36 @@ function create_config() {
             read -p "请输入 IP 协议号 [143-252] ( 默认 141 ): " proto
             [ -z "$proto" ] && proto=141
             listen_port="null"
+            
+            read -p "是否同时监听 UDP 协议 (开启双栈模式，兼容性更好)? [y/n] (默认 y): " dual_c
+            [ -z "$dual_c" ] && dual_c="y"
+            if [ "$dual_c" == "y" ]; then
+                dual_stack="true"
+                raw_ip_protocol="$proto"
+                echo -e "${PINK}已开启双栈监听模式 (UDP + RawIP $proto) 喵！${NC}"
+            else
+                dual_stack="false"
+                raw_ip_protocol="null"
+            fi
             ;;
         3)
             mode="mullvad-tcp"
             echo -e "${PINK}... 使用 Mullvad TCP 模式喵！${NC}"
             proto="null"
+        3)
+            mode="mullvad-tcp"
+            echo -e "${PINK}... 使用 Mullvad TCP 模式喵！${NC}"
+            proto="null"
+            dual_stack="false"
+            raw_ip_protocol="null"
             read -p "请输入 TCP 监听端口 ( 默认 12581 ): " listen_port
             [ -z "$listen_port" ] && listen_port=12581
             ;;
         *)
             mode="udp"
             proto="null"
+            dual_stack="false"
+            raw_ip_protocol="null"
             read -p "请输入数据隧道监听端口 ( 0 为自动协商, 默认 0 ): " listen_port
             [ -z "$listen_port" ] && listen_port=0
             ;;
@@ -683,6 +725,8 @@ function create_config() {
   "signal_port": $local_signal_port,
   "mesh_mode": $mesh_mode,
   "transport_mode": "$transport_mode",
+  "dual_stack": $dual_stack,
+  "raw_ip_protocol": $raw_ip_protocol,
   "peers": [
 EOF
 

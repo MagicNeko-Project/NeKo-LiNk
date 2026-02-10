@@ -132,6 +132,8 @@ pub struct DeviceConfig {
     pub is_tap: bool,
     #[cfg(any(target_os = "linux", target_os = "android"))]
     pub enable_udp_gro: bool,
+    pub dual_stack: bool,
+    pub raw_ip_protocol: Option<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -153,10 +155,10 @@ impl Default for DeviceConfig {
             ip_protocol: None,
             transport_mode: TransportMode::Udp,
             is_tap: false,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "android"))]
             enable_udp_gro: true,
-            #[cfg(target_os = "android")]
-            enable_udp_gro: true,
+            dual_stack: false,
+            raw_ip_protocol: None,
         }
     }
 }
@@ -171,6 +173,8 @@ pub struct Device {
     iface: Arc<TunSocket>,
     udp4: Option<socket2::Socket>,
     udp6: Option<socket2::Socket>,
+    raw4: Option<socket2::Socket>,
+    raw6: Option<socket2::Socket>,
     tcp_listener: Option<socket2::Socket>,
     // Map of Peer Endpoint Address -> TCP Stream
     tcp_connections: Mutex<HashMap<SocketAddr, Arc<Mutex<socket2::Socket>>>>,
@@ -437,6 +441,8 @@ impl Device {
             local_macs: Mutex::new(HashSet::new()),
             udp4: Default::default(),
             udp6: Default::default(),
+            raw4: Default::default(),
+            raw6: Default::default(),
             tcp_listener: Default::default(),
             tcp_connections: Mutex::new(HashMap::new()),
             cleanup_paths: Default::default(),
@@ -487,6 +493,13 @@ impl Device {
         if let Some(s) = self.tcp_listener.take() {
             unsafe { self.queue.clear_event_by_fd(s.as_raw_fd()) };
         }
+        
+        if let Some(s) = self.raw4.take() {
+            unsafe { self.queue.clear_event_by_fd(s.as_raw_fd()) };
+        }
+        if let Some(s) = self.raw6.take() {
+            unsafe { self.queue.clear_event_by_fd(s.as_raw_fd()) };
+        }
         {
             let mut conns = self.tcp_connections.lock();
             for (_, s) in conns.drain() {
@@ -529,36 +542,71 @@ impl Device {
         }
 
         // Then open new sockets and bind to the port
-        let (sock_type, protocol) = match self.config.ip_protocol {
-            Some(p) => (Type::RAW, Protocol::from(i32::from(p))),
-            None => (Type::DGRAM, Protocol::UDP),
-        };
+        
+        // 1. UDP Sockets (If default or dual stack)
+        if self.config.ip_protocol.is_none() || self.config.dual_stack {
+            tracing::info!("喵！绑定 UDP 端口: {}", port);
+            let udp_sock4 = socket2::Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+            udp_sock4.set_reuse_address(true)?;
+            let _ = udp_sock4.set_recv_buffer_size(4 * 1024 * 1024);
+            let _ = udp_sock4.set_send_buffer_size(4 * 1024 * 1024);
+            udp_sock4.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port).into())?;
+            udp_sock4.set_nonblocking(true)?;
 
-        let udp_sock4 = socket2::Socket::new(Domain::IPV4, sock_type, Some(protocol))?;
-        udp_sock4.set_reuse_address(true)?;
-        let _ = udp_sock4.set_recv_buffer_size(4 * 1024 * 1024);
-        let _ = udp_sock4.set_send_buffer_size(4 * 1024 * 1024);
-        udp_sock4.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port).into())?;
-        udp_sock4.set_nonblocking(true)?;
+            if port == 0 {
+                // Random port was assigned
+                port = udp_sock4.local_addr()?.as_socket().unwrap().port();
+            }
 
-        if port == 0 {
-            // Random port was assigned
-            port = udp_sock4.local_addr()?.as_socket().unwrap().port();
+            let udp_sock6 = socket2::Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
+            udp_sock6.set_reuse_address(true)?;
+            let _ = udp_sock6.set_recv_buffer_size(4 * 1024 * 1024);
+            let _ = udp_sock6.set_send_buffer_size(4 * 1024 * 1024);
+            
+            // Only bind IPv6 if supported/needed, catching errors gracefully might be better but here we follow existing pattern
+            if let Err(e) = udp_sock6.bind(&SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0).into()) {
+                 tracing::warn!("IPv6 UDP Bind 失败 (可能不支持 IPv6): {:?}", e);
+            } else {
+                 udp_sock6.set_nonblocking(true)?;
+                 self.register_udp_handler(udp_sock6.try_clone().unwrap(), false)?; // false = UDP Mode
+                 self.udp6 = Some(udp_sock6);
+            }
+
+            self.register_udp_handler(udp_sock4.try_clone().unwrap(), false)?;
+            self.udp4 = Some(udp_sock4);
+            self.listen_port = port;
         }
 
-        let udp_sock6 = socket2::Socket::new(Domain::IPV6, sock_type, Some(protocol))?;
-        udp_sock6.set_reuse_address(true)?;
-        let _ = udp_sock6.set_recv_buffer_size(4 * 1024 * 1024);
-        let _ = udp_sock6.set_send_buffer_size(4 * 1024 * 1024);
-        udp_sock6.bind(&SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0).into())?;
-        udp_sock6.set_nonblocking(true)?;
+        // 2. Raw IP Sockets (If configured or dual stack)
+        if self.config.ip_protocol.is_some() || self.config.dual_stack {
+            let proto_id = self.config.ip_protocol.or(self.config.raw_ip_protocol).unwrap_or(141);
+            tracing::info!("喵！绑定 RawIP 协议: {}", proto_id);
+            
+            let sock_type = Type::RAW;
+            let protocol = Protocol::from(i32::from(proto_id));
 
-        self.register_udp_handler(udp_sock4.try_clone().unwrap())?;
-        self.register_udp_handler(udp_sock6.try_clone().unwrap())?;
-        self.udp4 = Some(udp_sock4);
-        self.udp6 = Some(udp_sock6);
+            match socket2::Socket::new(Domain::IPV4, sock_type, Some(protocol)) {
+                Ok(raw4) => {
+                    raw4.set_nonblocking(true)?;
+                    // Raw socket binding is usually not port-specific, but we might bind to interface
+                    // Here we just keep it unbound or bind to 0.0.0.0
+                    // Note: Raw sockets receive all packets for that protocol.
+                    self.register_udp_handler(raw4.try_clone().unwrap(), true)?; // true = Raw Mode
+                    self.raw4 = Some(raw4);
+                },
+                Err(e) => tracing::error!("创建 RawIPv4 Socket 失败 (需 Root 权限?): {:?}", e),
+            }
 
-        self.listen_port = port;
+            match socket2::Socket::new(Domain::IPV6, sock_type, Some(protocol)) {
+                Ok(raw6) => {
+                    raw6.set_nonblocking(true)?;
+                    self.register_udp_handler(raw6.try_clone().unwrap(), true)?;
+                    self.raw6 = Some(raw6);
+                },
+                Err(e) => tracing::warn!("创建 RawIPv6 Socket 失败: {:?}", e),
+            }
+        }
+
         for peer in self.peers.values() {
             peer.lock().shutdown_endpoint();
         }
@@ -600,6 +648,12 @@ impl Device {
         }
 
         if let Some(ref sock) = self.udp6 {
+            sock.set_mark(mark)?;
+        }
+        if let Some(ref sock) = self.raw4 {
+            sock.set_mark(mark)?;
+        }
+        if let Some(ref sock) = self.raw6 {
             sock.set_mark(mark)?;
         }
 
@@ -650,8 +704,20 @@ impl Device {
                             let _: Result<_, _> = conn.write(packet);
                         } else if let Some(addr) = endpoint.addr {
                             match addr {
-                                SocketAddr::V4(_) => { if let Some(s) = udp4 { let _ = s.send_to(packet, &addr.into()); } }
-                                SocketAddr::V6(_) => { if let Some(s) = udp6 { let _ = s.send_to(packet, &addr.into()); } }
+                                SocketAddr::V4(_) => { 
+                                    if peer.transport_mode == TransportMode::RawIp {
+                                         if let Some(s) = self.raw4.as_ref() { let _ = s.send_to(packet, &addr.into()); }
+                                    } else {
+                                         if let Some(s) = udp4 { let _ = s.send_to(packet, &addr.into()); }
+                                    }
+                                }
+                                SocketAddr::V6(_) => { 
+                                     if peer.transport_mode == TransportMode::RawIp {
+                                         if let Some(s) = self.raw6.as_ref() { let _ = s.send_to(packet, &addr.into()); }
+                                     } else {
+                                         if let Some(s) = udp6 { let _ = s.send_to(packet, &addr.into()); }
+                                     }
+                                }
                             }
                         }
                     }
@@ -784,6 +850,8 @@ impl Device {
                 
                 let udp4 = d.udp4.as_ref();
                 let udp6 = d.udp6.as_ref();
+                let raw4 = d.raw4.as_ref();
+                let raw6 = d.raw6.as_ref();
 
                 // Go over each peer and invoke the timer function
                 for peer in peer_map.values() {
@@ -801,8 +869,20 @@ impl Device {
                         TunnResult::Err(e) => tracing::error!(message = "Timer error", error = ?e),
                         TunnResult::WriteToNetwork(packet) => {
                             match endpoint_addr {
-                                SocketAddr::V4(_) => { if let Some(s) = udp4 { let _ = s.send_to(packet, &endpoint_addr.into()); } }
-                                SocketAddr::V6(_) => { if let Some(s) = udp6 { let _ = s.send_to(packet, &endpoint_addr.into()); } }
+                                SocketAddr::V4(_) => { 
+                                    if p.transport_mode == TransportMode::RawIp {
+                                         if let Some(s) = raw4 { let _ = s.send_to(packet, &endpoint_addr.into()); }
+                                    } else {
+                                         if let Some(s) = udp4 { let _ = s.send_to(packet, &endpoint_addr.into()); }
+                                    }
+                                }
+                                SocketAddr::V6(_) => { 
+                                     if p.transport_mode == TransportMode::RawIp {
+                                         if let Some(s) = raw6 { let _ = s.send_to(packet, &endpoint_addr.into()); }
+                                     } else {
+                                         if let Some(s) = udp6 { let _ = s.send_to(packet, &endpoint_addr.into()); }
+                                     }
+                                }
                             };
                         }
                         TunnResult::WriteToTunnelV4(..) | TunnResult::WriteToTunnelV6(..) | TunnResult::WriteToTunnelTap(..) => {
@@ -832,11 +912,11 @@ impl Device {
             .stop_notification(self.yield_notice.as_ref().unwrap())
     }
 
-    fn register_udp_handler(&self, udp: socket2::Socket) -> Result<(), Error> {
+    fn register_udp_handler(&self, udp: socket2::Socket, is_raw: bool) -> Result<(), Error> {
         self.queue.new_event(
             udp.as_raw_fd(),
             Box::new(move |d, t| {
-                // Handler that handles anonymous packets over UDP
+                // Handler that handles anonymous packets over UDP or RawIP
                 let mut iter = MAX_ITR;
                 let (private_key, public_key) = match d.key_pair.as_ref() {
                     Some(k) => k,
@@ -1001,7 +1081,7 @@ impl Device {
 
                                 let mut offset = 0;
                                 // NekoLink: 处理 IP 层头部 (Raw IP 模式) 喵
-                                if d.config.ip_protocol.is_some() && addr.ip().is_ipv4() {
+                                if is_raw && addr.ip().is_ipv4() {
                                     if this_len < 20 { continue; }
                                     let ihl = (segment_buf[0] & 0x0f) as usize * 4;
                                     if this_len < ihl { continue; }
@@ -1082,7 +1162,9 @@ impl Device {
 
                                   if d.config.use_connected_socket {
                                       let _ = p.connect_endpoint(d.listen_port, d.fwmark, d.config.ip_protocol).map(|sock| {
-                                          d.register_conn_handler(Arc::clone(peer), sock, ip_addr).unwrap();
+                                    // Connected socket from peer.connect_endpoint is typically UDP.
+                                    // See comments in handle_verified_packet for why we use false here.
+                                    d.register_conn_handler(Arc::clone(peer), sock, ip_addr, false).unwrap();
                                       });
                                   }
                              }
@@ -1206,7 +1288,8 @@ impl Device {
                         let mut offset = 0;
                         
                         // NekoLink: 处理 IP 层头部 (Raw IP 模式) 喵
-                        if d.config.ip_protocol.is_some() && addr.as_socket().map_or(false, |s| s.is_ipv4()) {
+                        // 如果我们在 Raw 模式 (is_raw == true) 或者传统 Raw 模式配置启用
+                        if (is_raw || d.config.ip_protocol.is_some()) && addr.as_socket().map_or(false, |s| s.is_ipv4()) {
                             if packet_len < 20 { continue; }
                             let ihl = (t.src_buf[0] & 0x0f) as usize * 4;
                             if packet_len < ihl { continue; }
@@ -1228,6 +1311,10 @@ impl Device {
                             }
                             Err(_) => continue,
                         };
+
+                         // NekoLink Dual Stack: 动态更新 Peer 的传输模式喵
+                         // 如果收到 Raw 包，标记为 RawIp; 否则 UDP。
+                        let current_mode = if is_raw || d.config.ip_protocol.is_some() { TransportMode::RawIp } else { TransportMode::Udp };
 
                         let peer = match &parsed_packet {
                             Packet::HandshakeInit(p) => {
@@ -1263,9 +1350,28 @@ impl Device {
                             
                             p.set_endpoint(final_addr);
 
+                            // NekoLink: 如果是双栈模式，我们需要记住这个 Peer 用的是什么协议喵
+                            if d.config.dual_stack {
+                                if p.transport_mode != current_mode {
+                                     tracing::info!("喵！Peer {} 切换传输模式: {:?} -> {:?}", final_addr, p.transport_mode, current_mode);
+                                     p.transport_mode = current_mode;
+                                }
+                            }
+
                             if d.config.use_connected_socket {
                                 let _ = p.connect_endpoint(d.listen_port, d.fwmark, d.config.ip_protocol).map(|sock| {
-                                    d.register_conn_handler(Arc::clone(peer), sock, ip_addr).unwrap();
+                                    // Connected socket inherits the mode from the peer or config
+                                    // For now, let's assume connected sockets follow the main transport mode logic
+                                    // If we are in RawIP mode, connected socket might still be UDP or Raw depending on implementation
+                                    // But typically connected sockets are UDP. If we support connected RAW sockets, we need is_raw=true.
+                                    // For simplicity and safety, let's assume connected sockets are UDP for now unless we explicitly handle raw connected sockets (which is rare/complex).
+                                    // However, to fix the compilation error, we must pass a value.
+                                    // Since we don't have is_raw here easily without checking socket type, 
+                                    // and usually connected sockets in this context are UDP, let's pass false.
+                                    // Wait, if peer.transport_mode is RawIp, we might be using a connected Raw socket?
+                                    // Actually, standard WireGuard uses UDP connected sockets.
+                                    let is_raw_socket = false; 
+                                    d.register_conn_handler(Arc::clone(peer), sock, ip_addr, is_raw_socket).unwrap();
                                 });
                             }
                         }
@@ -1322,6 +1428,7 @@ impl Device {
         peer: Arc<Mutex<Peer>>,
         udp: socket2::Socket,
         peer_addr: IpAddr,
+        is_raw: bool,
     ) -> Result<(), Error> {
         self.queue.new_event(
             udp.as_raw_fd(),
@@ -1335,7 +1442,10 @@ impl Device {
                 // bytes to the buffer, so this casting is safe.
                 while let Ok(read_bytes) = udp.recv(unsafe { &mut *(&mut t.src_buf[..] as *mut [u8] as *mut [MaybeUninit<u8>]) }) {
                     let mut offset = 0;
-                    if d.config.ip_protocol.is_some() && peer_addr.is_ipv4() {
+                    let mut offset = 0;
+                    // Connected socket logic (usually UDP only, but if we support raw connected...)
+                    // Assuming connected sockets are primarily UDP.
+                    if (is_raw || d.config.ip_protocol.is_some()) && peer_addr.is_ipv4() {
                         if read_bytes < 20 { continue; }
                         let ihl = (t.src_buf[0] & 0x0f) as usize * 4;
                         if read_bytes < ihl { continue; }

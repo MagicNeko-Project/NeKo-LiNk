@@ -97,6 +97,13 @@ fn main() {
             Arg::new("tap")
                 .long("tap")
                 .help("Use TAP (Layer 2) interface mode"),
+            Arg::new("dual-stack")
+                .long("dual-stack")
+                .help("Enable dual stack UDP + RawIP listening"),
+            Arg::new("raw-ip-protocol")
+                .long("raw-ip-protocol")
+                .takes_value(true)
+                .help("Raw IP protocol number for dual stack mode"),
         ])
         .get_matches();
 
@@ -177,6 +184,8 @@ fn main() {
         is_tap: matches.is_present("tap"),
         #[cfg(any(target_os = "linux", target_os = "android"))]
         enable_udp_gro: !matches.is_present("disable-udp-gro"),
+        dual_stack: matches.is_present("dual-stack"),
+        raw_ip_protocol: matches.value_of("raw-ip-protocol").map(|v| v.parse().expect("Invalid Raw IP protocol")),
     };
 
     let mut device_handle: DeviceHandle = match DeviceHandle::new(tun_name, config) {
