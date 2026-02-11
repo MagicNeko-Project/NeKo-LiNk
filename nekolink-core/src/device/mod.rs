@@ -31,8 +31,7 @@ use libc::{iovec, mmsghdr, msghdr, recvmmsg, sendmmsg, sockaddr_storage, MSG_DON
 
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
-use std::io::{self, Write as _};
-use std::io::Write;
+use std::io::{self};
 use std::mem::MaybeUninit;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::os::unix::io::AsRawFd;
@@ -1083,19 +1082,21 @@ impl Device {
 
                                 let mut offset = 0;
                                 // NekoLink: 处理 IP 层头部 (Raw IP 模式) 喵
+                                // 喵！通过 to_vec() 拷贝出一份独立数据，以此释放对 ThreadData t 的借用锁定
+                                let segment_data = segment_buf.to_vec();
                                 if is_raw {
                                     if addr.ip().is_ipv4() {
-                                        if this_len < 20 { continue; }
-                                        let ihl = (segment_buf[0] & 0x0f) as usize * 4;
-                                        if this_len < ihl { continue; }
+                                        if segment_data.len() < 20 { continue; }
+                                        let ihl = (segment_data[0] & 0x0f) as usize * 4;
+                                        if segment_data.len() < ihl { continue; }
                                         offset = ihl;
                                     } else if addr.ip().is_ipv6() {
-                                        if this_len < 40 { continue; }
+                                        if segment_data.len() < 40 { continue; }
                                         offset = 40; // IPv6 固定头部 40 字节喵
                                     }
                                 }
 
-                                let packet = &segment_buf[offset..this_len];
+                                let packet = &segment_data[offset..];
                             let parsed_packet = match rate_limiter.verify_packet(
                                 Some(addr.ip()),
                                 packet,
@@ -1454,7 +1455,7 @@ impl Device {
                     let mut offset = 0;
                     // Connected socket logic (usually UDP only, but if we support raw connected...)
                     // Assuming connected sockets are primarily UDP.
-                    if (is_raw || d.config.ip_protocol.is_some()) {
+                    if is_raw || d.config.ip_protocol.is_some() {
                         if peer_addr.is_ipv4() {
                             if read_bytes < 20 { continue; }
                             let ihl = (t.src_buf[0] & 0x0f) as usize * 4;
@@ -1535,9 +1536,6 @@ impl Device {
                 // * Encapsulate the packet for the given peer
                 // * Send encapsulated packet to the peer's endpoint
                 tracing::debug!("喵！TUN 接口接收到原始报文");
-                let mtu = d.mtu.load(Ordering::Relaxed);
-
-                let peers = &d.peers_by_ip;
                 for _ in 0..MAX_ITR {
                     let pkt_len = match iface.read(&mut t.src_buf[..]) {
                         Ok(src) => src.len(),
