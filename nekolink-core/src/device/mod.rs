@@ -1083,11 +1083,16 @@ impl Device {
 
                                 let mut offset = 0;
                                 // NekoLink: 处理 IP 层头部 (Raw IP 模式) 喵
-                                if is_raw && addr.ip().is_ipv4() {
-                                    if this_len < 20 { continue; }
-                                    let ihl = (segment_buf[0] & 0x0f) as usize * 4;
-                                    if this_len < ihl { continue; }
-                                    offset = ihl;
+                                if is_raw {
+                                    if addr.ip().is_ipv4() {
+                                        if this_len < 20 { continue; }
+                                        let ihl = (segment_buf[0] & 0x0f) as usize * 4;
+                                        if this_len < ihl { continue; }
+                                        offset = ihl;
+                                    } else if addr.ip().is_ipv6() {
+                                        if this_len < 40 { continue; }
+                                        offset = 40; // IPv6 固定头部 40 字节喵
+                                    }
                                 }
 
                                 let packet = &segment_buf[offset..this_len];
@@ -1215,11 +1220,10 @@ impl Device {
                                     }
                                 }
                                 TunnResult::WriteToTunnelTap(packet) => {
-                                    if packet.len() >= 14 {
-                                        let src_mac: [u8; 6] = packet[6..12].try_into().unwrap();
-                                        d.peers_by_mac.lock().insert(src_mac, Arc::clone(peer));
-                                    }
-                                    t.iface.write(packet);
+                                    let frame = packet.to_vec();
+                                    drop(p);
+                                    d.switch_tap_frame(&frame, Some(Arc::clone(peer)), t);
+                                    p = peer.lock();
                                 }
                             } // match res
                                 
@@ -1290,12 +1294,16 @@ impl Device {
                         let mut offset = 0;
                         
                         // NekoLink: 处理 IP 层头部 (Raw IP 模式) 喵
-                        // 如果我们在 Raw 模式 (is_raw == true) 或者传统 Raw 模式配置启用
-                        if (is_raw || d.config.ip_protocol.is_some()) && addr.as_socket().map_or(false, |s| s.is_ipv4()) {
-                            if packet_len < 20 { continue; }
-                            let ihl = (t.src_buf[0] & 0x0f) as usize * 4;
-                            if packet_len < ihl { continue; }
-                            offset = ihl;
+                        if is_raw || d.config.ip_protocol.is_some() {
+                             if addr.as_socket().map_or(false, |s| s.is_ipv4()) {
+                                if packet_len < 20 { continue; }
+                                let ihl = (t.src_buf[0] & 0x0f) as usize * 4;
+                                if packet_len < ihl { continue; }
+                                offset = ihl;
+                             } else if addr.as_socket().map_or(false, |s| s.is_ipv6()) {
+                                if packet_len < 40 { continue; }
+                                offset = 40;
+                             }
                         }
 
 
@@ -1444,14 +1452,18 @@ impl Device {
                 // bytes to the buffer, so this casting is safe.
                 while let Ok(read_bytes) = udp.recv(unsafe { &mut *(&mut t.src_buf[..] as *mut [u8] as *mut [MaybeUninit<u8>]) }) {
                     let mut offset = 0;
-                    let mut offset = 0;
                     // Connected socket logic (usually UDP only, but if we support raw connected...)
                     // Assuming connected sockets are primarily UDP.
-                    if (is_raw || d.config.ip_protocol.is_some()) && peer_addr.is_ipv4() {
-                        if read_bytes < 20 { continue; }
-                        let ihl = (t.src_buf[0] & 0x0f) as usize * 4;
-                        if read_bytes < ihl { continue; }
-                        offset = ihl;
+                    if (is_raw || d.config.ip_protocol.is_some()) {
+                        if peer_addr.is_ipv4() {
+                            if read_bytes < 20 { continue; }
+                            let ihl = (t.src_buf[0] & 0x0f) as usize * 4;
+                            if read_bytes < ihl { continue; }
+                            offset = ihl;
+                        } else if peer_addr.is_ipv6() {
+                            if read_bytes < 40 { continue; }
+                            offset = 40;
+                        }
                     }
 
                     let mut p = peer.lock();
