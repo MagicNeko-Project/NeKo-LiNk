@@ -1907,9 +1907,9 @@ async fn run_global_raw_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                                          let peer_pub_key = BASE64.encode(&decrypted[..32]);
                                          // 寻找本地配置中对应的 Peer 喵
                                          let peer_config = state.config.peers.iter().find(|p| p.public_key.as_deref() == Some(&peer_pub_key));
-                                         let peer_mode = peer_config.and_then(|p| p.mode.as_ref());
+                                         let peer_mode = peer_config.and_then(|p| p.mode.as_ref()).map(|s| s.as_str()).unwrap_or("ip");
 
-                                         let _ = configure_peer(&state.config.interface, &peer_pub_key, ip_addr.to_string(), state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0) || state.config.mesh_mode, "ip", 0, &state.config.psk, Some(state.client_sidecar.clone()), peer_mode).await;
+                                         let _ = configure_peer(&state.config.interface, &peer_pub_key, ip_addr.to_string(), state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0) || state.config.mesh_mode, "ip", 0, &state.config.psk, Some(state.client_sidecar.clone()), Some(&peer_mode.to_string())).await;
  
                                          // Raw IP 响应喵！只有非 Mesh 且未建立连接时才回发喵
                                           let established = get_established_peers(&state.config.interface).await;
