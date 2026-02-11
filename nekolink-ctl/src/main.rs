@@ -1468,14 +1468,12 @@ async fn run_global_udp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                                     endpoint = format!("{}:{}", endpoint, peer_tunnel_port);
                                 }
 
-                                println!("喵！{} (UDP) 握手处理成功：{} -> {}", signal_port, endpoint, state.config.interface);
-                                
                                 // 寻找本地配置中对应的 Peer 模式喵
                                 let peer_config = state.config.peers.iter().find(|p| p.public_key.as_deref() == Some(&peer_pub_key));
                                 let peer_mode = peer_config.and_then(|p| p.mode.as_ref());
 
                                 // 配置 Peer 喵
-                                let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0) || state.config.mesh_mode, &state.config.mode, 0, &state.config.psk, Some(state.client_sidecar.clone()), peer_mode).await;
+                                let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0) || state.config.mesh_mode, &state.config.mode, 0, &state.config.psk, Some(state.client_sidecar.clone()), peer_mode, "UDP").await;
                                 
                                 // 服务端响应：只有当接收到的包不是响应包（或者处于 Mesh 模式主动握手阶段）才回发响应喵
                                 // 这里简化为：始终回发响应，除非已经建立了连接喵
@@ -1663,7 +1661,7 @@ async fn run_global_tcp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                                                    let peer_config = state_peers.iter().find(|p| p.public_key.as_deref() == Some(&peer_pub_key));
                                                    let peer_mode = peer_config.and_then(|p| p.mode.as_ref());
 
-                                                   let _ = configure_peer(&interface_inner, &peer_pub_key, endpoint, None, peer_mtu, mesh_mode || state.config.mtu == Some(0), &mode_inner, 0, &psk_inner, Some(client_sidecar_clone), peer_mode).await;
+                                                   let _ = configure_peer(&interface_inner, &peer_pub_key, endpoint, None, peer_mtu, mesh_mode || state.config.mtu == Some(0), &mode_inner, 0, &psk_inner, Some(client_sidecar_clone), peer_mode, "Relay").await;
                                                                             }
                                                                         }
                                                                     },
@@ -1726,13 +1724,11 @@ async fn run_global_tcp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                                                     let _ = sync_lowest_mtu(&state.config.interface).await;
                                                 }
                                             }
-
-                                            println!("喵！{} (TCP) 握手处理成功：{} -> {}", signal_port, endpoint, state.config.interface);
                                             
                                             let peer_config = state.config.peers.iter().find(|p| p.public_key.as_deref() == Some(&peer_pub_key));
                                             let peer_mode = peer_config.and_then(|p| p.mode.as_ref());
 
-                                            let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0) || state.config.mesh_mode, &state.config.mode, 0, &state.config.psk, Some(state.client_sidecar.clone()), peer_mode).await;
+                                            let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0) || state.config.mesh_mode, &state.config.mode, 0, &state.config.psk, Some(state.client_sidecar.clone()), peer_mode, "TCP-Server").await;
                                             
                                             let msg_base = state.pub_key.as_bytes().to_vec();
                                             let current_mtu = get_interface_mtu(&state.config.interface).unwrap_or(1420);
@@ -1889,7 +1885,6 @@ async fn run_global_raw_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                                      if let Ok(decrypted) = cipher.decrypt(nonce, encrypted) {
                                          let ip_addr = addr.as_socket().map(|s| s.ip()).unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
                                          let peer_mtu = if decrypted.len() >= 34 { Some(u16::from_be_bytes([decrypted[32], decrypted[33]])) } else { None };
-                                         println!("喵！{} (Raw IP) 识别成功：{} -> {}", proto, ip_addr, state.config.interface);
                                          
                                          if let Some(mtu) = peer_mtu {
                                              let mut lock = PEER_MTU_MAP.get_or_init(|| tokio::sync::Mutex::new(HashMap::new())).lock().await;
@@ -1907,7 +1902,7 @@ async fn run_global_raw_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                                          let peer_config = state.config.peers.iter().find(|p| p.public_key.as_deref() == Some(&peer_pub_key));
                                          let peer_mode = peer_config.and_then(|p| p.mode.as_ref()).map(|s| s.as_str()).unwrap_or("ip");
 
-                                         let _ = configure_peer(&state.config.interface, &peer_pub_key, ip_addr.to_string(), state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0) || state.config.mesh_mode, "ip", 0, &state.config.psk, Some(state.client_sidecar.clone()), Some(&peer_mode.to_string())).await;
+                                         let _ = configure_peer(&state.config.interface, &peer_pub_key, ip_addr.to_string(), state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0) || state.config.mesh_mode, "ip", 0, &state.config.psk, Some(state.client_sidecar.clone()), Some(&peer_mode.to_string()), "Raw IP").await;
  
                                          // Raw IP 响应喵！只有非 Mesh 且未建立连接时才回发喵
                                           let established = get_established_peers(&state.config.interface).await;
@@ -1992,7 +1987,7 @@ fn derive_cipher(psk: &str) -> ChaCha20Poly1305 {
 // 原 udp2raw 逻辑已由 Mullvad TCP 侧车方案替代喵
 
 
-async fn configure_peer(interface: &str, peer_pub_key: &str, mut endpoint: String, keepalive: Option<u16>, peer_mtu: Option<u16>, auto_sync_mtu: bool, mode: &str, _tcp_data_port: u16, _psk: &str, client_sidecar: Option<Arc<parking_lot::Mutex<Option<tokio::process::Child>>>>, peer_mode: Option<&String>) -> Result<()> {
+async fn configure_peer(interface: &str, peer_pub_key: &str, mut endpoint: String, keepalive: Option<u16>, peer_mtu: Option<u16>, auto_sync_mtu: bool, mode: &str, _tcp_data_port: u16, _psk: &str, client_sidecar: Option<Arc<parking_lot::Mutex<Option<tokio::process::Child>>>>, peer_mode: Option<&String>, origin: &str) -> Result<()> {
     // 尝试解析域名端点喵
     if !endpoint.is_empty() {
         let resolved = if let Ok(mut addrs) = tokio::net::lookup_host(&endpoint).await {
@@ -2060,9 +2055,9 @@ async fn configure_peer(interface: &str, peer_pub_key: &str, mut endpoint: Strin
             if old_ep == &endpoint {
                 return Ok(());
             }
-            println!("检测到接口 {} 的队友 {} Endpoint 变更: {} -> {}喵！", interface, peer_pub_key, old_ep, endpoint);
+            println!("喵！{} [{}] 识别到对端 {} 漫游变更: {} -> {} 喵！", interface, origin, peer_pub_key, old_ep, endpoint);
         } else {
-            println!("首次识别接口 {} 的队友 {}: {}喵！", interface, peer_pub_key, endpoint);
+            println!("喵！{} [{}] 首次识别到对端 {}: {} 喵！", interface, origin, peer_pub_key, endpoint);
         }
     }
 
@@ -2095,7 +2090,7 @@ async fn configure_peer(interface: &str, peer_pub_key: &str, mut endpoint: Strin
         cache.insert(key, endpoint.clone());
     }
 
-    println!("配置队友 {} (Endpoint: {}) 成功喵！", peer_pub_key, endpoint);
+    println!("喵！{} 对端 {} [模式: {}] 配置同步成功喵！", interface, peer_pub_key, actual_peer_mode);
 
     if let Some(m) = peer_mtu {
         // 智能同步逻辑喵：
