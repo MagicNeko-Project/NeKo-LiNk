@@ -1561,7 +1561,6 @@ async fn run_global_tcp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
 
                     let cipher = derive_cipher(&state.config.psk);
                     let pub_key_bytes = state.pub_key.as_bytes().to_vec();
-                    let state_peers = state.config.peers.clone();
 
                     for peer in &state.config.peers {
                         if peer.endpoint.is_empty() { continue; }
