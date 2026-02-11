@@ -2033,8 +2033,17 @@ async fn configure_peer(interface: &str, peer_pub_key: &str, mut endpoint: Strin
         }
         // 服务端不会提供 client_sidecar，因此不会启动 udp2tcp 喵
         
-        // 修改 WireGuard 的 Endpoint 为本地网桥喵
+    // 修改 WireGuard 的 Endpoint 为本地网桥喵
         endpoint = format!("127.0.0.1:{}", bridge_port);
+    }
+
+    // NekoLink: 如果该对端处于 RawIP 模式，强制归一化 Endpoint（抹除端口）喵
+    // 这样可以防止在双栈环境下，UDP 信令(带端口)与 RawIP 信令(不带端口)交替到达导致 cache 震荡
+    let actual_peer_mode = peer_mode.map(|s| s.as_str()).unwrap_or(mode);
+    if actual_peer_mode == "ip" || actual_peer_mode == "rawip" {
+        if let Ok(sa) = endpoint.parse::<SocketAddr>() {
+            endpoint = sa.ip().to_string();
+        }
     }
 
     let probe_address = if endpoint.starts_with("127.0.0.1") { probe_address_orig } else { endpoint.clone() };
@@ -2060,9 +2069,8 @@ async fn configure_peer(interface: &str, peer_pub_key: &str, mut endpoint: Strin
     // 转换公钥格式（Base64 -> Hex for UAPI）
     let peer_pub_key_hex = base64_to_hex(peer_pub_key);
 
-    // 幂等保护：先删除旧 Peer 再添加喵
-    let remove_cmd = format!("set=1\npublic_key={}\nremove=true\n\n", peer_pub_key_hex);
-    let _ = send_uapi(interface, &remove_cmd).await; 
+    // NekoLink: 移除“先删后加”逻辑喵，直接更新 Endpoint 即可实现无缝漫游
+    // 之前使用 remove=true 会导致 WireGuard 会话重置，在高频信令下会造成 DuplicateCounter 报错
 
     let mut uapi_cmd = format!(
         "set=1\npublic_key={}\nallowed_ip=0.0.0.0/0\nallowed_ip=::/0\nendpoint={}\n",
