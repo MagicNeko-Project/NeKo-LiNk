@@ -1366,8 +1366,9 @@ async fn run_global_udp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                     for peer in &state.config.peers {
                         if peer.endpoint.is_empty() { continue; }
 
-                        // 如果 Peer 明确要求 IP 模式且接口不是双栈，则 UDP 任务不负责发送它的信令喵
-                        if peer.mode.as_deref() == Some("ip") && !state.config.dual_stack { continue; }
+                        // NekoLink: 严格遵守 Peer 的传输模式配置喵
+                        // 如果则对应 Peer 明确要求 IP 模式，则 UDP 任务不负责发送它的信令喵
+                        if peer.mode.as_deref() == Some("ip") { continue; }
 
                         // 如果非 Mesh 模式且该对端已建立连接，则跳过信令（Smart Halt 喵）
                         if !state.config.mesh_mode && peer.public_key.as_ref().map_or(false, |pk| established.contains(pk)) { continue; }
@@ -1804,7 +1805,11 @@ async fn run_global_raw_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                     for peer in &state.config.peers {
                         if peer.endpoint.is_empty() { continue; }
 
-                        // 如果接口不是双栈且不是 IP 模式，只有 mode: "ip" 的 Peer 才会发 RawIP 信令喵
+                        // NekoLink: 严格遵守 Peer 的传输模式配置喵
+                        // 如果对端明确要求 UDP 模式，则 RawIP 任务不负责发送它的信令喵
+                        if peer.mode.as_deref() == Some("udp") { continue; }
+
+                        // 如果接口既不是 IP 模式也不是双栈模式，且 Peer 也没说要用 IP，则跳过（兜底保护）喵
                         if state.config.mode != "ip" && !state.config.dual_stack && peer.mode.as_deref() != Some("ip") { continue; }
 
                         // 如果非 Mesh 模式且该对端已建立连接，则跳过信令（Smart Halt 喵）
