@@ -491,7 +491,7 @@ function edit_config() {
     esac
 
     read -p "开启 P2P Mesh 全网状模式? (当前: $mesh_mode, [y/n], 直接回车保持不变): " mesh_c
-    case "$mesh_choice" in
+    case "$mesh_c" in
         y) mesh_mode="true" ;;
         n) mesh_mode="false" ;;
         *) mesh_mode="$mesh_mode" ;;
@@ -695,11 +695,20 @@ function create_config() {
         *)
             mode="udp"
             proto="null"
-            dual_stack="false"
-            raw_ip_protocol="null"
             echo -e "${GRAY}魔法贴士：设为 0 可以让系统在握手时自动分配最合适的监听位置喵。${NC}"
             read -p "请输入 UDP 监听端口 ( 0 为自动, 默认 0 ): " listen_port
             [ -z "$listen_port" ] && listen_port=0
+            
+            echo -e "${GRAY}魔法贴士：开启辅助 RawIP 监听可以同时接纳 IP 协议的队友喵！${NC}"
+            read -p "是否同时开启辅助 RawIP 监听? [y/n] (默认 n): " dual_c
+            if [ "$dual_c" == "y" ]; then
+                dual_stack="true"
+                read -p "请输入辅助 RawIP 协议号 (默认 141): " proto_choice
+                [ -z "$proto_choice" ] && raw_ip_protocol=141 || raw_ip_protocol="$proto_choice"
+            else
+                dual_stack="false"
+                raw_ip_protocol="null"
+            fi
             ;;
     esac
 
