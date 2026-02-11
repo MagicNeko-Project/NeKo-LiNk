@@ -1593,7 +1593,7 @@ async fn run_global_tcp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                         if let Some(addr) = addr_opt {
                             let cipher = cipher.clone();
                             let pub_key_bytes = pub_key_bytes.clone();
-                            let interface_inner = interface.clone();
+                            let interface_inner = state.config.interface.clone();
                             let is_raw_ip_mode = state.config.mode == "ip";
                             let mode_inner = state.config.mode.clone();
                             let psk_inner = state.config.psk.clone();
@@ -1602,7 +1602,6 @@ async fn run_global_tcp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                             let client_sidecar_clone = state.client_sidecar.clone();
                             
                             let socks5_port_exists = state.config.socks5_port.is_some();
-                            let persistent_keepalive = state.config.persistent_keepalive;
                             let mesh_mode = state.config.mesh_mode;
                             let state_peers = state.config.peers.clone();
                             tokio::spawn(async move {
