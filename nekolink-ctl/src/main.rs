@@ -511,13 +511,14 @@ async fn main() -> Result<()> {
                             if let Some(p) = peer.signal_port { ports.insert(p); }
                         }
                         // Raw IP 协议号检测喵
-                        if config.mode == "ip" {
-                            protos.insert(config.ip_protocol.unwrap_or(141));
+                        let proto_to_listen = config.raw_ip_protocol.or(config.ip_protocol).unwrap_or(141);
+                        if config.mode == "ip" || config.dual_stack {
+                            protos.insert(proto_to_listen);
                         }
-                        // 即使全局不是 ip 模式，也要检查 Peer 是否需要 Raw IP 喵！
+                        // 即使全局不是 ip/双栈 模式，也要检查 Peer 是否需要 Raw IP 喵！
                         for peer in &config.peers {
                             if peer.mode.as_deref() == Some("ip") {
-                                protos.insert(config.ip_protocol.unwrap_or(141));
+                                protos.insert(proto_to_listen);
                             }
                         }
                     }
