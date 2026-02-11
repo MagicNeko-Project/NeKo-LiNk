@@ -1351,7 +1351,8 @@ async fn run_global_udp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
 
                 for state in current_states {
                     // 跳过非 UDP 模式、空公钥、以及 WireGuard 兼容模式的接口喵
-                    if state.config.mode != "udp" || state.pub_key.as_bytes() == &[0u8; 32] || state.config.native_wg_compat { continue; }
+                    // NekoLink Mesh/Dual-Stack: UDP 信令任务应当处理 udp 模式接口，或者开启了双栈的接口喵
+                    if (state.config.mode != "udp" && !state.config.dual_stack) || state.pub_key.as_bytes() == &[0u8; 32] || state.config.native_wg_compat { continue; }
                     
                     // 仅在非服务端模式（有 Peer Endpoint）或 Mesh 模式下主动发起信令喵
                     let is_client = !state.config.peers.is_empty() && state.config.peers.iter().any(|p| !p.endpoint.is_empty());
@@ -1363,6 +1364,9 @@ async fn run_global_udp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                     let msg_base = state.pub_key.as_bytes().to_vec();
                     for peer in &state.config.peers {
                         if peer.endpoint.is_empty() { continue; }
+
+                        // 如果 Peer 明确要求 IP 模式且接口不是双栈，则 UDP 任务不负责发送它的信令喵
+                        if peer.mode.as_deref() == Some("ip") && !state.config.dual_stack { continue; }
 
                         // 如果非 Mesh 模式且该对端已建立连接，则跳过信令（Smart Halt 喵）
                         if !state.config.mesh_mode && peer.public_key.as_ref().map_or(false, |pk| established.contains(pk)) { continue; }
@@ -1433,7 +1437,8 @@ async fn run_global_udp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
 
                     for state in current_states {
                         // 跳过非 UDP 模式和 WireGuard 兼容模式的接口喵
-                        if state.config.mode != "udp" || state.config.native_wg_compat { continue; }
+                        // 双栈模式下，UDP 管线也可能收到来自 IP 模式对端的握手回复喵
+                        if (state.config.mode != "udp" && !state.config.dual_stack) || state.config.native_wg_compat { continue; }
                         let cipher = derive_cipher(&state.config.psk);
                         if let Ok(decrypted) = cipher.decrypt(nonce, encrypted_part) {
                             if decrypted.len() >= 36 {
@@ -1785,9 +1790,11 @@ async fn run_global_raw_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                 };
 
                 for state in current_states {
-                    let st_proto = state.config.ip_protocol.unwrap_or(141);
-                    // 跳过非 Raw IP 模式、协议不匹配、空公钥、以及 WireGuard 兼容模式的接口喵
-                    if state.config.mode != "ip" || st_proto != proto || state.pub_key.as_bytes() == &[0u8; 32] || state.config.native_wg_compat { continue; }
+                    let st_proto = state.config.raw_ip_protocol.or(state.config.ip_protocol).unwrap_or(141);
+                    // 跳过空公钥、以及 WireGuard 兼容模式的接口喵
+                    // NekoLink Mesh: 如果接口是 ip 模式，或者开启了 dual_stack，或者存在 mode: "ip" 的 Peer，都进入此流程喵
+                    let has_ip_peer = state.config.peers.iter().any(|p| p.mode.as_deref() == Some("ip"));
+                    if (state.config.mode != "ip" && !state.config.dual_stack && !has_ip_peer) || st_proto != proto || state.pub_key.as_bytes() == &[0u8; 32] || state.config.native_wg_compat { continue; }
                     
                     // 仅在非服务端模式（有 Peer Endpoint）或 Mesh 模式下主动发起信令喵
                     let is_client = !state.config.peers.is_empty() && state.config.peers.iter().any(|p| !p.endpoint.is_empty());
@@ -1799,6 +1806,9 @@ async fn run_global_raw_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                     let pub_key_bytes = state.pub_key.as_bytes().to_vec();
                     for peer in &state.config.peers {
                         if peer.endpoint.is_empty() { continue; }
+
+                        // 如果接口不是双栈且不是 IP 模式，只有 mode: "ip" 的 Peer 才会发 RawIP 信令喵
+                        if state.config.mode != "ip" && !state.config.dual_stack && peer.mode.as_deref() != Some("ip") { continue; }
 
                         // 如果非 Mesh 模式且该对端已建立连接，则跳过信令（Smart Halt 喵）
                         if !state.config.mesh_mode && peer.public_key.as_ref().map_or(false, |pk| established.contains(pk)) { continue; }
@@ -1871,7 +1881,9 @@ async fn run_global_raw_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                                   for state in current_states {
                                      let st_proto = state.config.raw_ip_protocol.or(state.config.ip_protocol).unwrap_or(141);
                                      // 跳过协议不匹配、以及 WireGuard 兼容模式的接口喵
-                                     if st_proto != proto || state.config.native_wg_compat { continue; }
+                                     // 同时检查是否支持 RawIP 处理（主模式、双栈、或有 IP Peer）喵
+                                     let has_ip_peer = state.config.peers.iter().any(|p| p.mode.as_deref() == Some("ip"));
+                                     if (state.config.mode != "ip" && !state.config.dual_stack && !has_ip_peer) || st_proto != proto || state.config.native_wg_compat { continue; }
                                      let cipher = derive_cipher(&state.config.psk);
                                      if let Ok(decrypted) = cipher.decrypt(nonce, encrypted) {
                                          let ip_addr = addr.as_socket().map(|s| s.ip()).unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
