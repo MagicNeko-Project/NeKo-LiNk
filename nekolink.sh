@@ -3,13 +3,20 @@
 
 set -e
 
-# 颜色定义
-PINK='\033[1;35m'
-CYAN='\033[0;36m'
+# 颜色与样式定义 喵！
+PINK='\033[1;38;5;205m'
+CYAN='\033[1;38;5;51m'
+GOLD='\033[1;38;5;220m'
+GREEN='\033[1;38;5;82m'
+RED='\033[1;38;5;196m'
+BLUE='\033[1;38;5;27m'
+PURPLE='\033[1;38;5;129m'
+GRAY='\033[0;38;5;245m'
+BOLD='\033[1m'
 NC='\033[0m'
 
 if [ "$EUID" -ne 0 ]; then
-  echo "请使用 sudo 运行此脚本喵！"
+  echo -e "${RED}ฅ^•ﻌ•^喵呜... 请使用 ${BOLD}sudo${RED} 运行此脚本喵！${NC}"
   exit 1
 fi
 
@@ -18,47 +25,65 @@ if [ "$#" -gt 0 ]; then
     exit $?
 fi
 
+# 获取版本信息
 if [ -f "/usr/local/share/nekolink/VERSION" ]; then
     VERSION=$(cat /usr/local/share/nekolink/VERSION)
 elif [ -f "VERSION" ]; then
     VERSION=$(cat VERSION)
 else
-    VERSION="3.4.8"
+    VERSION="3.5.0-Magic"
 fi
-echo -e "${PINK}ฅ^•ﻌ•^ฅ 欢迎使用 NekoLink 交互式配置助手 v$VERSION！${NC}"
-echo -e "${CYAN}--- 全局信令通道 [12580] (一按我帮您) 已就绪 ---${NC}"
+
+function print_banner() {
+    clear
+    echo -e "${PINK}"
+    echo "  _   _      _20      _     _       _      "
+    echo " | \ | | ___| | _____| |   (_)_ __ | | __  "
+    echo " |  \| |/ _ \ |/ / _ \ |   | | '_ \| |/ /  "
+    echo " | |\  |  __/   < (_) | |___| | | | |   <   "
+    echo " |_| \_|\___|_|\_\___/|_____|_|_| |_|_|\_\  "
+    echo -e "       ${GOLD}ฅ^•ﻌ•^ฅ ${BOLD}NekoLink Magic Edition v$VERSION${NC}"
+    echo -e "${GRAY}   ----------------------------------------------${NC}"
+    echo -e "${CYAN}    >>> 全局信令中枢 [12580] (一按我帮您) 已就绪喵！ <<<${NC}"
+    echo ""
+}
+
+print_banner
 
 CONFIG_DIR="/etc/neko-link"
 mkdir -p "$CONFIG_DIR"
 
 function show_menu() {
-    echo -e "${CYAN}请选择操作：${NC}"
-    echo "1. 创建新配置文件 (Node Config)"
-    echo "2. 修改现有配置文件 (Edit Config)"
-    echo "3. 重命名接口 (Rename Interface)"
-    echo "4. 删除接口 (Delete Interface)"
-    echo "5. 热重载配置 (Hot Reload)"
-    echo "6. 完全重启 NekoLink 服务 (Systemd Restart)"
-    echo "7. 查看运行状态 (Status)"
-    echo "8. 管理密钥与公钥 (Key Management)"
-    echo "9. 配置文件一键检查与修复 (Fix Configs)"
-    echo "10. 查看配置文件列表"
-    echo "11. 高级设置 (Advanced Settings)"
-    echo "12. 退出"
-    read -p "请输入数字 [1-12]: " choice
+    echo -e "${PURPLE}${BOLD}--- ✧ NekoLink 魔法大厅 ✧ ---${NC}"
+    echo -e "${CYAN}请选择主人想要施展的法术：${NC}"
+    echo -e "  ${GOLD}1.${NC} 召唤新队员 ${GRAY}(Create Config)${NC}"
+    echo -e "  ${GOLD}2.${NC} 调教现有队员 ${GRAY}(Edit Config)${NC}"
+    echo -e "  ${GOLD}3.${NC} 给队员改名 ${GRAY}(Rename Interface)${NC}"
+    echo -e "  ${GOLD}4.${NC} 送别老队员 ${GRAY}(Delete Interface)${NC}"
+    echo -e "  ${GOLD}5.${NC} 施展热重载魔法 ${GRAY}(Hot Reload)${NC}"
+    echo -e "  ${GOLD}6.${NC} 彻底唤醒 NekoLink 服务 ${GRAY}(Systemd Restart)${NC}"
+    echo -e "  ${GOLD}7.${NC} 实时魔法监控看板 ${GRAY}(Live Status)${NC}"
+    echo -e "  ${GOLD}8.${NC} 密钥与公钥密室 ${GRAY}(Key Management)${NC}"
+    echo -e "  ${GOLD}9.${NC} 配置全自动检查与修复 ${GRAY}(Fix Configs)${NC}"
+    echo -e "  ${GOLD}10.${NC} 检阅所有魔法卷轴 ${GRAY}(List Configs)${NC}"
+    echo -e "  ${GOLD}11.${NC} 深入高级魔法探索偏殿 ${GRAY}(Advanced Settings)${NC}"
+    echo -e "  ${RED}12.${NC} 下次再见喵 ${GRAY}(Exit)${NC}"
+    echo -e "${GRAY}-------------------------------${NC}"
+    read -p "请输入魔法代号 [1-12]: " choice
 }
 
 function show_advanced_menu() {
-    echo -e "\n${PINK}--- 高级设置探索偏殿 ---${NC}"
-    echo -e "${CYAN}请选择高级魔法：${NC}"
-    echo "1. 设置全局服务端监听端口 (Global Server Signaling Port)"
-    echo "2. 设置全局 Loopback 接口 (Loopback Interface)"
-    echo "3. 将所有隧道修改为 MTU 自动协商 (MTU Auto-Negotiation)"
-    echo "4. 导入 wg-quick 配置文件 (WireGuard 兼容模式)"
-    echo "5. 一键注入 SOCKS5 极速神力 (Auto-Optimize Kernel)"
-    echo "6. Mullvad TCP 组件诊断 (Diagnose tcp2udp/udp2tcp)"
-    echo "7. 返回主菜单"
-    read -p "请输入数字 [1-7]: " adv_choice
+    echo -e "\n${PURPLE}${BOLD}--- ✧ 禁忌的魔法探索偏殿 ✧ ---${NC}"
+    echo -e "${CYAN}这里有更深奥的黑魔法喵：${NC}"
+    echo -e "  ${GOLD}1.${NC} 设置全局服务端信令端口 ${GRAY}(Global Signaling)${NC}"
+    echo -e "  ${GOLD}2.${NC} 开启全局 Loopback 环回魔法 ${GRAY}(Loopback)${NC}"
+    echo -e "  ${GOLD}3.${NC} 批量注入 MTU 自动协商神力 ${GRAY}(Auto-MTU)${NC}"
+    echo -e "  ${GOLD}4.${NC} 吸收 wg-quick 的远古卷轴 ${GRAY}(WireGuard Import)${NC}"
+    echo -e "  ${GOLD}5.${NC} 注入 SOCKS5 极速内核神力 ${GRAY}(Kernel Optimize)${NC}"
+    echo -e "  ${GOLD}6.${NC} Mullvad TCP 魔法组件诊断 ${GRAY}(Diagnose)${NC}"
+    echo -e "  ${GOLD}7.${NC} 返回大厅喵 ${GRAY}(Back)${NC}"
+    echo -e "${GRAY}-------------------------------${NC}"
+    read -p "请输入进阶代号 [1-7]: " adv_choice
 }
 
 function import_wgquick_config() {
@@ -248,14 +273,14 @@ function set_all_tunnels_auto_mtu() {
 }
 
 function edit_config() {
-    echo -e "\n${PINK}--- 正在进入配置修改魔法 ---${NC}"
+    echo -e "\n${PURPLE}${BOLD}--- ✧ 正在进入队员调教密室 ✧ ---${NC}"
     configs=("$CONFIG_DIR"/*.json)
     if [ ! -e "${configs[0]}" ]; then
-        echo -e "${RED}喵？没有找到任何配置文件。${NC}"
+        echo -e "${RED}喵？一个人都没有，没法调教喵。${NC}"
         return
     fi
 
-    echo -e "${CYAN}现有的配置文件列表：${NC}"
+    echo -e "${CYAN}请选择要调教的队员编号：${NC}"
     for i in "${!configs[@]}"; do
         echo "$((i+1)). $(basename "${configs[$i]}")"
     done
@@ -336,12 +361,13 @@ function edit_config() {
     fi
 
     # 交互式修改
-    read -p "传输模式 (当前: $mode, [1] ip, [2] udp, [3] Mullvad TCP 模式, 直接回车保持不变): " m_choice
+    echo -e "\n${GOLD}✧ 传输魔法变身 (Transport Mode)${NC}"
+    read -p "当前模式: $mode, [1] ip (RawIP), [2] udp, [3] Mullvad TCP, 直接回车保持不变: " m_choice
     case "$m_choice" in
         1) mode="ip" ;;
         2) mode="udp" ;;
         3) mode="mullvad-tcp" 
-           echo -e "${PINK}... 使用 Mullvad TCP 模式喵！${NC}" ;;
+           echo -e "${PINK}... 已开启 Mullvad TCP 护盾魔法喵！${NC}" ;;
         *) mode="$curr_mode" ;;
     esac
 
@@ -391,41 +417,46 @@ function edit_config() {
         esac
     fi
 
-    read -p "本地隧道 IP (当前: $local_addr, 直接回车保持不变): " l_addr
+    echo -e "\n${GOLD}✧ 本地隧道 IP (Interface Address)${NC}"
+    read -p "当前: $local_addr, 直接回车保持不变: " l_addr
     [ -z "$l_addr" ] && local_addr="$local_addr" || local_addr="$l_addr"
 
+    echo -e "\n${GOLD}✧ 对端信号站 (Endpoint)${NC}"
     if [ "$mode" == "ip" ]; then
         read -p "对端公网 IP (当前: $endpoint, 直接回车保持不变): " ep
     else
-        echo -e "${PINK}提示：对端端点应为 IP:服务端信令端口 (通常为 12580) 喵！${NC}"
-        read -p "对端 Endpoint (当前: $endpoint, 直接回车保持不变): " ep
+        echo -e "${GRAY}魔法贴士：端点通常应为 IP:信令端口 (如 1.2.3.4:12580) 喵！${NC}"
+        read -p "Endpoint (当前: $endpoint, 直接回车保持不变): " ep
     fi
     [ -z "$ep" ] && endpoint="$endpoint" || endpoint="$ep"
 
+    echo -e "\n${GOLD}✧ 生命体征与颗粒度 (Keepalive & MTU)${NC}"
     read -p "Keepalive 间隔 (当前: $keepalive, 直接回车保持不变): " ka
     [ -z "$ka" ] && keepalive="$keepalive" || keepalive="$ka"
 
-    read -p "MTU (当前: $mtu, 直接回车保持不变): " m
+    read -p "MTU 大小 (当前: $mtu, 直接回车保持不变): " m
     [ -z "$m" ] && mtu="$mtu" || mtu="$m"
 
-    read -p "开启 MSS 修复? (当前: $clamp_mss, [y/n], 直接回车保持不变): " mss_c
+    read -p "开启 MSS 自动修复? (当前: $clamp_mss, [y/n], 直接回车保持不变): " mss_c
     case "$mss_c" in
         y) clamp_mss="true" ;;
         n) clamp_mss="false" ;;
         *) clamp_mss="$clamp_mss" ;;
     esac
 
+    echo -e "\n${GOLD}✧ 契约与路由 (PSK & Route)${NC}"
     read -p "预共享密钥 PSK (当前: $psk, 直接回车保持不变): " p_sk
     [ -z "$p_sk" ] && psk="$psk" || psk="$p_sk"
 
-    read -p "自动系统路由? (当前: $auto_route, [y/n], 直接回车保持不变): " ar_c
+    read -p "自动注入系统路由? (当前: $auto_route, [y/n], 直接回车保持不变): " ar_c
     case "$ar_c" in
         y) auto_route="true" ;;
         n) auto_route="false" ;;
         *) auto_route="$auto_route" ;;
     esac
 
-    read -p "开启本地 SOCKS5 服务端? (当前端口: $socks5_port, 输入端口号开启如 1080, 输入 n 关闭, 直接回车保持不变): " s5_c
+    echo -e "\n${GOLD}✧ SOCKS5 代理神力 (Optional Proxy)${NC}"
+    read -p "代理端口 (当前: $socks5_port, 输入端口开启如 1080, 输入 n 关闭, 直接回车保持不变): " s5_c
     case "$s5_c" in
         n) socks5_port="null" ;;
         "") socks5_port="$socks5_port" ;;
@@ -451,6 +482,7 @@ function edit_config() {
         s5_loop="false"
     fi
 
+    echo -e "\n${GOLD}✧ 物理形态与网格协议 (TAP & Mesh)${NC}"
     read -p "开启二层透明桥接 (TAP) 模式? (当前: $transport_mode, [y/n], 直接回车保持不变): " tap_c
     case "$tap_c" in
         y) transport_mode="tap" ;;
@@ -459,21 +491,22 @@ function edit_config() {
     esac
 
     read -p "开启 P2P Mesh 全网状模式? (当前: $mesh_mode, [y/n], 直接回车保持不变): " mesh_c
-    case "$mesh_c" in
+    case "$mesh_choice" in
         y) mesh_mode="true" ;;
         n) mesh_mode="false" ;;
         *) mesh_mode="$mesh_mode" ;;
     esac
 
-    read -p "是否修改本地信令监听端口? (当前接口: $local_signal_port, 全局: $global_sig_port, [y/n], 默认 n): " change_sig
+    echo -e "\n${GOLD}✧ 信令枢纽调谐 (Signaling Port)${NC}"
+    read -p "是否修改信令监听端口? (当前接口: $local_signal_port, 全局: $global_sig_port, [y/n], 默认 n): " change_sig
     if [ "$change_sig" == "y" ]; then
-        echo "1. 修改全局端口 (影响所有接口)"
-        echo "2. 修改当前接口专属端口 (覆盖全局)"
-        read -p "请选择喵 [1-2]: " sig_choice
+        echo -e "  ${GOLD}1.${NC} 修改角色全局端口 ${GRAY}(影响所有队员)${NC}"
+        echo -e "  ${GOLD}2.${NC} 修改该队员专属端口 ${GRAY}(仅限当前接口)${NC}"
+        read -p "请选择调教方式 [1-2]: " sig_choice
         if [ "$sig_choice" == "1" ]; then
             set_global_signal_port
         elif [ "$sig_choice" == "2" ]; then
-           read -p "请输入当前接口信令端口 (输入 null 清除): " lsig
+           read -p "请输入专属信令端口 (输入 null 清除): " lsig
            if [ -n "$lsig" ]; then
                local_signal_port="$lsig"
            fi
@@ -482,8 +515,8 @@ function edit_config() {
 
     # 对端管理
     curr_peers=$(jq -c '.peers // []' "$selected_cfg")
-    echo -e "\n${PINK}--- 对端 (Peers) 管理魔法 ---${NC}"
-    read -p "是否需要管理对端列表? (y/n, 默认 n): " manage_p_choice
+    echo -e "\n${PURPLE}${BOLD}--- ✧ 招募与编排队员对端 (Peers) ✧ ---${NC}"
+    read -p "是否需要打理对端队员列表? (y/n, 默认 n): " manage_p_choice
     if [ "$manage_p_choice" == "y" ]; then
         peers_json=$(add_peers_interactively "$curr_peers")
     else
@@ -532,34 +565,34 @@ function add_peers_interactively() {
     [ "$peers" == "null" ] && peers="[]"
     
     while true; do
-        echo -e "\n${PINK}--- 对端 (Peer) 管理中心喵 ---${NC}" >&2
+        echo -e "\n${PURPLE}${BOLD}--- ✧ 编队管理中心 (Peer Management) ✧ ---${NC}" >&2
         if [ "$peers" == "[]" ] || [ -z "$peers" ]; then
-            echo -e "${CYAN}( 目前还没有配置任何对端喵 )${NC}" >&2
+            echo -e "${GRAY}( 目前阵型里还没有其他小伙伴喵 )${NC}" >&2
         else
             print_peers "$peers"
         fi
         
-        echo -e "\n${CYAN}请选择操作：${NC}" >&2
-        echo "1. 添加新对端 (Add)" >&2
-        echo "2. 删除对端 (Delete)" >&2
-        echo "3. 完成并保存 (Save & Exit)" >&2
-        read -p "请选择 [1-3]: " peer_op
+        echo -e "\n${CYAN}选择招募或整编指令：${NC}" >&2
+        echo -e "  ${GOLD}1.${NC} 招待新伙伴入队 ${GRAY}(Add)${NC}" >&2
+        echo -e "  ${GOLD}2.${NC} 劝退某个伙伴 ${GRAY}(Delete)${NC}" >&2
+        echo -e "  ${GOLD}3.${NC} 保存阵型并返回调教密室 ${GRAY}(Save & Exit)${NC}" >&2
+        read -p "请指令代号 [1-3]: " peer_op
         
         case "$peer_op" in
             1)
-                echo -e "\n${PINK}--- 添加对端信息 ---${NC}" >&2
-                read -p "请输入对端 IP 地址 (例如 1.2.3.4): " p_ip
-                if [ -z "$p_ip" ]; then echo "IP 不能为空喵！" >&2; continue; fi
+                echo -e "\n${GOLD}✧ [伙伴情报录入]${NC}" >&2
+                read -p "请输入伙伴的公网 IP/域名: " p_ip
+                if [ -z "$p_ip" ]; then echo -e "${RED}伙伴的名字不能为空喵！${NC}" >&2; continue; fi
                 
-                read -p "请输入对端信令端口 (默认 12580): " p_sig_port
+                read -p "请输入伙伴的信令端口 (默认 12580): " p_sig_port
                 [ -z "$p_sig_port" ] && p_sig_port=12580
                 
-                echo -e "${CYAN}请选择该对端的传输协议：${NC}" >&2
-                echo "1. 使用全局默认 (Global Default)" >&2
-                echo "2. 强制使用 UDP" >&2
-                echo "3. 强制使用 RawIP (ip)" >&2
-                echo "4. 强制使用 TCP (mullvad-tcp)" >&2
-                read -p "请选择 [1-4]: " p_mode_choice
+                echo -e "${CYAN}请选择与该伙伴通讯的魔法属性：${NC}" >&2
+                echo -e "  ${GOLD}1.${NC} 跟随全局魔法 ${GRAY}(Use Global Default)${NC}" >&2
+                echo -e "  ${GOLD}2.${NC} 强制使用 UDP 术式" >&2
+                echo -e "  ${GOLD}3.${NC} 强制使用 RawIP 秘术 (ip)" >&2
+                echo -e "  ${GOLD}4.${NC} 强制使用 TCP 护盾 (mullvad-tcp)" >&2
+                read -p "请选择属性 [1-4]: " p_mode_choice
                 p_mode="null"
                 case "$p_mode_choice" in
                     2) p_mode="udp" ;;
@@ -571,13 +604,13 @@ function add_peers_interactively() {
                     '{endpoint: $ep, signal_port: $sport, mode: (if $mode == "null" then null else $mode end)}')
                 
                 peers=$(echo "$peers" | jq ". += [$new_peer]")
-                echo -e "${PINK}对端已成功捕获！喵呜～${NC}" >&2
+                echo -e "${PINK}新伙伴已成功捕获并登记在案！喵呜～${NC}" >&2
                 ;;
             2)
-                if [ "$peers" == "[]" ]; then echo "没有对端可以删掉喵！" >&2; continue; fi
-                read -p "请输入要删除的对端编号: " p_idx
+                if [ "$peers" == "[]" ]; then echo -e "${RED}没有队员可以驱逐喵！${NC}" >&2; continue; fi
+                read -p "请输入要劝退的队员编号: " p_idx
                 peers=$(echo "$peers" | jq "del(.[$((p_idx-1))])")
-                echo -e "${PINK}已成功放生对端 $p_idx 喵！${NC}" >&2
+                echo -e "${PINK}呼... 已成功送别对端 $p_idx 队员喵！(〃'▽'〃)${NC}" >&2
                 ;;
             3)
                 break
@@ -591,28 +624,30 @@ function add_peers_interactively() {
 }
 
 function create_config() {
-    echo -e "\n${PINK}--- 开始创建 NekoLink 配置 ---${NC}"
+    echo -e "\n${PURPLE}${BOLD}--- ✧ 开启一段新的隧道冒险 ✧ ---${NC}"
+    echo -e "${CYAN}我们要召唤哪一位新的战斗队员呢喵？${NC}"
     
-    read -p "请输入接口名称 ( 默认 nekotun0 ): " iface
+    read -p "请输入魔法接口名称 ( 默认 nekotun0 ): " iface
     [ -z "$iface" ] && iface="nekotun0"
 
-    echo -e "\n${CYAN}选择网络层级：${NC}"
-    echo "1. 三层模式 (TUN, 标准 IP 隧道, 默认)"
-    echo "2. 二层模式 (TAP, 透明桥接/交换机模式, 推荐用于 Mesh)"
-    read -p "请选择 [1-2]: " tmode_choice
+    echo -e "\n${GOLD}✧ [第1步] 选择物理形态 (Transport Layer)${NC}"
+    echo -e "${GRAY}注：TAP 模式像镜子一样透明，适合构建复杂的局域网网格喵！${NC}"
+    echo "  1. 三层模式 (TUN, 标准 IP 隧道, 适合大多数场景)"
+    echo "  2. 二层模式 (TAP, 透明桥接模式, 适合二层组网/Mesh)"
+    read -p "请选择形态数字 [1-2]: " tmode_choice
     [ "$tmode_choice" == "2" ] && transport_mode="tap" || transport_mode="tun"
 
-    echo -e "\n${CYAN}选择节点角色：${NC}"
-    echo "1. 服务端 (拥有公用 IP，仅等待连接)"
-    echo "2. 客户端 (连接到上游服务端)"
-    echo "3. 中转/Mesh 节点 (既连接上游，也等待下游连接)"
-    read -p "请选择 [1-3]: " role_choice
+    echo -e "\n${GOLD}✧ [第2步] 定义战场角色 (Node Role)${NC}"
+    echo "  1. 守护者 (Server, 拥有公网身份，静候连接)"
+    echo "  2. 侦察兵 (Client, 主动出击，连接上游)"
+    echo "  3. 圣骑士 (Relay/Mesh, 承上启下，构建全网状网格)"
+    read -p "请选择角色数字 [1-3]: " role_choice
 
     peers_json="[]"
     case "$role_choice" in
         1)
             role="server"
-            echo -e "${PINK}提示：作为服务端，请确保你的信令通道和数据协议号在防火墙已放行喵！${NC}"
+            echo -e "${PINK}★ 守护者贴士：作为服务端，请确保防火墙已对信令端口(默认12580)敞开怀抱喵！${NC}"
             ;;
         2|3)
             [ "$role_choice" == "3" ] && role="relay" || role="client"
@@ -625,19 +660,21 @@ function create_config() {
             ;;
     esac
 
-    echo -e "\n${CYAN}选择全局默认数据传输模式：${NC}"
-    echo "1. IP 协议模式 (绕过 UDP 限制，推荐)"
-    echo "2. UDP 模式 (标准协议)"
-    echo "3. Mullvad TCP 模式 (稳定穿透)"
-    read -p "请选择 [1-3]: " mode_choice
+    echo -e "\n${GOLD}✧ [第3步] 选择数据传输魔法 (Transport Mode)${NC}"
+    echo -e "${GRAY}注：IP 模式最隐蔽，UDP 最通用，TCP 最稳定喵！${NC}"
+    echo "  1. ✨ 纯净 IP 协议 (Raw IP, 100% 模拟物理握手)"
+    echo "  2. 🌀 标准 UDP 模式 (WireGuard 原生动力)"
+    echo "  3. 🛡️ Mullvad TCP 重甲 (无惧严苛阻断)"
+    read -p "请选择魔法类型 [1-3]: " mode_choice
     case "$mode_choice" in
         1)
             mode="ip"
-            read -p "请输入 IP 协议号 [143-252] ( 默认 141 ): " proto
+            read -p "请输入 IP 协议号 [1-255] ( 默认 141 ): " proto
             [ -z "$proto" ] && proto=141
             listen_port="null"
             
-            read -p "是否同时监听 UDP 协议 (开启双栈模式)? [y/n] (默认 y): " dual_c
+            echo -e "${GRAY}魔法贴士：开启双栈监听可以让您同时接纳 UDP 队友喵！${NC}"
+            read -p "是否同时开启 UDP 双栈监听? [y/n] (默认 y): " dual_c
             [ -z "$dual_c" ] && dual_c="y"
             if [ "$dual_c" == "y" ]; then
                 dual_stack="true"
@@ -652,7 +689,7 @@ function create_config() {
             proto="null"
             dual_stack="false"
             raw_ip_protocol="null"
-            read -p "请输入 TCP 监听端口 ( 默认 12581 ): " listen_port
+            read -p "请输入 TCP 护盾监听端口 ( 默认 12581 ): " listen_port
             [ -z "$listen_port" ] && listen_port=12581
             ;;
         *)
@@ -660,47 +697,54 @@ function create_config() {
             proto="null"
             dual_stack="false"
             raw_ip_protocol="null"
-            read -p "请输入数据隧道监听端口 ( 0 为自动协商, 默认 0 ): " listen_port
+            echo -e "${GRAY}魔法贴士：设为 0 可以让系统在握手时自动分配最合适的监听位置喵。${NC}"
+            read -p "请输入 UDP 监听端口 ( 0 为自动, 默认 0 ): " listen_port
             [ -z "$listen_port" ] && listen_port=0
             ;;
     esac
 
     [ "$role" == "relay" ] && def_mesh="y" || def_mesh="n"
+    echo -e "\n${GOLD}✧ [第4步] 魔法网格协同 (Mesh Mode)${NC}"
+    echo -e "${GRAY}注：开启 Mesh 后，队员们会自动寻找并连接彼此喵！${NC}"
     read -p "是否开启 P2P Mesh 全网状模式? (y/n, 默认 $def_mesh): " mesh_choice
     [ -z "$mesh_choice" ] && mesh_choice="$def_mesh"
     [ "$mesh_choice" == "y" ] && mesh_mode="true" || mesh_mode="false"
 
-    read -p "请输入本地隧道接口 IP 地址 ( 示例 10.0.0.1/24 ): " local_addr
+    echo -e "\n${GOLD}✧ [第5步] 灵魂地址与呼吸 (IP & Keepalive)${NC}"
+    read -p "请输入隧道接口 IP 地址 ( 示例 10.0.0.1/24 ): " local_addr
     [ -z "$local_addr" ] && local_addr="10.0.0.1/24"
 
+    read -p "Keepalive 呼吸间隔 (秒, 默认 25): " keepalive
+    [ -z "$keepalive" ] && keepalive=25
+
+    echo -e "\n${GOLD}✧ [第6步] 传输颗粒度调校 (MTU & MSS)${NC}"
     mtu=0
     read -p "MTU 配置：(1. 固定 1420, 2. 手动, 3. 自动同步, 默认 3): " mtu_m
     case "$mtu_m" in
         1) mtu=1420 ;;
-        2) read -p "值: " mtu ;;
+        2) read -p "请输入具体数值: " mtu ;;
         *) mtu=0 ;;
     esac
 
     read -p "是否开启 MSS 自动修复? (y/n, 默认 y): " mss_c
     [ "$mss_c" == "n" ] && clamp_mss="false" || clamp_mss="true"
 
-    read -p "Keepalive 间隔 (秒, 默认 25): " keepalive
-    [ -z "$keepalive" ] && keepalive=25
-
-    read -p "预共享密钥 (PSK): " psk
+    echo -e "\n${GOLD}✧ [第7步] 契约符号与信令端口 (PSK & Signaling)${NC}"
+    read -p "预共享密钥 (PSK, 建议设个复杂的暗号): " psk
     [ -z "$psk" ] && psk="NekoMagic_Default_PSK"
 
-    read -p "是否配置本地信令监听端口? (留空不开启): " lsig_port
+    read -p "是否为该接口配置专属信令监听端口? (留空则使用全局或随机): " lsig_port
     [ -z "$lsig_port" ] && local_signal_port="null" || local_signal_port="$lsig_port"
 
-    read -p "是否开启 SOCKS5 本端服务? (输入端口号, 留空不开启): " s5_port
+    echo -e "\n${GOLD}✧ [第8步] SOCKS5 代理神力 (Optional Proxy)${NC}"
+    read -p "是否在本端开启 SOCKS5 代理? (输入端口号如 1080, 留空跳过): " s5_port
     if [ -z "$s5_port" ]; then
         socks5_port="null"; s5_local="true"; s5_loop="false"
     else
         socks5_port="$s5_port"
-        read -p "127.0.0.1 监听? (y/n, 默认 y): " s5_l_c
+        read -p "是否仅限 127.0.0.1 访问? (y/n, 默认 y): " s5_l_c
         [ "$s5_l_c" == "n" ] && s5_local="false" || s5_local="true"
-        read -p "Loopback 监听? (y/n, 默认 n): " s5_loop_c
+        read -p "是否允许通过 Loopback 魔法共享? (y/n, 默认 n): " s5_loop_c
         [ "$s5_loop_c" == "y" ] && s5_loop="true" || s5_loop="false"
     fi
 
@@ -727,35 +771,36 @@ function create_config() {
 }
 
 function manage_keys() {
-    echo -e "\n${PINK}--- NekoLink 密钥管理魔法 ---${NC}"
-    read -p "请输入要管理的接口名称 ( 默认 nekotun0 ): " iface
+    echo -e "\n${PURPLE}${BOLD}--- ✧ NekoLink 密钥管理密室 ✧ ---${NC}"
+    read -p "请输入要打理的队员接口名称 ( 默认 nekotun0 ): " iface
     [ -z "$iface" ] && iface="nekotun0"
     
     key_file="$CONFIG_DIR/$iface.key"
     pub_file="$CONFIG_DIR/$iface.pub"
 
-    echo -e "${CYAN}1. 查看当前密钥"
-    echo "2. 更换/重置密钥 (在线更换)"
-    echo "3. 返回主菜单${NC}"
-    read -p "请选择数字 [1-3]: " km_choice
+    echo -e "${CYAN}请选择处理密钥的方式：${NC}"
+    echo -e "  ${GOLD}1.${NC} 偷看当前队员的秘密 ${GRAY}(Show Keys)${NC}"
+    echo -e "  ${GOLD}2.${NC} 替换/重置密钥魔法 ${GRAY}(Reset Keys)${NC}"
+    echo -e "  ${GOLD}3.${NC} 悄悄离开喵 ${GRAY}(Back)${NC}"
+    read -p "请选择魔法代号 [1-3]: " km_choice
 
     case $km_choice in
         1)
             if [ -f "$key_file" ]; then
-                echo -e "${PINK}私钥: ${NC}$(cat $key_file)"
-                echo -e "${PINK}公钥: ${NC}$(cat $pub_file 2>/dev/null || echo '尚未生成')"
+                echo -e "${PINK}🗝️ 队员私钥: ${BOLD}$(cat $key_file)${NC}"
+                echo -e "${PINK}📜 队员公钥: ${BOLD}$(cat $pub_file 2>/dev/null || echo '尚未生成')${NC}"
             else
-                echo -e "${RED}喵？没找到这个接口的密钥文件。${NC}"
+                echo -e "${RED}喵呜... 没找到这个队员的秘密文件喵。${NC}"
             fi
             ;;
         2)
-            echo -e "${RED}警告：更换密钥会导致当前连接断开，并需要重新与队友交换公钥喵！${NC}"
-            read -p "确定要更换吗？(y/n): " confirm
+            echo -e "${RED}${BOLD}⚠ 严重警告：${NC}${RED}更换密钥会导致魔法链路断开，且需要重新与所有小伙伴交换公钥喵！${NC}"
+            read -p "主人真的确定要重塑密钥吗？(y/n): " confirm
             if [ "$confirm" == "y" ]; then
                 rm -f "$key_file" "$pub_file"
-                echo -e "${PINK}旧密钥已驱散！正在尝试重启服务以注入新魔法...${NC}"
-                systemctl restart nekolink || echo "请手动重启 nekolink-ctl 喵！"
-                echo -e "${PINK}新密钥将在启动时自动生成喵！${NC}"
+                echo -e "${PINK}旧密钥已彻底驱散！正在重新注入新魔法...${NC}"
+                systemctl restart nekolink || echo -e "${CYAN}请主人待会儿手动唤醒 nekolink-ctl 喵！${NC}"
+                echo -e "${PINK}新密钥将在下一次觉醒时自动萌发喵！${NC}"
             fi
             ;;
         *) return ;;
@@ -1173,6 +1218,43 @@ function diagnose_mullvad_tcp() {
 }
 
 
+function show_live_dashboard() {
+    while true; do
+        clear
+        print_banner
+        echo -e "${PURPLE}${BOLD}--- ✧ 实时魔法监控看板 ✧ ---${NC}"
+        echo -e "${GRAY}(采集频率: 2s, 按 'q' 键返回大厅)${NC}\n"
+        
+        # 核心状态
+        echo -e "${GOLD}[ 核心状态 ]${NC}"
+        if systemctl is-active --quiet nekolink; then
+            echo -e "  服务状态: ${GREEN}● 活跃中 (Running)${NC}"
+        else
+            echo -e "  服务状态: ${RED}○ 已沉睡 (Stopped)${NC}"
+        fi
+        
+        echo -e "\n${GOLD}[ 魔法链路 ]${NC}"
+        # 获取 ctl status 并修饰喵
+        nekolink-ctl status 2>/dev/null | head -n 30 | sed 's/^/  /' || echo -e "  ${RED}无法获取详细状态喵...${NC}"
+        
+        echo -e "\n${GOLD}[ 流量统计 ]${NC}"
+        if command -v ip >/dev/null; then
+             # 提取 RX/TX 数据并萌化喵
+             ip -s link show | grep -A 1 "neko" | grep -v "link/none" | sed 's/RX: bytes  packets  errors  dropped overrun mcast/  📥 接收 (RX):/' | sed 's/TX: bytes  packets  errors  dropped carrier collsns/  📤 发送 (TX):/' | sed 's/^/  /' || echo -e "  ${GRAY}暂无活跃隧道流量数据喵${NC}"
+        else
+             echo -e "  ${GRAY}缺少 ip 命令，无法统计流量喵${NC}"
+        fi
+
+        echo -e "\n${PINK}★ 请主人放心，一切都在猫娘的掌控之中喵！(〃'▽'〃)${NC}"
+        
+        # 等待输入并刷新
+        if read -t 2 -n 1 key && [[ $key == "q" ]]; then
+            break
+        fi
+    done
+}
+
+
 while true; do
     show_menu
     case $choice in
@@ -1190,10 +1272,10 @@ while true; do
             systemctl restart nekolink
             echo -e "${PINK}重启指令已发送喵！可以使用选项 7 查看最新状态。${NC}"
             ;;
-        7) nekolink status ;;
+        7) show_live_dashboard ;;
         8) manage_keys ;;
         9) check_and_fix_configs ;;
-        10) ls -l "$CONFIG_DIR"/*.json ;;
+        10) ls -lh "$CONFIG_DIR"/*.json ;;
         11)
             show_advanced_menu
             case "$adv_choice" in
@@ -1207,11 +1289,11 @@ while true; do
             esac
             ;;
         12)
-            echo -e "${PINK}下次再见喵！(〃'▽'〃)${NC}"
+            echo -e "${PINK}下次再见喵！保持次元壁稳固喵！(〃'▽'〃)${NC}"
             exit 0
             ;;
         *)
-            echo -e "${RED}喵？无效的选择。${NC}"
+            echo -e "${RED}喵？无效的选择。请仔细检阅魔法清单喵。${NC}"
             ;;
     esac
 done

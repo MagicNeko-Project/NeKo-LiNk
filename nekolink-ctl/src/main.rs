@@ -1368,24 +1368,29 @@ async fn run_global_udp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                     // 跳过非 UDP 模式、空公钥、以及 WireGuard 兼容模式的接口喵
                     if state.config.mode != "udp" || state.pub_key.as_bytes() == &[0u8; 32] || state.config.native_wg_compat { continue; }
                     
-                    let established = get_established_peers(&state.config.interface).await;
-                    if !state.config.mesh_mode && !established.is_empty() { continue; }
+                    // 仅在非服务端模式（有 Peer Endpoint）或 Mesh 模式下主动发起信令喵
+                    let is_client = !state.config.peers.is_empty() && state.config.peers.iter().any(|p| !p.endpoint.is_empty());
+                    if !is_client && !state.config.mesh_mode { continue; }
 
+                    let established = get_established_peers(&state.config.interface).await;
+                    
                     let cipher = derive_cipher(&state.config.psk);
                     let msg_base = state.pub_key.as_bytes().to_vec();
                     for peer in &state.config.peers {
-                        let current_mtu = if state.config.mtu == Some(0) || state.config.mesh_mode {
-                            get_interface_mtu(&state.config.interface).unwrap_or(1420)
-                        } else {
-                            get_interface_mtu(&state.config.interface).unwrap_or(1420)
-                        };
+                        if peer.endpoint.is_empty() { continue; }
+
+                        // 如果非 Mesh 模式且该对端已建立连接，则跳过信令（Smart Halt 喵）
+                        if !state.config.mesh_mode && peer.public_key.as_ref().map_or(false, |pk| established.contains(pk)) { continue; }
+
+                        let current_mtu = get_interface_mtu(&state.config.interface).unwrap_or(1420);
 
                         // 端口优先级: peer > interface > global 喵
                         let target_port = peer.signal_port
                             .or(state.config.signal_port)
                             .unwrap_or(state.global_config.signal_port);
 
-                        if target_port != signal_port {
+                        // 只有当目标端口匹配当前 Socket 监听端口时才通过此 Socket 发送喵
+                        if target_port != signal_port && signal_port != 0 {
                             continue;
                         }
 
@@ -1407,7 +1412,6 @@ async fn run_global_udp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                             let mut msg = msg_base.clone();
                             msg.extend_from_slice(&current_mtu.to_be_bytes());
                             msg.extend_from_slice(&actual_tunnel_port.to_be_bytes());
-                            // UDP 模式不需要 Phantun 端口喵
 
                             let mut nonce_bytes = [0u8; 12];
                             OsRng.fill_bytes(&mut nonce_bytes);
@@ -1446,13 +1450,13 @@ async fn run_global_udp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                         // 跳过非 UDP 模式和 WireGuard 兼容模式的接口喵
                         if state.config.mode != "udp" || state.config.native_wg_compat { continue; }
                         let cipher = derive_cipher(&state.config.psk);
-                                if let Ok(decrypted) = cipher.decrypt(nonce, encrypted_part) {
-                                    if decrypted.len() >= 36 {
-                                        let peer_pub_key = BASE64.encode(&decrypted[..32]);
-                                        let peer_mtu = Some(u16::from_be_bytes([decrypted[32], decrypted[33]]));
-                                        let peer_tunnel_port = u16::from_be_bytes([decrypted[34], decrypted[35]]);
-                                        let peer_flags = if decrypted.len() >= 37 { decrypted[36] } else { 0 };
-                                
+                        if let Ok(decrypted) = cipher.decrypt(nonce, encrypted_part) {
+                            if decrypted.len() >= 36 {
+                                let peer_pub_key = BASE64.encode(&decrypted[..32]);
+                                let peer_mtu = Some(u16::from_be_bytes([decrypted[32], decrypted[33]]));
+                                let peer_tunnel_port = u16::from_be_bytes([decrypted[34], decrypted[35]]);
+                                let _peer_flags = if decrypted.len() >= 37 { decrypted[36] } else { 0 };
+                        
                                 if let Some(mtu) = peer_mtu {
                                     let mut lock = PEER_MTU_MAP.get_or_init(|| tokio::sync::Mutex::new(HashMap::new())).lock().await;
                                     let peer_mtus = lock.entry(state.config.interface.clone()).or_default();
@@ -1468,41 +1472,41 @@ async fn run_global_udp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                                     continue;
                                 }
 
-                                 let mut endpoint = addr.ip().to_string();
-                                 if peer_tunnel_port > 0 {
-                                     endpoint = format!("{}:{}", endpoint, peer_tunnel_port);
-                                 }
+                                let mut endpoint = addr.ip().to_string();
+                                if peer_tunnel_port > 0 {
+                                    endpoint = format!("{}:{}", endpoint, peer_tunnel_port);
+                                }
 
-                                 println!("喵！{} (UDP) 握手处理成功：{} -> {}", signal_port, endpoint, state.config.interface);
-                                 
-                                 // 寻找本地配置中对应的 Peer 喵
-                                 let peer_config = state.config.peers.iter().find(|p| p.public_key.as_deref() == Some(&peer_pub_key));
-                                 let peer_mode = peer_config.and_then(|p| p.mode.as_ref());
+                                println!("喵！{} (UDP) 握手处理成功：{} -> {}", signal_port, endpoint, state.config.interface);
+                                
+                                // 寻找本地配置中对应的 Peer 模式喵
+                                let peer_config = state.config.peers.iter().find(|p| p.public_key.as_deref() == Some(&peer_pub_key));
+                                let peer_mode = peer_config.and_then(|p| p.mode.as_ref());
 
-                                 // UDP 模式不使用 Phantun，直接配置 peer 喵
-                                 let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0) || state.config.mesh_mode, &state.config.mode, 0, &state.config.psk, Some(state.client_sidecar.clone()), peer_mode).await;
+                                // 配置 Peer 喵
+                                let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0) || state.config.mesh_mode, &state.config.mode, 0, &state.config.psk, Some(state.client_sidecar.clone()), peer_mode).await;
                                 
-                                // 回回响应喵（UDP 模式不包含 Phantun 端口）
-                                let msg_base = state.pub_key.as_bytes().to_vec();
-                                let current_mtu = if state.config.mtu == Some(0) || state.config.mesh_mode {
-                                    get_interface_mtu(&state.config.interface).unwrap_or(1420)
-                                } else {
-                                    get_interface_mtu(&state.config.interface).unwrap_or(1420)
-                                };
-                                let actual_tunnel_port = get_actual_listen_port(&state.config.interface).unwrap_or(0);
-                                let mut resp_msg = msg_base;
-                                resp_msg.extend_from_slice(&current_mtu.to_be_bytes());
-                                resp_msg.extend_from_slice(&actual_tunnel_port.to_be_bytes());
-                                // 预留 1 字节 flags 喵
-                                let my_flags = if state.config.socks5_port.is_some() { 0x01 } else { 0x00 };
-                                resp_msg.push(my_flags);
-                                
-                                let mut nonce_bytes = [0u8; 12];
-                                OsRng.fill_bytes(&mut nonce_bytes);
-                                if let Ok(ciphertext) = cipher.encrypt(Nonce::from_slice(&nonce_bytes), resp_msg.as_slice()) {
-                                    let mut pkt = nonce_bytes.to_vec();
-                                    pkt.extend_from_slice(&ciphertext);
-                                    let _ = socket.send_to(&pkt, addr).await;
+                                // 服务端响应：只有当接收到的包不是响应包（或者处于 Mesh 模式主动握手阶段）才回发响应喵
+                                // 这里简化为：始终回发响应，除非已经建立了连接喵
+                                let established = get_established_peers(&state.config.interface).await;
+                                if state.config.mesh_mode || !established.contains(&peer_pub_key) {
+                                    let msg_base = state.pub_key.as_bytes().to_vec();
+                                    let current_mtu = get_interface_mtu(&state.config.interface).unwrap_or(1420);
+                                    let actual_tunnel_port = get_actual_listen_port(&state.config.interface).unwrap_or(0);
+                                    let mut resp_msg = msg_base;
+                                    resp_msg.extend_from_slice(&current_mtu.to_be_bytes());
+                                    resp_msg.extend_from_slice(&actual_tunnel_port.to_be_bytes());
+                                    
+                                    let my_flags = if state.config.socks5_port.is_some() { 0x01 } else { 0x00 };
+                                    resp_msg.push(my_flags);
+                                    
+                                    let mut nonce_bytes = [0u8; 12];
+                                    OsRng.fill_bytes(&mut nonce_bytes);
+                                    if let Ok(ciphertext) = cipher.encrypt(Nonce::from_slice(&nonce_bytes), resp_msg.as_slice()) {
+                                        let mut pkt = nonce_bytes.to_vec();
+                                        pkt.extend_from_slice(&ciphertext);
+                                        let _ = socket.send_to(&pkt, addr).await;
+                                    }
                                 }
                                 break;
                             }
@@ -1542,15 +1546,14 @@ async fn run_global_tcp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                 };
 
                 for state in current_states {
-                    let established = get_established_peers(&state.config.interface).await;
                     // 跳过空公钥、以及 WireGuard 兼容模式的接口喵
-                    if (!state.config.mesh_mode && !established.is_empty()) || state.pub_key.as_bytes() == &[0u8; 32] || state.config.native_wg_compat { continue; }
-                    if state.pub_key.as_bytes() == &[0u8; 32] || state.config.native_wg_compat {
-                        continue;
-                    }
-                    if state.pub_key.as_bytes() == &[0u8; 32] || state.config.native_wg_compat {
-                        continue;
-                    }
+                    if state.pub_key.as_bytes() == &[0u8; 32] || state.config.native_wg_compat { continue; }
+                    
+                    // 仅在非服务端模式（有 Peer Endpoint）或 Mesh 模式下主动发起信令喵
+                    let is_client = !state.config.peers.is_empty() && state.config.peers.iter().any(|p| !p.endpoint.is_empty());
+                    if !is_client && !state.config.mesh_mode { continue; }
+
+                    let established = get_established_peers(&state.config.interface).await;
                     // 仅处理 TCP 相关模式喵
                     if state.config.mode != "tcp" && state.config.mode != "mullvad-tcp" {
                         continue;
@@ -1558,9 +1561,13 @@ async fn run_global_tcp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
 
                     let cipher = derive_cipher(&state.config.psk);
                     let pub_key_bytes = state.pub_key.as_bytes().to_vec();
-                    let interface = state.config.interface.clone();
-                    
+                    let state_peers = state.config.peers.clone();
+
                     for peer in &state.config.peers {
+                        if peer.endpoint.is_empty() { continue; }
+
+                        // 如果非 Mesh 模式且该对端已建立连接，则跳过信令（Smart Halt 喵）
+                        if !state.config.mesh_mode && peer.public_key.as_ref().map_or(false, |pk| established.contains(pk)) { continue; }
                         // 端口优先级: peer > interface > global 喵
                         let target_port = peer.signal_port
                             .or(state.config.signal_port)
@@ -1707,57 +1714,45 @@ async fn run_global_tcp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
 
                                 for state in current_states {
                                     // 跳过非 TCP 模式和 WireGuard 兼容模式的接口喵
-                                    if state.config.mode != "tcp" && state.config.mode != "mullvad-tcp" || state.config.native_wg_compat { continue; }
+                                    if (state.config.mode != "tcp" && state.config.mode != "mullvad-tcp") || state.config.native_wg_compat { continue; }
                                     let cipher = derive_cipher(&state.config.psk);
                                     if let Ok(decrypted) = cipher.decrypt(nonce, encrypted_part) {
                                         if decrypted.len() >= 36 {
-                                             let peer_pub_key = BASE64.encode(&decrypted[..32]);
-                                             let peer_mtu = Some(u16::from_be_bytes([decrypted[32], decrypted[33]]));
-                                             let peer_tunnel_port = u16::from_be_bytes([decrypted[34], decrypted[35]]);
-                                             
-                                             let _peer_lower_port = 0;
+                                            let peer_pub_key = BASE64.encode(&decrypted[..32]);
+                                            let peer_mtu = Some(u16::from_be_bytes([decrypted[32], decrypted[33]]));
+                                            let peer_tunnel_port = u16::from_be_bytes([decrypted[34], decrypted[35]]);
                                             
-                                            if peer_tunnel_port == 0 && state.config.mode != "ip" {
-                                                continue;
-                                            }
                                             let mut endpoint = addr.ip().to_string();
                                             if peer_tunnel_port > 0 {
                                                 endpoint = format!("{}:{}", endpoint, peer_tunnel_port);
                                             }
 
-                                             if let Some(mtu) = peer_mtu {
-                                                 let mut lock = PEER_MTU_MAP.get_or_init(|| tokio::sync::Mutex::new(HashMap::new())).lock().await;
-                                                 let peer_mtus = lock.entry(state.config.interface.clone()).or_default();
-                                                 peer_mtus.insert(peer_pub_key.clone(), mtu);
-                                                 drop(lock);
+                                            if let Some(mtu) = peer_mtu {
+                                                let mut lock = PEER_MTU_MAP.get_or_init(|| tokio::sync::Mutex::new(HashMap::new())).lock().await;
+                                                let peer_mtus = lock.entry(state.config.interface.clone()).or_default();
+                                                peer_mtus.insert(peer_pub_key.clone(), mtu);
+                                                drop(lock);
 
-                                                 if state.config.mesh_mode || state.config.mtu == Some(0) {
-                                                     let _ = sync_lowest_mtu(&state.config.interface).await;
-                                                 }
-                                             }
+                                                if state.config.mesh_mode || state.config.mtu == Some(0) {
+                                                    let _ = sync_lowest_mtu(&state.config.interface).await;
+                                                }
+                                            }
 
-                                             // 寻找本地配置中对应的 Peer 喵
-                                             let peer_config = state.config.peers.iter().find(|p| p.public_key.as_deref() == Some(&peer_pub_key));
-                                             let peer_mode = peer_config.and_then(|p| p.mode.as_ref());
-
-                                             // 使用对端的下层端口（如果协商到的话）
-                                             let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0) || state.config.mesh_mode, &state.config.mode, 0, &state.config.psk, Some(state.client_sidecar.clone()), peer_mode).await;
+                                            println!("喵！{} (TCP) 握手处理成功：{} -> {}", signal_port, endpoint, state.config.interface);
                                             
-                                            // TCP 握手响应喵！直接在当前流回发
+                                            let peer_config = state.config.peers.iter().find(|p| p.public_key.as_deref() == Some(&peer_pub_key));
+                                            let peer_mode = peer_config.and_then(|p| p.mode.as_ref());
+
+                                            let _ = configure_peer(&state.config.interface, &peer_pub_key, endpoint, state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0) || state.config.mesh_mode, &state.config.mode, 0, &state.config.psk, Some(state.client_sidecar.clone()), peer_mode).await;
+                                            
                                             let msg_base = state.pub_key.as_bytes().to_vec();
-                                            let current_mtu = if state.config.mtu == Some(0) { 
-                                                get_auto_mtu(&addr.ip().to_string(), &state.config.mode).await 
-                                            } else { 
-                                                get_interface_mtu(&state.config.interface).unwrap_or(1420) 
-                                            };
-                                             let actual_tunnel_port = if state.config.mode == "mullvad-tcp" { state.config.mullvad_tcp_port } else { get_actual_listen_port(&state.config.interface).unwrap_or(0) };
-                                             let mut resp_msg = msg_base;
-                                             resp_msg.extend_from_slice(&current_mtu.to_be_bytes());
-                                             resp_msg.extend_from_slice(&actual_tunnel_port.to_be_bytes());
-                                             // 预留 1 字节 flags 喵
-                                             let my_flags = if state.config.socks5_port.is_some() { 0x01 } else { 0x00 };
-                                             resp_msg.push(my_flags);
-                                             // 原本的 Fake-TCP 端口逻辑已移除喵
+                                            let current_mtu = get_interface_mtu(&state.config.interface).unwrap_or(1420);
+                                            let actual_tunnel_port = if state.config.mode == "mullvad-tcp" { state.config.mullvad_tcp_port } else { get_actual_listen_port(&state.config.interface).unwrap_or(0) };
+                                            let mut resp_msg = msg_base;
+                                            resp_msg.extend_from_slice(&current_mtu.to_be_bytes());
+                                            resp_msg.extend_from_slice(&actual_tunnel_port.to_be_bytes());
+                                            let my_flags = if state.config.socks5_port.is_some() { 0x01 } else { 0x00 };
+                                            resp_msg.push(my_flags);
                                             
                                             let mut nonce_bytes = [0u8; 12];
                                             OsRng.fill_bytes(&mut nonce_bytes);
@@ -1767,7 +1762,6 @@ async fn run_global_tcp_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                                                 use tokio::io::AsyncWriteExt;
                                                 let _ = stream.write_all(&pkt).await;
                                                 let _ = stream.flush().await;
-                                                println!("喵！已向对端 {} 回发 ACK 完成喵。", addr);
                                             }
                                             break;
                                         }
@@ -1811,17 +1805,22 @@ async fn run_global_raw_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                     let st_proto = state.config.ip_protocol.unwrap_or(141);
                     // 跳过非 Raw IP 模式、协议不匹配、空公钥、以及 WireGuard 兼容模式的接口喵
                     if state.config.mode != "ip" || st_proto != proto || state.pub_key.as_bytes() == &[0u8; 32] || state.config.native_wg_compat { continue; }
+                    
+                    // 仅在非服务端模式（有 Peer Endpoint）或 Mesh 模式下主动发起信令喵
+                    let is_client = !state.config.peers.is_empty() && state.config.peers.iter().any(|p| !p.endpoint.is_empty());
+                    if !is_client && !state.config.mesh_mode { continue; }
+
                     let established = get_established_peers(&state.config.interface).await;
-                    if !state.config.mesh_mode && !established.is_empty() { continue; }
 
                     let cipher = derive_cipher(&state.config.psk);
                     let pub_key_bytes = state.pub_key.as_bytes().to_vec();
                     for peer in &state.config.peers {
-                        let current_mtu = if state.config.mtu == Some(0) {
-                            get_auto_mtu(&peer.endpoint, "ip").await
-                        } else {
-                            get_interface_mtu(&state.config.interface).unwrap_or(1420)
-                        };
+                        if peer.endpoint.is_empty() { continue; }
+
+                        // 如果非 Mesh 模式且该对端已建立连接，则跳过信令（Smart Halt 喵）
+                        if !state.config.mesh_mode && peer.public_key.as_ref().map_or(false, |pk| established.contains(pk)) { continue; }
+
+                        let current_mtu = get_interface_mtu(&state.config.interface).unwrap_or(1420);
                         let ip_opt = if let Ok(ip) = peer.endpoint.parse::<IpAddr>() {
                             Some(ip)
                         } else if let Ok(sa) = peer.endpoint.parse::<SocketAddr>() {
@@ -1840,6 +1839,11 @@ async fn run_global_raw_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
                         if let Some(ip) = ip_opt {
                             let mut msg = pub_key_bytes.clone();
                             msg.extend_from_slice(&current_mtu.to_be_bytes());
+                            // RawIP 不需要隧道端口
+                            msg.extend_from_slice(&0u16.to_be_bytes());
+                            let my_flags = if state.config.socks5_port.is_some() { 0x01 } else { 0x00 };
+                            msg.push(my_flags);
+
                             let mut nonce_bytes = [0u8; 12];
                             OsRng.fill_bytes(&mut nonce_bytes);
                             if let Ok(ciphertext) = cipher.encrypt(Nonce::from_slice(&nonce_bytes), msg.as_slice()) {
@@ -1909,7 +1913,11 @@ async fn run_global_raw_signaling_dynamic(instances: Arc<tokio::sync::RwLock<Has
 
                                          let _ = configure_peer(&state.config.interface, &peer_pub_key, ip_addr.to_string(), state.config.persistent_keepalive, peer_mtu, state.config.mtu == Some(0) || state.config.mesh_mode, "ip", 0, &state.config.psk, Some(state.client_sidecar.clone()), peer_mode).await;
  
-                                         // Raw IP 响应喵！
+                                         // Raw IP 响应喵！只有非 Mesh 且未建立连接时才回发喵
+                                          let established = get_established_peers(&state.config.interface).await;
+                                          if !state.config.mesh_mode && established.contains(&peer_pub_key) {
+                                              break;
+                                          }
                                           let msg_base = state.pub_key.as_bytes().to_vec();
                                           let current_mtu = if state.config.mtu == Some(0) || state.config.mesh_mode {
                                               get_interface_mtu(&state.config.interface).unwrap_or(1420)
