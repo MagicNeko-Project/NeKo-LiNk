@@ -491,7 +491,7 @@ function edit_config() {
     esac
 
     read -p "开启 P2P Mesh 全网状模式? (当前: $mesh_mode, [y/n], 直接回车保持不变): " mesh_c
-    case "$mesh_c" in
+    case "$mesh_choice" in
         y) mesh_mode="true" ;;
         n) mesh_mode="false" ;;
         *) mesh_mode="$mesh_mode" ;;
@@ -518,7 +518,17 @@ function edit_config() {
     echo -e "\n${PURPLE}${BOLD}--- ✧ 招募与编排队员对端 (Peers) ✧ ---${NC}"
     read -p "是否需要打理对端队员列表? (y/n, 默认 n): " manage_p_choice
     if [ "$manage_p_choice" == "y" ]; then
-        peers_json=$(add_peers_interactively "$curr_peers")
+        peers_json=$(add_peers_interactively "$curr_peers" "$mode" "$dual_stack")
+        # 如果增加了 IP Peer 但是没开双栈，再次确认
+        if echo "$peers_json" | jq -e '.[] | select(.mode == "ip")' >/dev/null && [ "$dual_stack" != "true" ] && [ "$mode" != "ip" ]; then
+             echo -e "\n${GOLD}💡 侦测到您添加了 RawIP 模式的队员，但当前接口未开启 RawIP 监听。${NC}"
+             read -p "是否现在开启辅助 RawIP 监听以支持握手？[y/n, 默认 y]: " auto_dual
+             if [ "$auto_dual" != "n" ]; then
+                 dual_stack="true"
+                 read -p "请输入辅助 RawIP 协议号 (默认 141): " proto_choice
+                 [ -z "$proto_choice" ] && raw_ip_protocol=141 || raw_ip_protocol="$proto_choice"
+             fi
+        fi
     else
         peers_json="$curr_peers"
     fi
@@ -561,6 +571,8 @@ function print_peers() {
 
 function add_peers_interactively() {
     local existing_peers="${1:-[]}"
+    local main_mode="${2:-udp}"
+    local is_dual="${3:-false}"
     local peers="$existing_peers"
     [ "$peers" == "null" ] && peers="[]"
     
@@ -588,7 +600,7 @@ function add_peers_interactively() {
                 [ -z "$p_sig_port" ] && p_sig_port=12580
                 
                 echo -e "${CYAN}请选择与该伙伴通讯的魔法属性：${NC}" >&2
-                echo -e "  ${GOLD}1.${NC} 跟随全局魔法 ${GRAY}(Use Global Default)${NC}" >&2
+                echo -e "  ${GOLD}1.${NC} 跟随全局魔法 ${GRAY}(Use Global Default: $main_mode)${NC}" >&2
                 echo -e "  ${GOLD}2.${NC} 强制使用 UDP 术式" >&2
                 echo -e "  ${GOLD}3.${NC} 强制使用 RawIP 秘术 (ip)" >&2
                 echo -e "  ${GOLD}4.${NC} 强制使用 TCP 护盾 (mullvad-tcp)" >&2
@@ -596,7 +608,11 @@ function add_peers_interactively() {
                 p_mode="null"
                 case "$p_mode_choice" in
                     2) p_mode="udp" ;;
-                    3) p_mode="ip" ;;
+                    3) p_mode="ip" 
+                       if [ "$main_mode" != "ip" ] && [ "$is_dual" != "true" ]; then
+                           echo -e "${GOLD}提示：主模式非 IP 且未开启双栈，添加此队员后建议稍后开启辅助 RawIP 监听喵！${NC}" >&2
+                       fi
+                       ;;
                     4) p_mode="mullvad-tcp" ;;
                 esac
                 
@@ -652,7 +668,12 @@ function create_config() {
         2|3)
             [ "$role_choice" == "3" ] && role="relay" || role="client"
             echo -e "${PINK}--- 配置上游对端 (Peers) ---${NC}"
-            peers_json=$(add_peers_interactively "[]")
+            # 临时初始化一些变量给 add_peers 用
+            temp_mode="udp"
+            [ "$mode_choice" == "1" ] && temp_mode="ip"
+            [ "$mode_choice" == "3" ] && temp_mode="mullvad-tcp"
+            
+            peers_json=$(add_peers_interactively "[]" "$temp_mode" "false")
             if [ "$role" == "relay" ]; then
                 echo -e "${PINK}现在请配置本地监听端口，以便下游节点连接喵！${NC}"
                 set_global_signal_port
@@ -695,20 +716,24 @@ function create_config() {
         *)
             mode="udp"
             proto="null"
+            dual_stack="false"
+            raw_ip_protocol="null"
+            
+            # 检查是否有 IP Peer，如果有则默认建议开启双栈
+            if echo "$peers_json" | jq -e '.[] | select(.mode == "ip")' >/dev/null; then
+                echo -e "${GOLD}💡 侦测到您添加了 RawIP 模式的队员。建议开启辅助 RawIP 监听以支持握手喵！${NC}"
+                read -p "是否开启辅助 RawIP 监听? [y/n] (默认 y): " dual_c
+                [ -z "$dual_c" ] && dual_c="y"
+                if [ "$dual_c" == "y" ]; then
+                    dual_stack="true"
+                    read -p "请输入辅助 RawIP 协议号 ( 默认 141 ): " proto_choice
+                    [ -z "$proto_choice" ] && raw_ip_protocol=141 || raw_ip_protocol="$proto_choice"
+                fi
+            fi
+            
             echo -e "${GRAY}魔法贴士：设为 0 可以让系统在握手时自动分配最合适的监听位置喵。${NC}"
             read -p "请输入 UDP 监听端口 ( 0 为自动, 默认 0 ): " listen_port
             [ -z "$listen_port" ] && listen_port=0
-            
-            echo -e "${GRAY}魔法贴士：开启辅助 RawIP 监听可以同时接纳 IP 协议的队友喵！${NC}"
-            read -p "是否同时开启辅助 RawIP 监听? [y/n] (默认 n): " dual_c
-            if [ "$dual_c" == "y" ]; then
-                dual_stack="true"
-                read -p "请输入辅助 RawIP 协议号 (默认 141): " proto_choice
-                [ -z "$proto_choice" ] && raw_ip_protocol=141 || raw_ip_protocol="$proto_choice"
-            else
-                dual_stack="false"
-                raw_ip_protocol="null"
-            fi
             ;;
     esac
 
