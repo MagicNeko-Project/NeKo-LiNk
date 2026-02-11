@@ -1258,21 +1258,6 @@ async fn parse_socks5_udp_header(buf: &[u8], interface: &str) -> Result<(usize, 
     }
 }
 
-fn append_socks5_udp_header(buf: &mut Vec<u8>, addr: SocketAddr) {
-    buf.extend_from_slice(&[0x00, 0x00, 0x00]); // RSV + FRAG
-    match addr {
-        SocketAddr::V4(v4) => {
-            buf.push(0x01); // ATYP IPv4
-            buf.extend_from_slice(&v4.ip().octets());
-            buf.extend_from_slice(&v4.port().to_be_bytes());
-        }
-        SocketAddr::V6(v6) => {
-            buf.push(0x04); // ATYP IPv6
-            buf.extend_from_slice(&v6.ip().octets());
-            buf.extend_from_slice(&v6.port().to_be_bytes());
-        }
-    }
-}
 
 async fn connect_via_interface(interface: &str, target: &str, local_ips: &[IpAddr]) -> Result<TcpStream> {
     // 异步 DNS 解析喵
