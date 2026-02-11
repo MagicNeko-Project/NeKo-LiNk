@@ -31,7 +31,7 @@ use libc::{iovec, mmsghdr, msghdr, recvmmsg, sendmmsg, sockaddr_storage, MSG_DON
 
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
-use std::io::{self};
+use std::io::{self, Write};
 use std::mem::MaybeUninit;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::os::unix::io::AsRawFd;
@@ -1042,7 +1042,7 @@ impl Device {
                                 None => continue,
                             };
                             
-                            let src_buf = &mut t.batch_bufs[i][..pkt_len];
+                            // 移除对整个 batch_bufs[i] 的长久借用喵
 
                             // NekoLink Phase 3: 解析 CMSG 获取 GRO segment size
                             let mut gro_segment_size = 0;
@@ -1077,25 +1077,26 @@ impl Device {
                             while current_offset < pkt_len {
                                 let remaining = pkt_len - current_offset;
                                 let this_len = if remaining > gro_segment_size { gro_segment_size } else { remaining };
-                                let segment_buf = &src_buf[current_offset..current_offset+this_len];
-                                current_offset += this_len;
-
-                                let mut offset = 0;
                                 // NekoLink: 处理 IP 层头部 (Raw IP 模式) 喵
-                                // 喵！通过 to_vec() 拷贝出一份独立数据，以此释放对 ThreadData t 的借用锁定
-                                let segment_data = segment_buf.to_vec();
-                                if is_raw {
-                                    if addr.ip().is_ipv4() {
-                                        if segment_data.len() < 20 { continue; }
-                                        let ihl = (segment_data[0] & 0x0f) as usize * 4;
-                                        if segment_data.len() < ihl { continue; }
-                                        offset = ihl;
-                                    } else if addr.ip().is_ipv6() {
-                                        if segment_data.len() < 40 { continue; }
-                                        offset = 40; // IPv6 固定头部 40 字节喵
+                                let (offset, segment_data) = {
+                                    let segment_buf = &t.batch_bufs[i][current_offset..current_offset+this_len];
+                                    let mut off = 0;
+                                    if is_raw {
+                                        if addr.ip().is_ipv4() {
+                                            if segment_buf.len() < 20 { continue; }
+                                            let ihl = (segment_buf[0] & 0x0f) as usize * 4;
+                                            if segment_buf.len() < ihl { continue; }
+                                            off = ihl;
+                                        } else if addr.ip().is_ipv6() {
+                                            if segment_buf.len() < 40 { continue; }
+                                            off = 40; // IPv6 固定头部 40 字节喵
+                                        }
                                     }
-                                }
+                                    (off, segment_buf.to_vec())
+                                };
+                                // 对 t 的借用在上面代码块结束时已释放喵
 
+                                current_offset += this_len;
                                 let packet = &segment_data[offset..];
                             let parsed_packet = match rate_limiter.verify_packet(
                                 Some(addr.ip()),
